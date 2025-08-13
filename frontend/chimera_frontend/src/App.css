@@ -1,0 +1,79 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #282c34;
+  color: white;
+}
+
+.App {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.App-header {
+  background-color: #1c1f26;
+  padding: 10px;
+  border-bottom: 1px solid #444;
+}
+
+.controls {
+  padding: 20px;
+  background-color: #20232a;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  align-items: center;
+}
+
+.network-selector, .actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+select, input, button {
+  padding: 8px 12px;
+  border-radius: 5px;
+  border: 1px solid #444;
+  background-color: #333;
+  color: white;
+  font-size: 1em;
+}
+
+button {
+  cursor: pointer;
+  background-color: #61dafb;
+  color: #20232a;
+  font-weight: bold;
+  border: none;
+}
+
+button:hover {
+  background-color: #21a1f2;
+}
+
+input {
+  width: 300px;
+}
+
+.status-bar {
+  margin-top: 10px;
+  color: #61dafb;
+  min-height: 20px;
+}
+
+.visualizer-container {
+  flex-grow: 1;
+  background-color: #1a1c21;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+}
