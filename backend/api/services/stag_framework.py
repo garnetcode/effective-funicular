@@ -92,19 +92,28 @@ class STAG_Framework:
         return serialize_level(self.tree)
 
     @classmethod
-    def from_serializable_structure(cls, structure, **kwargs):
+    def from_serializable_structure(cls, structure, faiss_index=None, **kwargs):
         """
         Creates a STAG instance from a serialized structure.
+
+        Args:
+            structure (dict): The serialized tree structure.
+            faiss_index: A pre-loaded FAISS index for the root GNG.
+            **kwargs: Hyperparameters.
         """
-        def deserialize_level(level_dict):
-            gng = GNG_Engine.from_state(level_dict['gng_state'], **kwargs)
+        # This is a simplified implementation for a single-level STAG (one GNG).
+        # A full implementation would need to handle indexes for each GNG in the tree.
+        def deserialize_level(level_dict, index=None):
+            gng = GNG_Engine.from_state(level_dict['gng_state'], faiss_index=index, **kwargs)
             node = {
                 'gng': gng,
                 'parent_node_id': level_dict['parent_node_id'],
+                # Recursively call without the index for children
                 'children': [deserialize_level(child_dict) for child_dict in level_dict['children']]
             }
             return node
 
         stag = cls(structure['gng_state']['dimensions'], **kwargs)
-        stag.tree = deserialize_level(structure)
+        # Pass the loaded index only to the root level
+        stag.tree = deserialize_level(structure, index=faiss_index)
         return stag

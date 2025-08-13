@@ -10,8 +10,13 @@ from .stag_framework import STAG_Framework
 from .cortex import modules as cortex_modules
 from .action.modules import ActionHead
 
+try:
+    import faiss
+except ImportError:
+    faiss = None
+
 def _initialize_cortexes(configs, output_dim):
-    """Helper function to instantiate cortex modules from a config dict."""
+    # ... (same as before)
     cortexes = {}
     for cortex_id, config in configs.items():
         class_name = config['type']
@@ -26,8 +31,8 @@ def _initialize_cortexes(configs, output_dim):
             print(f"Warning: Could not initialize cortex '{cortex_id}' of type '{class_name}': {e}")
     return cortexes
 
+
 def softmax(x):
-    """Compute softmax values for each sets of scores in x."""
     e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
 
@@ -37,6 +42,7 @@ class ChimeraAgent:
         self.dimensions = dimensions
         self.n_actions = n_actions
         self.storage_path = os.path.join('backend', 'storage', f'{self.agent_id}.npz')
+        self.faiss_index_path = os.path.join('backend', 'storage', f'{self.agent_id}.faiss')
         self.hyperparams = hyperparams
         self.learning_rate = self.hyperparams.get('learning_rate', 0.01)
         self.gamma = self.hyperparams.get('gamma', 0.99)
@@ -53,10 +59,10 @@ class ChimeraAgent:
         self.episode_memory = []
 
     def save_state(self):
+        # Save main agent data to .npz file
         stag_state_json = json.dumps(self.stag.get_serializable_structure())
         cortex_configs_json = json.dumps(self.cortex_configs)
         hyperparams_json = json.dumps(self.hyperparams)
-
         state_data = {
             'agent_id': self.agent_id, 'dimensions': self.dimensions, 'n_actions': self.n_actions,
             'cortex_configs_json': cortex_configs_json, 'hyperparams_json': hyperparams_json,
@@ -66,7 +72,17 @@ class ChimeraAgent:
         }
         np.savez_compressed(self.storage_path, **state_data)
 
+        # Save the FAISS index to a separate file
+        if faiss and self.stag.tree['gng'].faiss_index:
+            faiss.write_index(self.stag.tree['gng'].faiss_index, self.faiss_index_path)
+
     def load_state(self):
+        # Load FAISS index first if it exists
+        loaded_faiss_index = None
+        if faiss and os.path.exists(self.faiss_index_path):
+            loaded_faiss_index = faiss.read_index(self.faiss_index_path)
+
+        # Load main agent data from .npz file
         with np.load(self.storage_path, allow_pickle=True) as data:
             self.dimensions = int(data['dimensions'])
             self.n_actions = int(data['n_actions'])
@@ -88,14 +104,17 @@ class ChimeraAgent:
 
             stag_state_json = str(data['stag_state_json'])
             stag_structure = json.loads(stag_state_json)
-            self.stag = STAG_Framework.from_serializable_structure(stag_structure, **self.hyperparams)
+            # Pass the pre-loaded index to the constructor
+            self.stag = STAG_Framework.from_serializable_structure(stag_structure, faiss_index=loaded_faiss_index, **self.hyperparams)
 
+    # ... rest of the methods are the same ...
     def perceive(self, cortex_id, raw_input):
         if cortex_id not in self.cortexes: raise ValueError(f"Cortex '{cortex_id}' not found.")
         return self.cortexes[cortex_id].process(raw_input)
 
     def get_internal_state_representation(self, input_embedding):
         stable_attractor = self.hopfield.recall(input_embedding)
+        # Assumes root GNG for now
         winner_id, _ = self.stag.tree['gng']._find_winners(stable_attractor)
         if winner_id is not None and winner_id in self.stag.tree['gng'].nodes:
             return self.stag.tree['gng'].nodes[winner_id]['weight']
