@@ -156,6 +156,26 @@ class ChimeraAgent:
     def record_experience(self, internal_state, action, reward):
         self.episode_memory.append({"state": internal_state, "action": action, "reward": reward})
 
+    def learn_from_experience(self, embedding):
+        """
+        Learns from a single sensory embedding in an unsupervised manner.
+        This updates the Hopfield and STAG/GNG components.
+        """
+        if not isinstance(embedding, np.ndarray):
+            embedding = np.array(embedding)
+
+        # 1. Update the Hopfield Core attractor landscape
+        self.hopfield.learn(embedding)
+
+        # 2. Update the topological map (STAG/GNG)
+        self.stag.process_input(embedding)
+
+        # Note: Saving the state after every single experience might be too slow
+        # for a real-world scenario, but for this API it ensures persistence.
+        self.save_state()
+
+        return {"status": "Unsupervised learning complete."}
+
     def train(self):
         if not self.episode_memory: return {"status": "No experiences to train on."}
 
