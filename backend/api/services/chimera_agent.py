@@ -75,6 +75,10 @@ class ChimeraAgent:
         self.episode_memory = []
 
     def save_state(self):
+        # Ensure the storage directory exists.
+        storage_dir = os.path.dirname(self.storage_path)
+        os.makedirs(storage_dir, exist_ok=True)
+
         # Save main agent data to .npz file
         stag_state_json = json.dumps(self.stag.get_serializable_structure(), cls=NumpyJSONEncoder)
         cortex_configs_json = json.dumps(self.cortex_configs, cls=NumpyJSONEncoder)
