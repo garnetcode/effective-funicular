@@ -109,9 +109,14 @@ class ChimeraAgent:
             self.cortex_configs = json.loads(str(data['cortex_configs_json']))
             self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
 
+            # Reconstruct Hopfield Core by mapping keys correctly.
+            # The hyperparams dictionary contains keys for all services, so we
+            # must pass only the ones relevant to the HopfieldCore.
             hopfield_state = {
-                'dimensions': self.dimensions, 'weights': data['hopfield_weights'],
-                **self.hyperparams
+                'dimensions': self.dimensions,
+                'weights': data['hopfield_weights'],
+                'learning_rate': self.hyperparams.get('learning_rate', 0.1),
+                'weight_decay': self.hyperparams.get('weight_decay', 0.01)
             }
             self.hopfield = HopfieldCore.from_state(hopfield_state)
             self.action_head = ActionHead(self.dimensions, self.n_actions)
