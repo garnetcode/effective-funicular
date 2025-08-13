@@ -163,3 +163,9 @@ class ChimeraAgent:
         self.episode_memory = []
         self.save_state()
         return {"status": "Training complete"}
+
+    def get_graph_structure(self):
+        """
+        Returns the hierarchical graph structure for frontend visualization.
+        """
+        return self.stag.get_serializable_structure()
