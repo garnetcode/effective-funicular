@@ -3,78 +3,80 @@ import json
 import numpy as np
 from django.test import TestCase
 from .services.hopfield_core import HopfieldCore
-from .services.cognitive_architecture_service import CognitiveArchitectureService, text_to_embedding
+from .services.chimera_agent import ChimeraAgent
+from .services.gng_engine import GNG_Engine
 
 class HopfieldCoreTest(TestCase):
     def test_learning_and_recall(self):
-        dimensions = 4
-        core = HopfieldCore(dimensions=dimensions)
-
-        # Two simple, orthogonal patterns
+        core = HopfieldCore(dimensions=4)
         pattern1 = np.array([1, 1, -1, -1])
         pattern2 = np.array([1, -1, 1, -1])
-
         core.learn(pattern1)
         core.learn(pattern2)
-
-        # Test recall with a noisy version of pattern1
         noisy_pattern1 = np.array([1, 1, -1, 1])
         recalled_pattern = core.recall(noisy_pattern1)
+        self.assertTrue(np.array_equal(pattern1, recalled_pattern))
 
-        self.assertTrue(np.array_equal(pattern1, recalled_pattern), "Should recall the correct pattern")
+class GNGOptimizationTest(TestCase):
+    def test_edge_utility_pruning(self):
+        """Tests that low-utility edges are pruned."""
+        gng = GNG_Engine(dimensions=2, n_iter_before_pruning=1, utility_prune_threshold=0.5)
+        # Manually create a graph
+        gng.nodes = {0: {'weight': np.array([0,0]), 'error': 0}, 1: {'weight': np.array([1,1]), 'error': 0}, 2: {'weight': np.array([2,2]), 'error': 0}}
+        # Edge (0,1) has high utility, edge (1,2) has low utility
+        gng.edges = {(0, 1, 0, 10), (1, 2, 0, 1)}
+
+        # Process an input to trigger pruning
+        gng.process_input(np.array([0.1, 0.1]))
+
+        edge_endpoints = {(e[0], e[1]) for e in gng.edges}
+        self.assertIn((0,1), edge_endpoints, "High-utility edge should remain.")
+        self.assertNotIn((1,2), edge_endpoints, "Low-utility edge should be pruned.")
+
+    def test_node_merging(self):
+        """Tests that close nodes are merged."""
+        gng = GNG_Engine(dimensions=2, n_iter_before_merging=1, merge_threshold=0.2)
+        # Manually create a graph with two very close nodes (0 and 2)
+        gng.nodes = {
+            0: {'weight': np.array([0.0, 0.0]), 'error': 1},
+            1: {'weight': np.array([5.0, 5.0]), 'error': 1},
+            2: {'weight': np.array([0.1, 0.1]), 'error': 1}
+        }
+        gng.edges = {(0, 1, 0, 5)} # Edge connecting one of the close nodes
+        initial_node_count = len(gng.nodes)
+
+        # Process an input to trigger merging
+        gng.process_input(np.array([2.0, 2.0]))
+
+        self.assertEqual(len(gng.nodes), initial_node_count - 1, "Node count should decrease by 1 after merge.")
+
+        # Check that the edge was re-routed to the new node
+        new_node_id = max(gng.nodes.keys()) # The new node will have the highest ID
+        edge_endpoints = {(e[0], e[1]) for e in gng.edges}
+        self.assertIn(tuple(sorted((1, new_node_id))), edge_endpoints, "Edge should be re-routed to the new merged node.")
+
 
 class CognitiveArchitectureServiceTest(TestCase):
     def setUp(self):
-        self.network_id = "test-network-123"
-        self.storage_path = os.path.join('backend', 'storage', f'{self.network_id}.json')
-
-        # Clean up any old test files before starting
-        if os.path.exists(self.storage_path):
-            os.remove(self.storage_path)
+        self.agent_id = "test-agent-123"
+        self.storage_path = os.path.join('backend', 'storage', f'{self.agent_id}.npz')
+        if os.path.exists(self.storage_path): os.remove(self.storage_path)
 
     def tearDown(self):
-        # Clean up test files after finishing
-        if os.path.exists(self.storage_path):
-            os.remove(self.storage_path)
+        if os.path.exists(self.storage_path): os.remove(self.storage_path)
 
     def test_creation_and_persistence(self):
-        """Tests if the service creates a state file on initialization."""
         self.assertFalse(os.path.exists(self.storage_path))
-        service = CognitiveArchitectureService(network_id=self.network_id, load_from_storage=False)
+        agent = ChimeraAgent(agent_id=self.agent_id, load_from_storage=False)
         self.assertTrue(os.path.exists(self.storage_path))
 
-    def test_learn_and_save(self):
-        """Tests if learning a pattern persists the state."""
-        service = CognitiveArchitectureService(network_id=self.network_id, load_from_storage=False)
+    def test_hyperparameter_persistence(self):
+        """Tests that GNG hyperparameters are saved and loaded."""
+        hyperparams = {'merge_threshold': 0.77, 'utility_prune_threshold': 0.88}
+        agent1 = ChimeraAgent(agent_id=self.agent_id, load_from_storage=False, **hyperparams)
 
-        initial_patterns_count = len(service.patterns)
-        initial_weights = np.copy(service.hopfield.weights)
-
-        service.learn_pattern("hello world")
-
-        self.assertEqual(len(service.patterns), initial_patterns_count + 1)
-        self.assertFalse(np.array_equal(initial_weights, service.hopfield.weights))
-
-        # Verify by loading from file
-        service2 = CognitiveArchitectureService(network_id=self.network_id, load_from_storage=True)
-        self.assertEqual(len(service2.patterns), initial_patterns_count + 1)
-        self.assertTrue(np.array_equal(service.hopfield.weights, service2.hopfield.weights))
-
-    def test_organize_and_save(self):
-        """Tests if organizing the network persists the state."""
-        service = CognitiveArchitectureService(network_id=self.network_id, dimensions=4, load_from_storage=False)
-        service.learn_pattern("pattern a")
-        service.learn_pattern("pattern b")
-
-        initial_stag_state = service.stag.get_serializable_structure()
-
-        service.organize_step()
-
-        final_stag_state = service.stag.get_serializable_structure()
-
-        # The organization step should change the GNG state (e.g., iterations, errors)
-        self.assertNotEqual(initial_stag_state, final_stag_state)
-
-        # Verify by loading from file
-        service2 = CognitiveArchitectureService(network_id=self.network_id, load_from_storage=True)
-        self.assertEqual(final_stag_state, service2.stag.get_serializable_structure())
+        agent2 = ChimeraAgent(agent_id=self.agent_id, load_from_storage=True)
+        # Check that the hyperparams were loaded into the GNG engine inside the STAG framework
+        gng_engine = agent2.stag.tree['gng']
+        self.assertEqual(gng_engine.merge_threshold, 0.77)
+        self.assertEqual(gng_engine.utility_prune_threshold, 0.88)
