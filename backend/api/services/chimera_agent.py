@@ -5,6 +5,20 @@
 import os
 import json
 import numpy as np
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """ Custom encoder for numpy data types """
+    def default(self, obj):
+        if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+                            np.int16, np.int32, np.int64, np.uint8,
+                            np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
 from .hopfield_core import HopfieldCore
 from .stag_framework import STAG_Framework
 from .cortex import modules as cortex_modules
@@ -62,9 +76,9 @@ class ChimeraAgent:
 
     def save_state(self):
         # Save main agent data to .npz file
-        stag_state_json = json.dumps(self.stag.get_serializable_structure())
-        cortex_configs_json = json.dumps(self.cortex_configs)
-        hyperparams_json = json.dumps(self.hyperparams)
+        stag_state_json = json.dumps(self.stag.get_serializable_structure(), cls=NumpyJSONEncoder)
+        cortex_configs_json = json.dumps(self.cortex_configs, cls=NumpyJSONEncoder)
+        hyperparams_json = json.dumps(self.hyperparams, cls=NumpyJSONEncoder)
         state_data = {
             'agent_id': self.agent_id, 'dimensions': self.dimensions, 'n_actions': self.n_actions,
             'cortex_configs_json': cortex_configs_json, 'hyperparams_json': hyperparams_json,
