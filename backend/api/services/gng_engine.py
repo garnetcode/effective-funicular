@@ -205,7 +205,7 @@ class GNG_Engine:
     def get_state(self):
         # NOTE: FAISS index is not serialized here; it's handled by the agent.
         return {
-            'dimensions': self.dimensions, 'nodes': self.nodes, 'edges': self.edges,
+            'dimensions': self.dimensions, 'nodes': self.nodes, 'edges': list(self.edges),
             'next_node_id': self._next_node_id, 'iterations': self._iterations
         }
 
@@ -213,7 +213,7 @@ class GNG_Engine:
     def from_state(cls, state_dict, faiss_index=None, **kwargs):
         gng = cls(state_dict['dimensions'], **kwargs)
         gng.nodes = state_dict['nodes']
-        gng.edges = state_dict['edges']
+        gng.edges = {tuple(e) for e in state_dict['edges']}
         gng._next_node_id = state_dict['next_node_id']
         gng._iterations = state_dict['iterations']
         # If a pre-loaded faiss index is provided, use it.
