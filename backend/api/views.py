@@ -1,125 +1,140 @@
 import os
 import uuid
+import numpy as np
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .services.cognitive_architecture_service import CognitiveArchitectureService, text_to_embedding
+from .services.chimera_agent import ChimeraAgent
 
 # --- Helper Functions ---
 
-def get_network_service(network_id):
-    """Loads or initializes a CognitiveArchitectureService instance."""
-    # Basic security check for network_id to prevent directory traversal
-    if not all(c.isalnum() or c in '-_' for c in network_id):
+def get_agent_service(agent_id):
+    """Loads or initializes a ChimeraAgent instance."""
+    if not all(c.isalnum() or c in '-_' for c in agent_id):
         return None
     try:
-        return CognitiveArchitectureService(network_id=network_id, load_from_storage=True)
+        return ChimeraAgent(agent_id=agent_id, load_from_storage=True)
     except FileNotFoundError:
         return None
 
-def get_network_config(network_id):
-    """Helper to get just the config part of a network without loading the whole thing."""
-    if not all(c.isalnum() or c in '-_' for c in network_id):
+def get_agent_config(agent_id):
+    """Helper to get just the config part of an agent without loading the whole thing."""
+    if not all(c.isalnum() or c in '-_' for c in agent_id):
         return None
-    storage_path = os.path.join('backend', 'storage', f'{network_id}.json')
+    storage_path = os.path.join('backend', 'storage', f'{agent_id}.npz')
     if not os.path.exists(storage_path):
         return None
-    with open(storage_path, 'r') as f:
-        data = json.load(f)
-    return data.get('hopfield_state', {})
+    with np.load(storage_path, allow_pickle=True) as data:
+        cortex_configs_json = str(data['cortex_configs_json'])
+        config = {
+            'cortex_configs': json.loads(cortex_configs_json),
+            'dimensions': int(data['dimensions'])
+        }
+    return config
 
 
 # --- API Views ---
 
-class NetworkList(APIView):
-    """
-    List all networks or create a new one.
-    """
+class AgentList(APIView):
+    """List all agents or create a new one."""
     def get(self, request, format=None):
-        """Lists all available networks by scanning the storage directory."""
         storage_dir = os.path.join('backend', 'storage')
-        networks = []
-        for filename in os.listdir(storage_dir):
-            if filename.endswith('.json'):
-                network_id = filename[:-5]
-                networks.append({'id': network_id, 'config': get_network_config(network_id)})
-        return Response(networks)
+        agents = []
+        if os.path.exists(storage_dir):
+            for filename in os.listdir(storage_dir):
+                if filename.endswith('.npz'):
+                    agent_id = filename[:-4]
+                    agents.append({'id': agent_id, 'config': get_agent_config(agent_id)})
+        return Response(agents)
 
     def post(self, request, format=None):
-        """Creates a new cognitive architecture."""
-        network_id = f"network-{uuid.uuid4()}"
+        """Creates a new Chimera Agent."""
+        agent_id = f"agent-{uuid.uuid4()}"
         dimensions = request.data.get('dimensions', 64)
-        hyperparams = request.data.get('config', {})
+        cortex_configs = request.data.get('cortex_configs', {})
+        hyperparams = request.data.get('hyperparams', {})
 
-        CognitiveArchitectureService(
-            network_id=network_id,
+        ChimeraAgent(
+            agent_id=agent_id,
             dimensions=dimensions,
-            load_from_storage=False, # Force creation
+            cortex_configs=cortex_configs,
+            load_from_storage=False,
             **hyperparams
         )
-        return Response({'id': network_id}, status=status.HTTP_201_CREATED)
+        return Response({'id': agent_id, 'cortex_configs': cortex_configs}, status=status.HTTP_201_CREATED)
 
 
-class NetworkDetail(APIView):
-    """
-    Retrieve or update a network's configuration.
-    """
-    def get(self, request, network_id, format=None):
-        """Retrieves the configuration for a specific network."""
-        config = get_network_config(network_id)
+class AgentDetail(APIView):
+    """Retrieve an agent's configuration."""
+    def get(self, request, agent_id, format=None):
+        config = get_agent_config(agent_id)
         if config is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
         return Response(config)
 
-    def patch(self, request, network_id, format=None):
-        """Updates the hyperparameters for a network."""
-        service = get_network_service(network_id)
+
+class Learn(APIView):
+    """
+    Endpoint for an agent to learn from a new experience via a specified cortex.
+    """
+    def post(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
         if service is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        new_config = request.data
-        # Update Hopfield params
-        service.hopfield.learning_rate = new_config.get('learning_rate', service.hopfield.learning_rate)
-        service.hopfield.weight_decay = new_config.get('weight_decay', service.hopfield.weight_decay)
-        # In a real app, you'd update GNG/STAG params too
+        cortex_id = request.data.get('cortex_id')
+        raw_input = request.data.get('raw_input')
 
-        service.save_state()
-        return Response(service.hopfield.get_state())
+        if not all([cortex_id, raw_input]):
+            return Response({'error': 'cortex_id and raw_input are required'}, status=status.HTTP_400_BAD_REQUEST)
 
-
-class LearnText(APIView):
-    """Endpoint to learn a new pattern from text."""
-    def post(self, request, network_id, format=None):
-        service = get_network_service(network_id)
-        if service is None:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        text = request.data.get('text')
-        if not text:
-            return Response({'error': 'Text is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        result = service.learn_pattern(text)
-        return Response(result)
+        try:
+            # For now, we just perceive and learn. The RL loop will be more complex.
+            embedding = service.perceive(cortex_id, raw_input)
+            result = service.learn_from_experience(embedding)
+            return Response(result)
+        except (ValueError, NotImplementedError) as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class Organize(APIView):
-    """Endpoint to trigger one step of the GNG/STAG organization process."""
-    def post(self, request, network_id, format=None):
-        service = get_network_service(network_id)
-        if service is None:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        cue_text = request.data.get('cue_text', None)
-        result = service.organize_step(cue_text)
-        return Response(result)
-
-
-class NetworkStructure(APIView):
-    """Endpoint to get the GNG/STAG hierarchical graph structure."""
-    def get(self, request, network_id, format=None):
-        service = get_network_service(network_id)
+class AgentStructure(APIView):
+    """Endpoint to get the agent's GNG/STAG hierarchical graph structure."""
+    def get(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
         if service is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         structure = service.get_graph_structure()
         return Response(structure)
+
+
+class SelectAction(APIView):
+    """
+    Endpoint for an agent to select an action based on a perceived input.
+    """
+    def post(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
+        if service is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        cortex_id = request.data.get('cortex_id')
+        raw_input = request.data.get('raw_input')
+
+        if not all([cortex_id, raw_input]):
+            return Response({'error': 'cortex_id and raw_input are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            state_embedding = service.perceive(cortex_id, raw_input)
+            action, log_prob = service.select_action(state_embedding)
+
+            # Convert numpy types to native python types for JSON serialization
+            return Response({
+                'action': int(action),
+                'log_probability': float(log_prob)
+            })
+        except (ValueError, NotImplementedError) as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
