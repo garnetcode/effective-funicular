@@ -55,6 +55,8 @@ class ChimeraAgent:
             self.hopfield = HopfieldCore(dimensions, **self.hyperparams)
             self.stag = STAG_Framework(dimensions, **self.hyperparams)
             self.action_head = ActionHead(input_dim=dimensions, n_actions=n_actions)
+            # A new agent's state must be saved immediately.
+            self.save_state()
 
         self.episode_memory = []
 
