@@ -73,18 +73,6 @@ class AgentDetail(APIView):
         return Response(config)
 
 
-def _text_to_simple_vector(text):
-    """
-    A placeholder function to convert raw text from the UI into a vector
-    that the default DenseCortex (with input_dim=1) can handle.
-    """
-    if not text:
-        return np.array([0.0])
-    # Use the ASCII value of the first character as the vector.
-    # This is a simple, deterministic way to get a number from text.
-    return np.array([ord(text[0])])
-
-
 class Learn(APIView):
     """
     Endpoint for an agent to learn from a new experience via a specified cortex.
@@ -101,12 +89,9 @@ class Learn(APIView):
             return Response({'error': 'cortex_id and raw_input are required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # If the input is from our simple text UI, we need to convert it to a vector first.
-            processed_input = raw_input
-            if cortex_id == "text_input":
-                processed_input = _text_to_simple_vector(raw_input)
-
-            embedding = service.perceive(cortex_id, processed_input)
+            # The agent's cortex is now responsible for all processing.
+            # No more special handling in the view.
+            embedding = service.perceive(cortex_id, raw_input)
             result = service.learn_from_experience(embedding)
             return Response(result)
         except (ValueError, NotImplementedError) as e:

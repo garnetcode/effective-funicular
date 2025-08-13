@@ -4,32 +4,33 @@ import NetworkVisualizer from './NetworkVisualizer';
 import './App.css';
 
 function App() {
-  const [networks, setNetworks] = useState([]);
-  const [selectedNetwork, setSelectedNetwork] = useState(null);
+  const [agents, setAgents] = useState([]);
+  const [selectedAgent, setSelectedAgent] = useState(null);
   const [graphData, setGraphData] = useState(null);
   const [textInput, setTextInput] = useState('');
-  const [statusMessage, setStatusMessage] = useState('');
+  const [statusMessage, setStatusMessage] = useState('Welcome to Project Chimera!');
 
-  const fetchNetworks = useCallback(async () => {
+  const fetchAgents = useCallback(async () => {
     try {
-      const response = await api.getNetworks();
-      setNetworks(response.data);
+      const response = await api.getAgents();
+      setAgents(response.data);
     } catch (error) {
-      console.error("Failed to fetch networks:", error);
-      setStatusMessage('Failed to fetch networks.');
+      console.error("Failed to fetch agents:", error);
+      setStatusMessage('Error: Could not connect to backend.');
     }
   }, []);
 
   useEffect(() => {
-    fetchNetworks();
-  }, [fetchNetworks]);
+    fetchAgents();
+  }, [fetchAgents]);
 
   useEffect(() => {
-    if (selectedNetwork) {
-      api.getNetworkStructure(selectedNetwork)
+    if (selectedAgent) {
+      setStatusMessage(`Fetching structure for ${selectedAgent}...`);
+      api.getAgentStructure(selectedAgent)
         .then(response => {
           setGraphData(response.data);
-          setStatusMessage(`Visualizing network: ${selectedNetwork}`);
+          setStatusMessage(`Visualizing agent: ${selectedAgent}`);
         })
         .catch(error => {
           console.error("Failed to fetch graph structure:", error);
@@ -38,53 +39,44 @@ function App() {
     } else {
       setGraphData(null);
     }
-  }, [selectedNetwork]);
+  }, [selectedAgent]);
 
-  const handleCreateNetwork = async () => {
+  const handleCreateAgent = async () => {
     try {
-      setStatusMessage('Creating new network...');
-      const response = await api.createNetwork({ dimensions: 64 });
-      setStatusMessage(`New network created: ${response.data.id}`);
-      await fetchNetworks();
-      setSelectedNetwork(response.data.id);
+      setStatusMessage('Creating new agent...');
+      // CORRECTED: Request a TextCortex for handling raw text input.
+      const config = {
+        dimensions: 32,
+        cortex_configs: {
+            "text_input": { "type": "TextCortex" }
+        }
+      };
+      const response = await api.createAgent(config);
+      setStatusMessage(`New agent created: ${response.data.id}`);
+      await fetchAgents();
+      setSelectedAgent(response.data.id);
     } catch (error) {
-      console.error("Failed to create network:", error);
-      setStatusMessage('Failed to create network.');
+      console.error("Failed to create agent:", error);
+      setStatusMessage('Failed to create agent.');
     }
   };
 
   const handleLearn = async (e) => {
     e.preventDefault();
-    if (!selectedNetwork || !textInput) return;
+    if (!selectedAgent || !textInput) return;
     try {
-      setStatusMessage('Learning pattern...');
-      await api.learnText(selectedNetwork, textInput);
+      setStatusMessage(`Agent is learning pattern: \"${textInput}\"...`);
+      // CORRECTED: Use the updated learnWithAgent function.
+      await api.learnWithAgent(selectedAgent, textInput);
       setTextInput('');
-      setStatusMessage('Pattern learned. Organizing...');
-      // Automatically trigger organization after learning
-      const orgResponse = await api.organizeNetwork(selectedNetwork);
-      setStatusMessage(orgResponse.data.status);
-      // Refresh graph data
-      const response = await api.getNetworkStructure(selectedNetwork);
+      setStatusMessage('Learning complete. Refreshing structure...');
+
+      const response = await api.getAgentStructure(selectedAgent);
       setGraphData(response.data);
+      setStatusMessage(`Visualizing agent: ${selectedAgent}`);
     } catch (error) {
       console.error("Failed to learn pattern:", error);
       setStatusMessage('Failed to learn pattern.');
-    }
-  };
-
-  const handleOrganize = async () => {
-    if (!selectedNetwork) return;
-    try {
-        setStatusMessage('Organizing...');
-        const orgResponse = await api.organizeNetwork(selectedNetwork);
-        setStatusMessage(orgResponse.data.status);
-        // Refresh graph data
-        const response = await api.getNetworkStructure(selectedNetwork);
-        setGraphData(response.data);
-    } catch (error) {
-        console.error("Failed to organize network:", error);
-        setStatusMessage('Failed to organize network.');
     }
   };
 
@@ -92,19 +84,18 @@ function App() {
     <div className="App">
       <header className="App-header">
         <h1>Project Chimera</h1>
-        <p>A Bio-Inspired Cognitive Architecture</p>
       </header>
       <div className="controls">
         <div className="network-selector">
-          <select onChange={(e) => setSelectedNetwork(e.target.value)} value={selectedNetwork || ''}>
-            <option value="" disabled>Select a Network</option>
-            {networks.map(net => (
-              <option key={net.id} value={net.id}>{net.id}</option>
+          <select onChange={(e) => setSelectedAgent(e.target.value)} value={selectedAgent || ''}>
+            <option value="" disabled>Select an Agent</option>
+            {agents.map(agent => (
+              <option key={agent.id} value={agent.id}>{agent.id}</option>
             ))}
           </select>
-          <button onClick={handleCreateNetwork}>Create New Network</button>
+          <button onClick={handleCreateAgent}>Create New Agent</button>
         </div>
-        {selectedNetwork && (
+        {selectedAgent && (
           <div className="actions">
             <form onSubmit={handleLearn}>
               <input
@@ -115,7 +106,6 @@ function App() {
               />
               <button type="submit">Learn & Organize</button>
             </form>
-            <button onClick={handleOrganize}>Organize Step</button>
           </div>
         )}
         <div className="status-bar">

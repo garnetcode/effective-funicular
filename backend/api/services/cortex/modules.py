@@ -35,6 +35,26 @@ class DenseCortex(BaseCortex):
         output = np.tanh(np.dot(raw_input, self.weights) + self.biases)
         return output
 
+class TextCortex(BaseCortex):
+    """A simple cortex for processing raw text into a reproducible vector."""
+
+    def __init__(self, output_dim):
+        self.output_dim = output_dim
+
+    def process(self, raw_input: str):
+        """
+        Converts a string to a fixed-size bipolar vector using a hash seed.
+        """
+        seed = hash(raw_input)
+        rng = np.random.RandomState(seed)
+        vec = rng.randn(self.output_dim)
+        # Convert to a bipolar (-1, 1) vector
+        vec = np.sign(vec)
+        # Ensure at least one element is non-zero
+        if np.all(vec == 0):
+            vec[0] = 1
+        return vec
+
 try:
     from PIL import Image
     import torch

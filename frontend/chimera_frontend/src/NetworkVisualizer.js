@@ -28,7 +28,7 @@ const GNGNode = ({ position, id, error }) => {
 
 const GNGEdge = ({ start, end }) => {
   const points = useMemo(() => [new THREE.Vector3(...start), new THREE.Vector3(...end)], [start, end]);
-  const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+  const lineGeometry = useMemo(() => new THREE.BufferGeometry().setFromPoints(points), [points]);
 
   return (
     <line geometry={lineGeometry}>
@@ -39,22 +39,22 @@ const GNGEdge = ({ start, end }) => {
 
 
 const NetworkVisualizer = ({ graphData }) => {
-  if (!graphData || !graphData.gng_state || !graphData.gng_state.nodes) {
-    return <div style={{ color: 'white' }}>Loading graph data or no data available...</div>;
-  }
+  // CORRECTED: Wrap dependency initializations in useMemo to ensure stable references.
+  const nodes = useMemo(() => graphData?.gng_state?.nodes || {}, [graphData]);
+  const edges = useMemo(() => graphData?.gng_state?.edges || [], [graphData]);
 
-  // We only visualize the root GNG for now
-  const { nodes, edges } = graphData.gng_state;
   const nodeMap = useMemo(() => {
     const map = new Map();
     Object.entries(nodes).forEach(([id, data]) => {
-      // Normalize weights for visualization if they are too far apart
       const position = new THREE.Vector3(...data.weight).multiplyScalar(5);
       map.set(parseInt(id, 10), { ...data, position });
     });
     return map;
   }, [nodes]);
 
+  if (!graphData || !graphData.gng_state) {
+    return <div style={{ color: 'white', margin: '20px' }}>Loading graph data or no data available...</div>;
+  }
 
   return (
     <Canvas camera={{ position: [0, 5, 15], fov: 50 }}>

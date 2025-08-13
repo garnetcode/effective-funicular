@@ -9,12 +9,17 @@ const client = axios.create({
     },
 });
 
-export const getNetworks = () => client.get('/networks/');
+export const getAgents = () => client.get('/agents/');
 
-export const createNetwork = (config) => client.post('/networks/', config);
+export const createAgent = (config) => client.post('/agents/', config);
 
-export const getNetworkStructure = (networkId) => client.get(`/networks/${networkId}/structure/`);
+export const getAgentStructure = (agentId) => client.get(`/agents/${agentId}/structure/`);
 
-export const learnText = (networkId, text) => client.post(`/networks/${networkId}/learn_text/`, { text });
-
-export const organizeNetwork = (networkId, cue_text = null) => client.post(`/networks/${networkId}/organize/`, { cue_text });
+export const learnWithAgent = (agentId, text) => {
+    // This now uses the generic 'learn' endpoint.
+    // The backend ChimeraAgent needs a cortex with this ID.
+    return client.post(`/agents/${agentId}/learn/`, {
+        cortex_id: 'text_input',
+        raw_input: text
+    });
+};
