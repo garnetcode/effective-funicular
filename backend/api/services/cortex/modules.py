@@ -45,7 +45,8 @@ class TextCortex(BaseCortex):
         """
         Converts a string to a fixed-size bipolar vector using a hash seed.
         """
-        seed = hash(raw_input)
+        # Constrain the seed to be a 32-bit unsigned integer for numpy
+        seed = abs(hash(raw_input)) % (2**32)
         rng = np.random.RandomState(seed)
         vec = rng.randn(self.output_dim)
         # Convert to a bipolar (-1, 1) vector
