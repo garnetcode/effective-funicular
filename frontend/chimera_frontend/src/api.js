@@ -15,11 +15,25 @@ export const createAgent = (config) => client.post('/agents/', config);
 
 export const getAgentStructure = (agentId) => client.get(`/agents/${agentId}/structure/`);
 
-export const learnWithAgent = (agentId, text) => {
-    // This now uses the generic 'learn' endpoint.
-    // The backend ChimeraAgent needs a cortex with this ID.
-    return client.post(`/agents/${agentId}/learn/`, {
-        cortex_id: 'text_input',
+export const learnWithAgent = async (agentId, text) => {
+    // This function now implements the two-step process required by the refactored backend.
+    // 1. Learn the pattern associatively.
+    console.log(`Step 1: Learning pattern for agent ${agentId}`);
+    const learnResponse = await client.post(`/agents/${agentId}/learn_associative/`, {
+        cortex_id: 'text_input', // Assuming a default text cortex
         raw_input: text
     });
+
+    const patternId = learnResponse.data.pattern_id;
+    if (patternId === undefined) {
+        throw new Error("Learning did not return a pattern_id.");
+    }
+
+    // 2. Trigger the memory organization step with the new pattern's ID.
+    console.log(`Step 2: Organizing memory for pattern_id ${patternId}`);
+    const organizeResponse = await client.post(`/agents/${agentId}/organize_memory/`, {
+        pattern_id: patternId
+    });
+
+    return organizeResponse;
 };
