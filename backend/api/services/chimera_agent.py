@@ -14,7 +14,7 @@ class NumpyJSONEncoder(json.JSONEncoder):
                             np.int16, np.int32, np.int64, np.uint8,
                             np.uint16, np.uint32, np.uint64)):
             return int(obj)
-        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+        elif isinstance(obj, (np.float64, np.float16, np.float32)):
             return float(obj)
         elif isinstance(obj, (np.ndarray,)):
             return obj.tolist()
@@ -61,7 +61,11 @@ class ChimeraAgent:
         else:
             self.cortex_configs = cortex_configs or {}
             self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
-            self.hopfield = HopfieldCore(dimensions, **self.hyperparams)
+            self.hopfield = HopfieldCore(
+                dimensions,
+                learning_rate=self.hyperparams.get('learning_rate', 0.1),
+                weight_decay=self.hyperparams.get('weight_decay', 0.01)
+            )
             self.stag = STAG_Framework(dimensions, **self.hyperparams)
             self.action_head = ActionHead(input_dim=dimensions, n_actions=n_actions)
 
@@ -214,6 +218,20 @@ class ChimeraAgent:
             # pattern_id = ... how to get pattern id here?
             # self.pattern_node_map[pattern_id] = new_winner_id
             # This part highlights need for further refinement in a real system.
+
+    def update_cortex_config(self, new_cortex_configs):
+        """Merges new cortex configs, re-initializes cortexes, and saves the agent."""
+        self.cortex_configs.update(new_cortex_configs)
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
+        self.save_state()
+        print(f"Agent {self.agent_id} cortex config updated to: {self.cortex_configs}")
+
+    def update_action_space(self, n_actions):
+        """Resets the agent's action head for a new number of actions."""
+        self.n_actions = n_actions
+        self.action_head = ActionHead(input_dim=self.dimensions, n_actions=self.n_actions)
+        self.save_state()
+        print(f"Agent {self.agent_id} action space updated to: {n_actions} actions")
 
     def perceive(self, cortex_id, raw_input):
         if cortex_id not in self.cortexes: raise ValueError(f"Cortex '{cortex_id}' not found.")
