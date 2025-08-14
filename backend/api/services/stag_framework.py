@@ -90,15 +90,70 @@ class STAG_Framework:
 
     def get_serializable_structure(self):
         """
-        Returns a serializable representation of the entire STAG tree.
+        Returns a serializable representation of the STAG tree, flattened
+        into a single graph for visualization. This is a corrected implementation
+        that ensures the entire hierarchy is visible on the frontend.
         """
-        def serialize_level(level_node):
-            return {
-                'gng_state': level_node['gng'].get_state(),
-                'parent_node_id': level_node['parent_node_id'],
-                'children': [serialize_level(child) for child in level_node['children']]
+        final_nodes = {}
+        final_edges = []
+        node_id_counter = 0
+
+        # A map to store the mapping of (gng_instance_id, old_node_id) -> new_global_node_id
+        # Using id(gng) as a proxy for gng_instance_id
+        global_id_map = {}
+
+        def traverse(level_node, parent_gng_map=None, parent_gng=None):
+            nonlocal node_id_counter
+            gng = level_node['gng']
+            current_gng_map = {}
+            global_id_map[id(gng)] = current_gng_map
+
+            # 1. Add all nodes from the current GNG to the final list
+            for node_id, node_data in gng.nodes.items():
+                new_id = node_id_counter
+                current_gng_map[node_id] = new_id
+                serializable_node = {
+                    'weight': node_data['weight'].tolist(),
+                    'error': node_data['error']
+                }
+                final_nodes[new_id] = serializable_node
+                node_id_counter += 1
+
+            # 2. Add all edges from the current GNG
+            for u, v, age in gng.edges:
+                # Ensure both nodes exist in the current GNG's map before adding edge
+                if u in current_gng_map and v in current_gng_map:
+                    new_u = current_gng_map[u]
+                    new_v = current_gng_map[v]
+                    final_edges.append([new_u, new_v, age])
+
+            # 3. Connect this GNG to its parent in the hierarchy
+            if parent_gng_map and parent_gng and level_node['parent_node_id'] is not None:
+                parent_global_id = parent_gng_map.get(level_node['parent_node_id'])
+                if parent_global_id is not None and gng.nodes:
+                    # Connect the parent node to the "center" of the child graph
+                    # For simplicity, we connect to the winner node for the parent's weight vector
+                    parent_node_weight = parent_gng.nodes[level_node['parent_node_id']]['weight']
+                    child_winner_id, _ = gng._find_winners(parent_node_weight)
+
+                    if child_winner_id in current_gng_map:
+                        child_global_id = current_gng_map[child_winner_id]
+                        # Add a zero-age edge to signify a hierarchical link
+                        final_edges.append([parent_global_id, child_global_id, 0])
+
+            # 4. Recursively traverse children
+            for child_node in level_node['children']:
+                traverse(child_node, current_gng_map, gng)
+
+        traverse(self.tree)
+
+        return {
+            'gng_state': {
+                'nodes': final_nodes,
+                'edges': final_edges,
+                'dimensions': self.dimensions
             }
-        return serialize_level(self.tree)
+        }
 
     @classmethod
     def from_serializable_structure(cls, structure, **kwargs):
