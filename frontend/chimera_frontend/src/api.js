@@ -11,6 +11,8 @@ const client = axios.create({
 
 export const getAgents = () => client.get('/agents/');
 
+export const getEnvironments = () => client.get('/environments/');
+
 export const createAgent = (config) => client.post('/agents/', config);
 
 export const getAgentStructure = (agentId) => client.get(`/agents/${agentId}/structure/`);
@@ -39,3 +41,5 @@ export const learnWithAgent = async (agentId, text) => {
 };
 
 export const deleteAgent = (agentId) => client.delete(`/agents/${agentId}/`);
+
+export const startTraining = (agentId, envId) => client.post(`/agents/${agentId}/start_training/`, { env_id: envId });

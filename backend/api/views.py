@@ -1,10 +1,14 @@
 import os
 import uuid
 import json
+import threading
 import numpy as np
+import gymnasium as gym
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 from .services.chimera_agent import ChimeraAgent
 
 # --- Helper Functions ---
@@ -39,6 +43,18 @@ def get_agent_config(agent_id):
 
 
 # --- API Views ---
+
+class EnvironmentList(APIView):
+    """Lists available Gymnasium environments."""
+    def get(self, request, format=None):
+        # A curated list of classic environments that don't require special dependencies
+        environments = [
+            {'id': 'CartPole-v1', 'name': 'CartPole'},
+            {'id': 'Acrobot-v1', 'name': 'Acrobot'},
+            {'id': 'MountainCar-v0', 'name': 'Mountain Car'},
+            {'id': 'Pendulum-v1', 'name': 'Pendulum'},
+        ]
+        return Response(environments)
 
 class AgentList(APIView):
     """List all agents or create a new one."""
@@ -165,3 +181,99 @@ class SelectAction(APIView):
             return Response({'action': int(action), 'log_probability': float(log_prob)})
         except Exception as e:
             return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# --- Training ---
+
+def get_env_config(env):
+    """Inspects a gymnasium environment to determine agent configuration."""
+    obs_space = env.observation_space
+    if not isinstance(obs_space, gym.spaces.Box) or len(obs_space.shape) != 1:
+        raise NotImplementedError("Only 1D Box observation spaces are supported.")
+
+    act_space = env.action_space
+    if not isinstance(act_space, gym.spaces.Discrete):
+        raise NotImplementedError("Only Discrete action spaces are supported.")
+
+    input_dim = obs_space.shape[0]
+    cortex_configs = {"vector_input": {"type": "DenseCortex", "params": {"input_dim": input_dim}}}
+    n_actions = act_space.n
+    return cortex_configs, "vector_input", n_actions
+
+def run_training_loop(agent, env, cortex_id, episodes=500):
+    """The main training loop, adapted from train.py to run in a thread."""
+    print(f"Starting background training for agent '{agent.agent_id}' in '{env.spec.id}'...")
+    total_rewards = []
+    for episode in range(episodes):
+        try:
+            state, info = env.reset()
+            terminated, truncated, episode_reward = False, False, 0
+            while not (terminated or truncated):
+                state_embedding = agent.perceive(cortex_id, state)
+                action, _, internal_state = agent.select_action(state_embedding)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                agent.record_experience(internal_state, action, reward)
+                state = next_state
+                episode_reward += reward
+
+            agent.train()
+            total_rewards.append(episode_reward)
+
+            if episode % 10 == 0:
+                avg_reward = np.mean(total_rewards[-100:])
+
+                # Send metrics over WebSocket
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    f"training_{agent.agent_id}",
+                    {
+                        "type": "training.message",
+                        "message": {
+                            "episode": episode,
+                            "total_reward": episode_reward,
+                            "avg_reward": avg_reward,
+                        },
+                    },
+                )
+        except Exception as e:
+            print(f"Error during training loop for agent {agent.agent_id}: {e}")
+            break
+
+    env.close()
+    print(f"Finished background training for agent '{agent.agent_id}'.")
+
+
+class StartTraining(APIView):
+    """Starts a training session for an agent in a given environment."""
+    def post(self, request, agent_id, format=None):
+        env_id = request.data.get('env_id')
+        if not env_id:
+            return Response({'error': 'env_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            env = gym.make(env_id)
+            cortex_configs, cortex_id, n_actions = get_env_config(env)
+        except Exception as e:
+            return Response({'error': f'Failed to create environment: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get the agent, or create one if it doesn't exist
+        try:
+            agent = ChimeraAgent(agent_id=agent_id, load_from_storage=True)
+        except FileNotFoundError:
+            agent = ChimeraAgent(
+                agent_id=agent_id,
+                dimensions=64, # Default dimension
+                n_actions=n_actions,
+                cortex_configs=cortex_configs,
+                load_from_storage=False
+            )
+
+        # Run training in a background thread
+        training_thread = threading.Thread(
+            target=run_training_loop,
+            args=(agent, env, cortex_id)
+        )
+        training_thread.daemon = True
+        training_thread.start()
+
+        return Response({'status': f'Training started for agent {agent_id} in {env_id}'}, status=status.HTTP_202_ACCEPTED)
