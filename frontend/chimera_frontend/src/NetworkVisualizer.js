@@ -1,63 +1,129 @@
-import React, { useMemo, useRef, useEffect } from 'react';
-import ForceGraph3D from 'react-force-graph-3d';
-import SpriteText from 'three-spritetext';
+import React, { useRef, useMemo, useState, useEffect } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
+import { OrbitControls, Text, Bounds } from '@react-three/drei';
+import * as THREE from 'three';
+import { forceSimulation, forceLink, forceManyBody, forceCenter } from 'd3-force';
 
-const NetworkVisualizer = ({ graphData }) => {
-  const fgRef = useRef();
+const GNGNode = ({ node }) => {
+  const meshRef = useRef();
+  const scale = useMemo(() => 0.1 + Math.min(node.error * 10, 0.4), [node.error]);
 
-  // Memoize the processed graph data to prevent unnecessary recalculations
-  const processedData = useMemo(() => {
-    if (!graphData || !graphData.gng_state || !graphData.gng_state.nodes) {
-      return { nodes: [], links: [] };
-    }
+  // The node object from d3-force has x, y, and z properties.
+  const position = useMemo(() => new THREE.Vector3(node.x, node.y, node.z), [node.x, node.y, node.z]);
 
-    const gngNodes = graphData.gng_state.nodes;
-    const gngEdges = graphData.gng_state.edges;
+  return (
+    <group position={position}>
+      <mesh ref={meshRef} scale={[scale, scale, scale]}>
+        <sphereGeometry args={[1, 32, 32]} />
+        <meshStandardMaterial color={node.error > 0.1 ? 'red' : 'orange'} />
+      </mesh>
+      <Text
+        position={[0, scale + 0.2, 0]}
+        fontSize={0.1}
+        color="white"
+        anchorX="center"
+        anchorY="middle"
+      >
+        {`ID: ${node.id}`}
+      </Text>
+    </group>
+  );
+};
 
-    const nodes = Object.entries(gngNodes).map(([id, node]) => ({
-      id: id,
-      ...node,
-      // You can add more properties here for styling, e.g., color based on error
-      color: node.error > 0.1 ? 'red' : 'orange',
-      val: 0.1 + Math.min(node.error * 10, 0.4) // Node size based on error
-    }));
+const GNGEdge = ({ edge }) => {
+  // The edge object from d3-force has source and target properties, which are node objects.
+  const start = useMemo(() => new THREE.Vector3(edge.source.x, edge.source.y, edge.source.z), [edge.source]);
+  const end = useMemo(() => new THREE.Vector3(edge.target.x, edge.target.y, edge.target.z), [edge.target]);
+  const points = useMemo(() => [start, end], [start, end]);
+  const lineGeometry = useMemo(() => new THREE.BufferGeometry().setFromPoints(points), [points]);
 
-    const links = gngEdges.map(([source, target]) => ({
-      source: source,
-      target: target,
-    }));
+  return (
+    <line geometry={lineGeometry}>
+      <lineBasicMaterial color="gray" linewidth={1} />
+    </line>
+  );
+};
 
-    return { nodes, links };
-  }, [graphData]);
+const ForceGraph = ({ graphData }) => {
+  const [nodes, setNodes] = useState([]);
+  const [edges, setEdges] = useState([]);
+
+  const simulationRef = useRef();
 
   useEffect(() => {
-    // Zoom to fit all nodes on initial load or data change
-    if (fgRef.current && processedData.nodes.length > 0) {
-      fgRef.current.zoomToFit(400, 100);
+    const gngNodes = graphData?.gng_state?.nodes || {};
+    const gngEdges = graphData?.gng_state?.edges || [];
+
+    const nodeArray = Object.entries(gngNodes).map(([id, data]) => {
+      // Initialize position from weight vector for stable layout, falling back to random
+      const [x, y, z] = data.weight ? new THREE.Vector3(...data.weight).multiplyScalar(5).toArray() : [Math.random(), Math.random(), Math.random()];
+      return {
+        id: parseInt(id, 10),
+        ...data,
+        x,
+        y,
+        z,
+      };
+    });
+
+    // d3-force expects links to reference node objects or ids.
+    // We use IDs and tell the forceLink to look up nodes by their 'id' field.
+    const edgeArray = gngEdges.map(([source, target]) => ({
+      source: parseInt(source, 10),
+      target: parseInt(target, 10),
+    }));
+
+    setNodes(nodeArray);
+    setEdges(edgeArray);
+
+    if (nodeArray.length > 0) {
+      simulationRef.current = forceSimulation(nodeArray, 3) // Create a 3D simulation
+        .force("link", forceLink(edgeArray).id(d => d.id).distance(1).strength(0.1))
+        .force("charge", forceManyBody().strength(-10))
+        .force("center", forceCenter());
     }
-  }, [processedData]);
+
+    return () => {
+      simulationRef.current?.stop();
+    };
+  }, [graphData]);
+
+  useFrame(() => {
+    if (simulationRef.current) {
+      simulationRef.current.tick();
+      // The simulation modifies the node array in place.
+      // We trigger a re-render by creating a new array reference.
+      setNodes(prevNodes => [...prevNodes]);
+    }
+  });
+
+  return (
+    <>
+      {nodes.map((node) => (
+        <GNGNode key={node.id} node={node} />
+      ))}
+      {edges.map((edge, index) => (
+        <GNGEdge key={index} edge={edge} />
+      ))}
+    </>
+  );
+};
 
 
-  if (processedData.nodes.length === 0) {
+const NetworkVisualizer = ({ graphData }) => {
+  if (!graphData || !graphData.gng_state) {
     return <div style={{ color: 'white', margin: '20px' }}>Loading graph data or no data available...</div>;
   }
 
   return (
-    <ForceGraph3D
-      ref={fgRef}
-      graphData={processedData}
-      nodeAutoColorBy="group" // Example: color by a 'group' property if you add one
-      nodeThreeObject={node => {
-        const sprite = new SpriteText(node.id);
-        sprite.color = 'white';
-        sprite.textHeight = 8;
-        return sprite;
-      }}
-      nodeThreeObjectExtend={true}
-      linkWidth={1}
-      linkColor={() => 'rgba(128, 128, 128, 0.5)'}
-      backgroundColor="rgba(0,0,0,0)"
-    />
+    <Canvas camera={{ position: [0, 5, 15], fov: 50 }}>
+      <ambientLight intensity={0.5} />
+      <pointLight position={[10, 10, 10]} />
+      <Bounds fit clip observe>
+        <ForceGraph graphData={graphData} />
+      </Bounds>
+      <OrbitControls />
+    </Canvas>
   );
 };
 
