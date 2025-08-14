@@ -215,6 +215,13 @@ class ChimeraAgent:
             # self.pattern_node_map[pattern_id] = new_winner_id
             # This part highlights need for further refinement in a real system.
 
+    def update_cortex_config(self, new_cortex_configs):
+        """Merges new cortex configs, re-initializes cortexes, and saves the agent."""
+        self.cortex_configs.update(new_cortex_configs)
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
+        self.save_state()
+        print(f"Agent {self.agent_id} cortex config updated to: {self.cortex_configs}")
+
     def perceive(self, cortex_id, raw_input):
         if cortex_id not in self.cortexes: raise ValueError(f"Cortex '{cortex_id}' not found.")
         return self.cortexes[cortex_id].process(raw_input)
