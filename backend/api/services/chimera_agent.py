@@ -61,7 +61,11 @@ class ChimeraAgent:
         else:
             self.cortex_configs = cortex_configs or {}
             self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
-            self.hopfield = HopfieldCore(dimensions, **self.hyperparams)
+            self.hopfield = HopfieldCore(
+                dimensions,
+                learning_rate=self.hyperparams.get('learning_rate', 0.1),
+                weight_decay=self.hyperparams.get('weight_decay', 0.01)
+            )
             self.stag = STAG_Framework(dimensions, **self.hyperparams)
             self.action_head = ActionHead(input_dim=dimensions, n_actions=n_actions)
 
