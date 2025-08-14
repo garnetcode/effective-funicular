@@ -70,12 +70,32 @@ class AgentList(APIView):
 
 
 class AgentDetail(APIView):
-    """Retrieve an agent's configuration."""
+    """Retrieve or delete an agent."""
     def get(self, request, agent_id, format=None):
         config = get_agent_config(agent_id)
         if config is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
         return Response(config)
+
+    def delete(self, request, agent_id, format=None):
+        """Deletes an agent's state file."""
+        if not all(c.isalnum() or c in '-_' for c in agent_id):
+            return Response({'error': 'Invalid agent ID format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        storage_path = os.path.join('backend', 'storage', f'{agent_id}.npz')
+
+        if os.path.exists(storage_path):
+            try:
+                os.remove(storage_path)
+                # Also remove the faiss index if it exists, for cleanup
+                faiss_path = os.path.join('backend', 'storage', f'{agent_id}.faiss')
+                if os.path.exists(faiss_path):
+                    os.remove(faiss_path)
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            except OSError as e:
+                return Response({'error': f'Error deleting file: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        else:
+            return Response(status=status.HTTP_404_NOT_FOUND)
 
 
 class LearnAssociative(APIView):
