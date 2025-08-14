@@ -264,4 +264,4 @@ class ChimeraAgent:
         return {"status": "Training complete"}
 
     def get_graph_structure(self):
-        return self.stag.get_serializable_structure()
+        return self.stag.get_flattened_structure()
