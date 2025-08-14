@@ -80,6 +80,22 @@ function App() {
     }
   };
 
+  const handleDeleteAgent = async () => {
+    if (!selectedAgent) return;
+    if (window.confirm(`Are you sure you want to delete agent ${selectedAgent}?`)) {
+      try {
+        setStatusMessage(`Deleting agent ${selectedAgent}...`);
+        await api.deleteAgent(selectedAgent);
+        setStatusMessage(`Agent ${selectedAgent} deleted.`);
+        setSelectedAgent(null);
+        await fetchAgents();
+      } catch (error) {
+        console.error("Failed to delete agent:", error);
+        setStatusMessage('Failed to delete agent.');
+      }
+    }
+  };
+
   return (
     <div className="App">
       <header className="App-header">
@@ -94,6 +110,9 @@ function App() {
             ))}
           </select>
           <button onClick={handleCreateAgent}>Create New Agent</button>
+          <button onClick={handleDeleteAgent} disabled={!selectedAgent} className="delete-button">
+            Delete Selected Agent
+          </button>
         </div>
         {selectedAgent && (
           <div className="actions">

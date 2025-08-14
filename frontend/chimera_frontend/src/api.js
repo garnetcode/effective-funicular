@@ -37,3 +37,5 @@ export const learnWithAgent = async (agentId, text) => {
 
     return organizeResponse;
 };
+
+export const deleteAgent = (agentId) => client.delete(`/agents/${agentId}/`);
