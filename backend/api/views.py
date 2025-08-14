@@ -259,9 +259,11 @@ class StartTraining(APIView):
         # Get the agent, or create one if it doesn't exist
         try:
             agent = ChimeraAgent(agent_id=agent_id, load_from_storage=True)
-            # Ensure the loaded agent has the required cortex for this environment
+            # Ensure the loaded agent is compatible with the environment
             if cortex_id not in agent.cortexes:
                 agent.update_cortex_config(cortex_configs)
+            if agent.n_actions != n_actions:
+                agent.update_action_space(n_actions)
         except FileNotFoundError:
             agent = ChimeraAgent(
                 agent_id=agent_id,

@@ -226,6 +226,13 @@ class ChimeraAgent:
         self.save_state()
         print(f"Agent {self.agent_id} cortex config updated to: {self.cortex_configs}")
 
+    def update_action_space(self, n_actions):
+        """Resets the agent's action head for a new number of actions."""
+        self.n_actions = n_actions
+        self.action_head = ActionHead(input_dim=self.dimensions, n_actions=self.n_actions)
+        self.save_state()
+        print(f"Agent {self.agent_id} action space updated to: {n_actions} actions")
+
     def perceive(self, cortex_id, raw_input):
         if cortex_id not in self.cortexes: raise ValueError(f"Cortex '{cortex_id}' not found.")
         return self.cortexes[cortex_id].process(raw_input)
