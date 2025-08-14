@@ -14,7 +14,7 @@ class NumpyJSONEncoder(json.JSONEncoder):
                             np.int16, np.int32, np.int64, np.uint8,
                             np.uint16, np.uint32, np.uint64)):
             return int(obj)
-        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+        elif isinstance(obj, (np.float64, np.float16, np.float32)):
             return float(obj)
         elif isinstance(obj, (np.ndarray,)):
             return obj.tolist()
