@@ -21,6 +21,7 @@ The Growing Neural Gas (GNG) is the fundamental building block of the agent's wo
 -   **Growth**: A GNG starts with two neurons (nodes) and adds new neurons in regions of high error, allowing it to increase its representational capacity where needed.
 -   **Adaptation**: When an input vector is presented, the closest neuron (the "winner") and its direct neighbors are moved slightly closer to the input vector.
 -   **Pruning**: Edges between neurons have an "age" that increments when they are not used. Old edges are removed, and any neuron that becomes disconnected from the graph is pruned. This ensures the network does not grow indefinitely and forgets unused information.
+-   **Performance**: To ensure efficient scaling, the search for the winning neuron is accelerated using a `faiss` (Facebook AI Similarity Search) index. This is significantly faster than a brute-force search, especially when the GNG has many neurons.
 
 #### Memory Protection via Dynamic Learning Rate
 
@@ -37,7 +38,14 @@ The STAG framework organizes multiple GNGs into a hierarchy, similar to a taxono
 
 -   **Structure**: The STAG is a tree where each node contains a GNG instance. The root GNG represents the most general concepts, and its children represent more specific sub-concepts.
 -   **Traversal**: When a new memory (a stable attractor from the Hopfield network) is presented, it is first given to the root GNG. The winning neuron is found. If that neuron has a child GNG, the memory is passed down to that child, and the process repeats. This continues until a terminal node (a neuron with no child GNG) is found.
--   **Expansion**: The terminal GNG is then trained with the new memory. If the error for the winning neuron in the terminal GNG exceeds a certain threshold, it signals that the current representation is not sufficient. The agent then **expands** this neuron, creating a new, empty child GNG beneath it. The memories that were previously mapped to the parent neuron are then used to train this new, more specialized GNG.
+-   **Expansion**: The terminal GNG is then trained with the new memory. If the error for the winning neuron in the terminal GNG exceeds a certain threshold, it signals that the current representation is not sufficient. The agent then **expands** this neuron, creating a new, empty child GNG beneath it. The patterns that were previously mapped to the parent neuron (identified by a robust `(level_id, node_id)` tuple) are then used to train this new, more specialized GNG.
+
+### 2.3. Action Head (`action/modules.py`)
+
+The Action Head is the component responsible for decision-making. It is a `torch.nn.Module` that implements a simple linear layer mapping the agent's internal state representation to a set of logits over the possible actions.
+
+-   **PyTorch Integration**: By using PyTorch, the Action Head can be trained efficiently using standard deep learning techniques.
+-   **Optimization**: It uses an `Adam` optimizer to update its weights based on the policy gradient loss calculated during the `train()` step. This is more robust and maintainable than a manual numpy-based gradient implementation.
 
 ## 3. Learning and Memory Processes
 
