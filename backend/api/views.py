@@ -3,7 +3,6 @@ import uuid
 import json
 import threading
 import numpy as np
-import gymnasium as gym
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -55,6 +54,46 @@ class EnvironmentList(APIView):
             {'id': 'Pendulum-v1', 'name': 'Pendulum'},
         ]
         return Response(environments)
+
+
+class CortexSpecificationList(APIView):
+    """Lists available cortex types and their input specifications."""
+    def get(self, request, format=None):
+        # This could be automated further with class introspection, but a manual
+        # definition is clearer and safer for now.
+        specs = [
+            {
+                "type": "DenseCortex",
+                "description": "Processes a fixed-size vector input. Requires an 'input_dim' parameter during agent creation.",
+                "input_spec": {
+                    "type": "vector",
+                    "dtype": "float",
+                    "shape": ["input_dim"]
+                },
+                "params": [
+                    {"name": "input_dim", "type": "integer", "description": "The dimensionality of the input vector."}
+                ]
+            },
+            {
+                "type": "TextCortex",
+                "description": "Processes a string of any length into a fixed-size embedding.",
+                "input_spec": {
+                    "type": "string"
+                },
+                "params": []
+            },
+            {
+                "type": "VisionCortex",
+                "description": "Processes an image into a fixed-size embedding. Requires a file path as input.",
+                "input_spec": {
+                    "type": "image_path",
+                    "format": ["png", "jpg", "jpeg"]
+                },
+                "params": []
+            }
+        ]
+        return Response(specs)
+
 
 class AgentList(APIView):
     """List all agents or create a new one."""
@@ -156,12 +195,50 @@ class OrganizeMemory(APIView):
             return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class ConsolidateMemories(APIView):
+    """
+    Endpoint for triggering offline memory consolidation.
+    """
+    def post(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
+        if service is None: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        n_replays = request.data.get('n_replays', 1)
+
+        try:
+            result = service.consolidate_memories(int(n_replays))
+            return Response(result)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class AgentStructure(APIView):
     """Endpoint to get the agent's GNG/STAG hierarchical graph structure."""
     def get(self, request, agent_id, format=None):
         service = get_agent_service(agent_id)
         if service is None: return Response(status=status.HTTP_404_NOT_FOUND)
         return Response(service.get_graph_structure())
+
+
+class ProbeActivity(APIView):
+    """
+    Endpoint for probing the agent's internal activity for a given input.
+    Returns the activation path through the hierarchy.
+    """
+    def post(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
+        if service is None: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        cortex_id = request.data.get('cortex_id')
+        raw_input = request.data.get('raw_input')
+        if not all([cortex_id, raw_input is not None]):
+            return Response({'error': 'cortex_id and raw_input are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = service.probe_activity(cortex_id, raw_input)
+            return Response(result)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class SelectAction(APIView):
@@ -187,6 +264,7 @@ class SelectAction(APIView):
 
 def get_env_config(env):
     """Inspects a gymnasium environment to determine agent configuration."""
+    import gymnasium as gym
     obs_space = env.observation_space
     if not isinstance(obs_space, gym.spaces.Box) or len(obs_space.shape) != 1:
         raise NotImplementedError("Only 1D Box observation spaces are supported.")
@@ -202,6 +280,7 @@ def get_env_config(env):
 
 def run_training_loop(agent, env, cortex_id, episodes=500):
     """The main training loop, adapted from train.py to run in a thread."""
+    intrinsic_reward_coeff = agent.hyperparams.get('intrinsic_reward_coefficient', 0.1)
     print(f"Starting background training for agent '{agent.agent_id}' in '{env.spec.id}'...")
     total_rewards = []
     for episode in range(episodes):
@@ -210,11 +289,26 @@ def run_training_loop(agent, env, cortex_id, episodes=500):
             terminated, truncated, episode_reward = False, False, 0
             while not (terminated or truncated):
                 state_embedding = agent.perceive(cortex_id, state)
-                action, _, internal_state = agent.select_action(state_embedding)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                agent.record_experience(internal_state, action, reward)
+
+                # Check for novelty and create a new pattern if needed
+                pattern_id = None
+                if agent.is_novel(state_embedding):
+                    result = agent.learn_associative(state_embedding)
+                    pattern_id = result.get('pattern_id')
+
+                action, log_prob, internal_state = agent.select_action(state_embedding)
+                next_state, extrinsic_reward, terminated, truncated, _ = env.step(action)
+
+                # Calculate intrinsic reward based on the novelty of the *next* state
+                next_state_embedding = agent.perceive(cortex_id, next_state)
+                novelty_error = agent.get_state_novelty_error(next_state_embedding)
+                intrinsic_reward = intrinsic_reward_coeff * novelty_error
+
+                total_reward = extrinsic_reward + intrinsic_reward
+
+                agent.record_experience(internal_state, action, log_prob, total_reward, pattern_id=pattern_id)
                 state = next_state
-                episode_reward += reward
+                episode_reward += extrinsic_reward
 
             agent.train()
             total_rewards.append(episode_reward)
@@ -246,6 +340,7 @@ def run_training_loop(agent, env, cortex_id, episodes=500):
 class StartTraining(APIView):
     """Starts a training session for an agent in a given environment."""
     def post(self, request, agent_id, format=None):
+        import gymnasium as gym
         env_id = request.data.get('env_id')
         if not env_id:
             return Response({'error': 'env_id is required'}, status=status.HTTP_400_BAD_REQUEST)

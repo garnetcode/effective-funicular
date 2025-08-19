@@ -151,9 +151,24 @@ class ChimeraAgent:
         self.save_state()
         return {"status": "Associative learning complete.", "pattern_id": pattern_id}
 
-    def organize_memory(self, pattern_id):
+    def is_novel(self, embedding, novelty_threshold=0.2):
+        """
+        Checks if an embedding is novel compared to existing patterns.
+        A simple approach: check the distance to the nearest pattern.
+        """
+        if not self.patterns:
+            return True
+
+        all_patterns = np.array(list(self.patterns.values()))
+        distances = np.linalg.norm(all_patterns - embedding, axis=1)
+        min_distance = np.min(distances)
+
+        return min_distance > novelty_threshold
+
+    def organize_memory(self, pattern_id, reward=0):
         """
         ORGANIZE Mode (Sec 3.3): Updates the GNG/STAG structure.
+        The reward parameter influences the utility of the winning neuron.
         """
         if pattern_id not in self.patterns:
             raise ValueError(f"Pattern ID {pattern_id} not found.")
@@ -164,7 +179,7 @@ class ChimeraAgent:
         stable_attractor = self.hopfield.recall(cue_vector)
 
         # 2. Find the terminal GNG and winner node for this attractor
-        terminal_node, winner_id = self.stag.find_terminal_node(stable_attractor)
+        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
         if winner_id is None: # GNG not initialized enough
             terminal_node['gng'].process_input(stable_attractor)
             self.save_state()
@@ -174,9 +189,9 @@ class ChimeraAgent:
         # Note: A real system would need a more robust path identifier
         self.pattern_node_map[pattern_id] = winner_id
 
-        # 4. Process the input in the terminal GNG
+        # 4. Process the input in the terminal GNG, modulated by reward
         terminal_gng = terminal_node['gng']
-        terminal_gng.process_input(stable_attractor)
+        terminal_gng.process_input(stable_attractor, reward=reward)
 
         # 5. Check for expansion condition
         if terminal_gng.nodes[winner_id]['error'] > self.stag_expansion_threshold:
@@ -239,10 +254,37 @@ class ChimeraAgent:
 
     def get_internal_state_representation(self, input_embedding):
         stable_attractor = self.hopfield.recall(input_embedding)
-        terminal_node, winner_id = self.stag.find_terminal_node(stable_attractor)
+        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
         if winner_id is not None and winner_id in terminal_node['gng'].nodes:
             return terminal_node['gng'].nodes[winner_id]['weight']
         return stable_attractor
+
+    def get_state_novelty_error(self, input_embedding):
+        """
+        Calculates the novelty of a state based on the GNG error of the
+        winning node. A high error indicates a novel, poorly understood state.
+        """
+        stable_attractor = self.hopfield.recall(input_embedding)
+        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
+        if winner_id is not None and winner_id in terminal_node['gng'].nodes:
+            return terminal_node['gng'].nodes[winner_id]['error']
+        # Return a high error if no node is found, encouraging exploration
+        return 1.0
+
+    def probe_activity(self, cortex_id, raw_input):
+        """
+        Processes an input and returns the activation path through the STAG hierarchy.
+        """
+        # 1. Perceive the input to get an embedding
+        embedding = self.perceive(cortex_id, raw_input)
+
+        # 2. Get the stable attractor state from the Hopfield network
+        stable_attractor = self.hopfield.recall(embedding)
+
+        # 3. Find the activation path in the STAG framework
+        _, _, activation_path = self.stag.find_terminal_node_and_path(stable_attractor)
+
+        return {"activation_path": activation_path}
 
     def select_action(self, state_embedding):
         internal_state = self.get_internal_state_representation(state_embedding)
@@ -252,16 +294,106 @@ class ChimeraAgent:
         log_prob = np.log(action_probs[action])
         return action, log_prob, internal_state
 
-    def record_experience(self, internal_state, action, reward):
-        self.episode_memory.append({"state": internal_state, "action": action, "reward": reward})
+    def record_experience(self, internal_state, action, log_prob, reward, pattern_id=None):
+        self.episode_memory.append({
+            "state": internal_state,
+            "action": action,
+            "log_prob": log_prob,
+            "reward": reward,
+            "pattern_id": pattern_id
+        })
 
     def train(self):
         # This is policy/RL training, separate from unsupervised cognitive learning
-        if not self.episode_memory: return {"status": "No experiences to train on."}
-        # ... (rest of the method is unchanged)
-        # ...
+        if not self.episode_memory:
+            return {"status": "No experiences to train on."}
+
+        # REINFORCE algorithm implementation with manual gradient calculation
+        G = 0
+        returns = []
+        # Calculate discounted returns (rewards-to-go)
+        for step in reversed(self.episode_memory):
+            G = step['reward'] + self.gamma * G
+            returns.insert(0, G)
+
+        returns = np.array(returns)
+        # Normalize returns for stability
+        if len(returns) > 1:
+            returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-9)
+
+        # Accumulate gradients for the entire episode
+        grad_W = np.zeros_like(self.action_head.weights)
+        grad_b = np.zeros_like(self.action_head.biases)
+        total_loss = 0
+
+        for i, step in enumerate(self.episode_memory):
+            state = step['state']
+            action = step['action']
+            G_t = returns[i]
+
+            # If a new pattern was created for this experience, organize it now
+            # using the discounted return as the reward signal.
+            pattern_id = step.get('pattern_id')
+            if pattern_id is not None:
+                self.organize_memory(pattern_id, reward=G_t)
+
+            # Re-compute softmax probabilities for gradient
+            logits = self.action_head.forward(state)
+            probs = softmax(logits)
+
+            # Gradient of the log-likelihood part
+            d_softmax = probs
+            d_softmax[action] -= 1
+
+            # Modulate by the advantage (in this case, the discounted return G_t)
+            # and accumulate gradient
+            grad_W += np.outer(state, d_softmax * G_t)
+            grad_b += d_softmax * G_t
+
+            # For logging, calculate the loss
+            log_prob = np.log(probs[action])
+            total_loss += -log_prob * G_t
+
+        # Apply the accumulated gradients (gradient ascent)
+        self.action_head.weights += self.learning_rate * (grad_W / len(self.episode_memory))
+        self.action_head.biases += self.learning_rate * (grad_b / len(self.episode_memory))
+
+        # Clear memory for the next episode
+        self.episode_memory = []
+
         self.save_state()
-        return {"status": "Training complete"}
+        return {"status": "Training complete", "loss": total_loss / len(self.episode_memory)}
+
+    def consolidate_memories(self, n_replays=1):
+        """
+        Performs offline memory consolidation by replaying existing patterns.
+        This strengthens the representations in the STAG/GNG framework.
+        """
+        if not self.patterns:
+            return {"status": "No patterns to consolidate."}
+
+        print(f"Starting memory consolidation for {len(self.patterns)} patterns...")
+        all_pattern_ids = list(self.patterns.keys())
+
+        for i in range(n_replays):
+            # Shuffle the patterns for each replay epoch
+            np.random.shuffle(all_pattern_ids)
+            for pattern_id in all_pattern_ids:
+                # We add a small amount of noise to the cue to promote robustness
+                # without corrupting the core memory.
+                original_pattern = self.patterns[pattern_id]
+                noise = np.random.normal(0, 0.01, self.dimensions)
+                noisy_cue = original_pattern + noise
+
+                # The core of consolidation is re-organizing the memory, which
+                # strengthens the appropriate nodes in the GNG.
+                # We use the noisy cue for recall but the original pattern ID
+                # for the organization process.
+                self.organize_memory(pattern_id)
+
+        self.save_state()
+        print("Memory consolidation complete.")
+        return {"status": "Consolidation complete."}
 
     def get_graph_structure(self):
         return self.stag.get_flattened_structure()
