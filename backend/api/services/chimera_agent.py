@@ -6,6 +6,7 @@
 import os
 import json
 import numpy as np
+import torch
 
 class NumpyJSONEncoder(json.JSONEncoder):
     """ Custom encoder for numpy data types """
@@ -67,7 +68,11 @@ class ChimeraAgent:
                 weight_decay=self.hyperparams.get('weight_decay', 0.01)
             )
             self.stag = STAG_Framework(dimensions, **self.hyperparams)
-            self.action_head = ActionHead(input_dim=dimensions, n_actions=n_actions)
+            self.action_head = ActionHead(
+                input_dim=dimensions,
+                n_actions=n_actions,
+                learning_rate=self.learning_rate
+            )
 
             # Data structures for STAG data partitioning
             self._next_pattern_id = 0
@@ -93,7 +98,7 @@ class ChimeraAgent:
             'agent_id': self.agent_id, 'dimensions': self.dimensions, 'n_actions': self.n_actions,
             'cortex_configs_json': cortex_configs_json, 'hyperparams_json': hyperparams_json,
             'hopfield_weights': self.hopfield.weights,
-            'action_head_weights': self.action_head.weights, 'action_head_biases': self.action_head.biases,
+            'action_head_state': self.action_head.get_state(),
             'stag_state_json': stag_state_json,
             'next_pattern_id': self._next_pattern_id,
             'patterns_json': patterns_json,
@@ -123,8 +128,13 @@ class ChimeraAgent:
                 'weight_decay': self.hyperparams.get('weight_decay', 0.01)
             }
             self.hopfield = HopfieldCore.from_state(hopfield_state)
-            self.action_head = ActionHead(self.dimensions, self.n_actions)
-            self.action_head.set_state({'weights': data['action_head_weights'], 'biases': data['action_head_biases']})
+            self.action_head = ActionHead(
+                self.dimensions,
+                self.n_actions,
+                learning_rate=self.learning_rate
+            )
+            # The action_head_state is a raw object from np.load, not a dict
+            self.action_head.set_state(data['action_head_state'].item())
 
             stag_structure = json.loads(str(data['stag_state_json']))
             self.stag = STAG_Framework.from_serializable_structure(stag_structure, **self.hyperparams)
@@ -134,7 +144,17 @@ class ChimeraAgent:
             self.patterns = json.loads(str(data.get('patterns_json', '{}')))
             self.patterns = {int(k): np.array(v) for k, v in self.patterns.items()} # Re-numpyfy
             self.pattern_node_map = json.loads(str(data.get('pattern_node_map_json', '{}')))
-            self.pattern_node_map = {int(k): v for k, v in self.pattern_node_map.items()} # Keys to int
+            # Handle backward compatibility for old pattern_node_map format
+            temp_map = {}
+            for k, v in self.pattern_node_map.items():
+                key = int(k)
+                if isinstance(v, int):
+                    # Old format, assume it belongs to the root GNG (level 0)
+                    temp_map[key] = (0, v)
+                else:
+                    # New format, already a tuple
+                    temp_map[key] = tuple(v)
+            self.pattern_node_map = temp_map
 
 
     def learn_associative(self, embedding):
@@ -185,9 +205,9 @@ class ChimeraAgent:
             self.save_state()
             return {"status": "Organization step skipped, GNG too small."}
 
-        # 3. Update the mapping for this pattern
-        # Note: A real system would need a more robust path identifier
-        self.pattern_node_map[pattern_id] = winner_id
+        # 3. Update the mapping for this pattern with a robust identifier
+        level_id = terminal_node['level_id']
+        self.pattern_node_map[pattern_id] = (level_id, winner_id)
 
         # 4. Process the input in the terminal GNG, modulated by reward
         terminal_gng = terminal_node['gng']
@@ -204,35 +224,38 @@ class ChimeraAgent:
         """
         Orchestrates the expansion of a GNG node into a new child GNG.
         """
-        # 1. Find all patterns that belong to the node being expanded
-        patterns_for_new_gng = []
-        # This is inefficient, a reverse map would be better in a real system
-        for pid, mapped_nid in self.pattern_node_map.items():
-            if mapped_nid == parent_gng_node_id:
-                patterns_for_new_gng.append(self.patterns[pid])
+        parent_level_id = parent_level_node['level_id']
 
-        if not patterns_for_new_gng:
-            print(f"Node {parent_gng_node_id} triggered expansion but no patterns mapped to it. Skipping.")
+        # 1. Find all patterns that belong to the node being expanded
+        patterns_to_remap = []
+        for pid, mapped_id in self.pattern_node_map.items():
+            # Check if the mapped_id is for the node being expanded
+            if isinstance(mapped_id, tuple) and mapped_id == (parent_level_id, parent_gng_node_id):
+                patterns_to_remap.append(pid)
+
+        if not patterns_to_remap:
+            print(f"Node {parent_gng_node_id} in level {parent_level_id} triggered expansion but no patterns mapped to it. Skipping.")
             return
 
         # 2. Create the new child GNG in the STAG framework
         new_child_gng = self.stag.expand_node(parent_level_node, parent_gng_node_id)
         if new_child_gng is None: return
 
-        # 3. Train the new child GNG with the identified patterns (data partitioning)
-        print(f"Training new child GNG with {len(patterns_for_new_gng)} patterns.")
-        for pattern_vector in patterns_for_new_gng:
-            # We use the original pattern vector's attractor state for training
+        new_level_id = self.stag._next_level_id - 1 # The ID of the GNG we just created
+
+        # 3. Train the new child GNG with the identified patterns and remap them
+        print(f"Training new child GNG for level {new_level_id} with {len(patterns_to_remap)} patterns.")
+        for pattern_id in patterns_to_remap:
+            pattern_vector = self.patterns[pattern_id]
             stable_attractor = self.hopfield.recall(pattern_vector)
+
+            # Train the new GNG
             new_child_gng.process_input(stable_attractor)
 
             # Re-map the pattern to its new home in the child GNG
             new_winner_id, _ = new_child_gng._find_winners(stable_attractor)
-            # This mapping needs to be more sophisticated to include hierarchy path
-            # For now, we just overwrite it, which is incorrect for deep trees.
-            # pattern_id = ... how to get pattern id here?
-            # self.pattern_node_map[pattern_id] = new_winner_id
-            # This part highlights need for further refinement in a real system.
+            self.pattern_node_map[pattern_id] = (new_level_id, new_winner_id)
+            print(f"Re-mapped pattern {pattern_id} to new node ({new_level_id}, {new_winner_id})")
 
     def update_cortex_config(self, new_cortex_configs):
         """Merges new cortex configs, re-initializes cortexes, and saves the agent."""
@@ -244,7 +267,11 @@ class ChimeraAgent:
     def update_action_space(self, n_actions):
         """Resets the agent's action head for a new number of actions."""
         self.n_actions = n_actions
-        self.action_head = ActionHead(input_dim=self.dimensions, n_actions=self.n_actions)
+        self.action_head = ActionHead(
+            input_dim=self.dimensions,
+            n_actions=self.n_actions,
+            learning_rate=self.learning_rate
+        )
         self.save_state()
         print(f"Agent {self.agent_id} action space updated to: {n_actions} actions")
 
@@ -288,11 +315,22 @@ class ChimeraAgent:
 
     def select_action(self, state_embedding):
         internal_state = self.get_internal_state_representation(state_embedding)
-        action_logits = self.action_head.forward(internal_state)
-        action_probs = softmax(action_logits)
-        action = np.random.choice(self.n_actions, p=action_probs)
-        log_prob = np.log(action_probs[action])
-        return action, log_prob, internal_state
+
+        # Convert to tensor for PyTorch model
+        state_tensor = torch.from_numpy(internal_state).float().unsqueeze(0)
+
+        with torch.no_grad():
+            action_logits = self.action_head(state_tensor).squeeze(0)
+
+        # Convert back to numpy for softmax and sampling
+        action_probs_np = softmax(action_logits.numpy())
+        action = np.random.choice(self.n_actions, p=action_probs_np)
+
+        # We need the log_prob as a tensor for the loss calculation
+        log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
+        action_log_prob = log_probs[action]
+
+        return action, action_log_prob, internal_state
 
     def record_experience(self, internal_state, action, log_prob, reward, pattern_id=None):
         self.episode_memory.append({
@@ -321,48 +359,27 @@ class ChimeraAgent:
         if len(returns) > 1:
             returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-9)
 
-        # Accumulate gradients for the entire episode
-        grad_W = np.zeros_like(self.action_head.weights)
-        grad_b = np.zeros_like(self.action_head.biases)
-        total_loss = 0
-
+        # Process memory organization from the episode
         for i, step in enumerate(self.episode_memory):
-            state = step['state']
-            action = step['action']
-            G_t = returns[i]
-
-            # If a new pattern was created for this experience, organize it now
-            # using the discounted return as the reward signal.
             pattern_id = step.get('pattern_id')
             if pattern_id is not None:
-                self.organize_memory(pattern_id, reward=G_t)
+                self.organize_memory(pattern_id, reward=returns[i])
 
-            # Re-compute softmax probabilities for gradient
-            logits = self.action_head.forward(state)
-            probs = softmax(logits)
+        # Policy gradient update
+        log_probs = torch.stack([step['log_prob'] for step in self.episode_memory])
+        returns_tensor = torch.from_numpy(returns).float()
 
-            # Gradient of the log-likelihood part
-            d_softmax = probs
-            d_softmax[action] -= 1
+        policy_loss = (-log_probs * returns_tensor).mean()
 
-            # Modulate by the advantage (in this case, the discounted return G_t)
-            # and accumulate gradient
-            grad_W += np.outer(state, d_softmax * G_t)
-            grad_b += d_softmax * G_t
-
-            # For logging, calculate the loss
-            log_prob = np.log(probs[action])
-            total_loss += -log_prob * G_t
-
-        # Apply the accumulated gradients (gradient ascent)
-        self.action_head.weights += self.learning_rate * (grad_W / len(self.episode_memory))
-        self.action_head.biases += self.learning_rate * (grad_b / len(self.episode_memory))
+        self.action_head.optimizer.zero_grad()
+        policy_loss.backward()
+        self.action_head.optimizer.step()
 
         # Clear memory for the next episode
         self.episode_memory = []
 
         self.save_state()
-        return {"status": "Training complete", "loss": total_loss / len(self.episode_memory)}
+        return {"status": "Training complete", "loss": policy_loss.item()}
 
     def consolidate_memories(self, n_replays=1):
         """

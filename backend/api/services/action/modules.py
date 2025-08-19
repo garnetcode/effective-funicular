@@ -1,24 +1,28 @@
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-class ActionHead:
+class ActionHead(nn.Module):
     """
-    A simple feed-forward network to map an internal state representation
-    to a vector of action logits.
+    A feed-forward network to map an internal state representation to a vector
+    of action logits, implemented as a PyTorch module.
     """
-    def __init__(self, input_dim, n_actions=256):
+    def __init__(self, input_dim, n_actions=256, learning_rate=0.001):
         """
         Initializes the Action Head.
 
         Args:
-            input_dim (int): The dimension of the input state vector from the brain.
-            n_actions (int): The number of possible actions (e.g., 256).
+            input_dim (int): Dimension of the input state vector.
+            n_actions (int): Number of possible actions.
+            learning_rate (float): Learning rate for the optimizer.
         """
+        super(ActionHead, self).__init__()
         self.input_dim = input_dim
         self.n_actions = n_actions
 
-        # Initialize weights for a simple linear layer
-        self.weights = np.random.randn(input_dim, n_actions) * 0.1
-        self.biases = np.random.randn(n_actions) * 0.1
+        self.layer = nn.Linear(input_dim, n_actions)
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
 
     def forward(self, state_vector: np.array):
         """
@@ -28,21 +32,24 @@ class ActionHead:
             state_vector (np.array): The internal state from the agent's brain.
 
         Returns:
-            np.array: A vector of logits for each possible action.
+            torch.Tensor: A tensor of logits for each possible action.
         """
+        if not isinstance(state_vector, torch.Tensor):
+            state_vector = torch.from_numpy(state_vector).float()
+
         if state_vector.shape[0] != self.input_dim:
             raise ValueError(f"Input vector dimension {state_vector.shape[0]} does not match expected {self.input_dim}")
 
-        return np.dot(state_vector, self.weights) + self.biases
+        return self.layer(state_vector)
 
     def get_state(self):
         """Returns the serializable state of the ActionHead."""
         return {
-            'weights': self.weights,
-            'biases': self.biases
+            'state_dict': self.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict()
         }
 
     def set_state(self, state):
         """Sets the state of the ActionHead from a dictionary."""
-        self.weights = state['weights']
-        self.biases = state['biases']
+        self.load_state_dict(state['state_dict'])
+        self.optimizer.load_state_dict(state['optimizer_state_dict'])
