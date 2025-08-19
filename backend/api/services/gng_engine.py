@@ -50,10 +50,10 @@ class GNG_Engine:
         self._next_node_id += 1
         return node_id
 
-    def process_input(self, input_vector):
+    def process_input(self, input_vector, reward=0):
         """
         Processes a single input vector according to the GNG algorithm.
-        This corresponds to the "Algorithm Deep Dive" in Section 3.1.
+        The reward signal modulates the utility gain for the winning node.
         """
         if len(self.nodes) < 2:
             return
@@ -64,7 +64,11 @@ class GNG_Engine:
         # 2. Update Utility and Error Accumulation
         winner_dist_sq = np.sum((self.nodes[s1_id]['weight'] - input_vector) ** 2)
         self.nodes[s1_id]['error'] += winner_dist_sq
-        self.nodes[s1_id]['utility'] += self.utility_gain
+
+        # Reward modulates utility gain. Positive rewards strengthen the memory.
+        # We use tanh to squash the reward to a [-1, 1] range.
+        reward_gain = np.tanh(reward)
+        self.nodes[s1_id]['utility'] += self.utility_gain * (1 + reward_gain)
 
         # 3. Adaptation with Dynamic Learning Rates
         # Learning rate is inversely proportional to the log of utility.
