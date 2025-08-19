@@ -4,10 +4,7 @@
 # dynamic learning rates and FAISS-based search for performance.
 
 import numpy as np
-try:
-    import faiss
-except ImportError:
-    faiss = None
+import faiss
 
 class GNG_Engine:
     def __init__(self, dimensions, **kwargs):
@@ -18,8 +15,6 @@ class GNG_Engine:
             dimensions (int): The dimensionality of the input vectors.
             **kwargs: Hyperparameters for the GNG.
         """
-        if faiss is None:
-            print("Warning: faiss not installed. GNG will use slow numpy-based search.")
         self.dimensions = dimensions
 
         # Hyperparameters
@@ -127,17 +122,10 @@ class GNG_Engine:
 
         input_vector = np.array([input_vector]).astype('float32')
 
-        if self.faiss_index:
-            _, indices = self.faiss_index.search(input_vector, 2)
-            s1_gng_id = self.faiss_id_map[indices[0][0]]
-            s2_gng_id = self.faiss_id_map[indices[0][1]]
-            return s1_gng_id, s2_gng_id
-        else: # Fallback to numpy
-            node_ids = list(self.nodes.keys())
-            weights = np.array([self.nodes[nid]['weight'] for nid in node_ids])
-            distances = np.linalg.norm(weights - input_vector, axis=1)
-            sorted_indices = np.argsort(distances)
-            return node_ids[sorted_indices[0]], node_ids[sorted_indices[1]]
+        _, indices = self.faiss_index.search(input_vector, 2)
+        s1_gng_id = self.faiss_id_map[indices[0][0]]
+        s2_gng_id = self.faiss_id_map[indices[0][1]]
+        return s1_gng_id, s2_gng_id
 
     def _get_neighbors(self, node_id):
         """Returns the set of node IDs connected to the given node."""
@@ -215,7 +203,7 @@ class GNG_Engine:
             nid: {
                 'weight': node['weight'].tolist(),
                 'error': node['error'],
-                'utility': node.get('utility', 1.0) # Default for older states
+                'utility': node['utility']
             }
             for nid, node in self.nodes.items()
         }
@@ -236,7 +224,7 @@ class GNG_Engine:
             int(nid): {
                 'weight': np.array(node['weight']),
                 'error': node['error'],
-                'utility': node.get('utility', 1.0) # Default for older states
+                'utility': node['utility']
             }
             for nid, node in state_dict['nodes'].items()
         }
