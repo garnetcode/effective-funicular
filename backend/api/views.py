@@ -3,7 +3,6 @@ import uuid
 import json
 import threading
 import numpy as np
-import gymnasium as gym
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -156,6 +155,23 @@ class OrganizeMemory(APIView):
             return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class ConsolidateMemories(APIView):
+    """
+    Endpoint for triggering offline memory consolidation.
+    """
+    def post(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
+        if service is None: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        n_replays = request.data.get('n_replays', 1)
+
+        try:
+            result = service.consolidate_memories(int(n_replays))
+            return Response(result)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class AgentStructure(APIView):
     """Endpoint to get the agent's GNG/STAG hierarchical graph structure."""
     def get(self, request, agent_id, format=None):
@@ -187,6 +203,7 @@ class SelectAction(APIView):
 
 def get_env_config(env):
     """Inspects a gymnasium environment to determine agent configuration."""
+    import gymnasium as gym
     obs_space = env.observation_space
     if not isinstance(obs_space, gym.spaces.Box) or len(obs_space.shape) != 1:
         raise NotImplementedError("Only 1D Box observation spaces are supported.")
@@ -246,6 +263,7 @@ def run_training_loop(agent, env, cortex_id, episodes=500):
 class StartTraining(APIView):
     """Starts a training session for an agent in a given environment."""
     def post(self, request, agent_id, format=None):
+        import gymnasium as gym
         env_id = request.data.get('env_id')
         if not env_id:
             return Response({'error': 'env_id is required'}, status=status.HTTP_400_BAD_REQUEST)
