@@ -19,6 +19,7 @@ class STAG_Framework:
         self.dimensions = dimensions
         self.gng_params = kwargs
         self._next_level_id = 0
+        self.level_map = {} # Map level_id to the tree node containing the GNG
 
         # The hierarchy is a tree structure where each node holds a GNG instance.
         self.tree = self._create_tree_node()
@@ -27,12 +28,14 @@ class STAG_Framework:
         """Helper to create a new node in the hierarchy tree."""
         level_id = self._next_level_id
         self._next_level_id += 1
-        return {
+        node = {
             'level_id': level_id,
             'gng': GNG_Engine(self.dimensions, **self.gng_params),
             'parent_node_id': parent_gng_node_id,
             'children': []  # List of child tree nodes
         }
+        self.level_map[level_id] = node['gng']
+        return node
 
     def find_terminal_node_and_path(self, input_vector):
         """
@@ -142,7 +145,7 @@ class STAG_Framework:
                     'gng_node_id': node_id,
                     'weight': node_data['weight'].tolist(),
                     'error': node_data['error'],
-                    'utility': node_data.get('utility', 1.0)
+                    'utility': node_data['utility']
                 }
                 final_nodes[global_id] = serializable_node
                 node_id_counter += 1
@@ -158,7 +161,7 @@ class STAG_Framework:
             if parent_global_id is not None:
                 # Find the 'entry point' node in the child GNG.
                 # This is the node in the child GNG that is closest to the parent node's weight vector.
-                parent_node_gng = self._find_gng_by_level_id(self.tree, parent_global_id['level_id'])
+                parent_node_gng = self.level_map.get(parent_global_id['level_id'])
                 if parent_node_gng:
                     parent_weight = parent_node_gng.nodes[parent_global_id['gng_node_id']]['weight']
                     child_winner_id, _ = gng._find_winners(parent_weight)
@@ -181,15 +184,6 @@ class STAG_Framework:
             'dimensions': self.dimensions
         }
 
-    def _find_gng_by_level_id(self, start_node, level_id):
-        if start_node['level_id'] == level_id:
-            return start_node['gng']
-        for child in start_node['children']:
-            found = self._find_gng_by_level_id(child, level_id)
-            if found:
-                return found
-        return None
-
     @classmethod
     def from_serializable_structure(cls, structure, **kwargs):
         """
@@ -203,11 +197,12 @@ class STAG_Framework:
     def _deserialize_level(self, level_dict, kwargs):
         gng = GNG_Engine.from_state(level_dict['gng_state'], **kwargs)
         node = {
-            'level_id': level_dict.get('level_id', 0), # Default for backwards compatibility
+            'level_id': level_dict['level_id'],
             'gng': gng,
             'parent_node_id': level_dict['parent_node_id'],
             'children': [self._deserialize_level(child_dict, kwargs) for child_dict in level_dict['children']]
         }
+        self.level_map[node['level_id']] = gng
         if node['level_id'] >= self._next_level_id:
             self._next_level_id = node['level_id'] + 1
         return node
