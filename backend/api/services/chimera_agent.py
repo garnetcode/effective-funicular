@@ -164,7 +164,7 @@ class ChimeraAgent:
         stable_attractor = self.hopfield.recall(cue_vector)
 
         # 2. Find the terminal GNG and winner node for this attractor
-        terminal_node, winner_id = self.stag.find_terminal_node(stable_attractor)
+        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
         if winner_id is None: # GNG not initialized enough
             terminal_node['gng'].process_input(stable_attractor)
             self.save_state()
@@ -239,10 +239,25 @@ class ChimeraAgent:
 
     def get_internal_state_representation(self, input_embedding):
         stable_attractor = self.hopfield.recall(input_embedding)
-        terminal_node, winner_id = self.stag.find_terminal_node(stable_attractor)
+        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
         if winner_id is not None and winner_id in terminal_node['gng'].nodes:
             return terminal_node['gng'].nodes[winner_id]['weight']
         return stable_attractor
+
+    def probe_activity(self, cortex_id, raw_input):
+        """
+        Processes an input and returns the activation path through the STAG hierarchy.
+        """
+        # 1. Perceive the input to get an embedding
+        embedding = self.perceive(cortex_id, raw_input)
+
+        # 2. Get the stable attractor state from the Hopfield network
+        stable_attractor = self.hopfield.recall(embedding)
+
+        # 3. Find the activation path in the STAG framework
+        _, _, activation_path = self.stag.find_terminal_node_and_path(stable_attractor)
+
+        return {"activation_path": activation_path}
 
     def select_action(self, state_embedding):
         internal_state = self.get_internal_state_representation(state_embedding)

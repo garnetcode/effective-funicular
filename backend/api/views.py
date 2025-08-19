@@ -55,6 +55,46 @@ class EnvironmentList(APIView):
         ]
         return Response(environments)
 
+
+class CortexSpecificationList(APIView):
+    """Lists available cortex types and their input specifications."""
+    def get(self, request, format=None):
+        # This could be automated further with class introspection, but a manual
+        # definition is clearer and safer for now.
+        specs = [
+            {
+                "type": "DenseCortex",
+                "description": "Processes a fixed-size vector input. Requires an 'input_dim' parameter during agent creation.",
+                "input_spec": {
+                    "type": "vector",
+                    "dtype": "float",
+                    "shape": ["input_dim"]
+                },
+                "params": [
+                    {"name": "input_dim", "type": "integer", "description": "The dimensionality of the input vector."}
+                ]
+            },
+            {
+                "type": "TextCortex",
+                "description": "Processes a string of any length into a fixed-size embedding.",
+                "input_spec": {
+                    "type": "string"
+                },
+                "params": []
+            },
+            {
+                "type": "VisionCortex",
+                "description": "Processes an image into a fixed-size embedding. Requires a file path as input.",
+                "input_spec": {
+                    "type": "image_path",
+                    "format": ["png", "jpg", "jpeg"]
+                },
+                "params": []
+            }
+        ]
+        return Response(specs)
+
+
 class AgentList(APIView):
     """List all agents or create a new one."""
     def get(self, request, format=None):
@@ -178,6 +218,27 @@ class AgentStructure(APIView):
         service = get_agent_service(agent_id)
         if service is None: return Response(status=status.HTTP_404_NOT_FOUND)
         return Response(service.get_graph_structure())
+
+
+class ProbeActivity(APIView):
+    """
+    Endpoint for probing the agent's internal activity for a given input.
+    Returns the activation path through the hierarchy.
+    """
+    def post(self, request, agent_id, format=None):
+        service = get_agent_service(agent_id)
+        if service is None: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        cortex_id = request.data.get('cortex_id')
+        raw_input = request.data.get('raw_input')
+        if not all([cortex_id, raw_input is not None]):
+            return Response({'error': 'cortex_id and raw_input are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = service.probe_activity(cortex_id, raw_input)
+            return Response(result)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class SelectAction(APIView):
