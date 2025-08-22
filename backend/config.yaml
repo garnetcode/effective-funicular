@@ -13,8 +13,9 @@ episodes_per_env: 100 # How many episodes each parallel agent should run
 # Language Model (LLM) Integration
 language_model:
   enabled: true # Toggle the language capabilities on/off
-  model_id: "google/gemma-3-270m" # Fallback if local_model_path is not found
-  local_model_path: "backend/gemma-3-270m" # Path to the local model directory
+  model_id: "gemma-2-9b-it" # Model name for Ollama
+  api_base: "http://localhost:11434/v1" # Ollama API endpoint
+  local_model_path: "" # Set to empty to avoid conflict with API usage
 
 # Agent architecture and hyperparameters
 agent_config:
