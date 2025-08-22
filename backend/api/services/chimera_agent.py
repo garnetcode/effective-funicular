@@ -26,7 +26,9 @@ from .stag_framework import STAG_Framework
 from .state_history_manager import StateHistoryManager
 from .replay_buffer import ReplayBuffer, Experience
 from .cortex import modules as cortex_modules
+from .cortex.language_cortex import LanguageCortex
 from .action.modules import ActionHead
+from .action.generation_head import TextGenerationHead
 
 def _initialize_cortexes(configs, output_dim):
     cortexes = {}
@@ -35,9 +37,18 @@ def _initialize_cortexes(configs, output_dim):
         class_name = config['type']
         params = config.get('params', {})
         try:
-            CortexClass = getattr(cortex_modules, class_name)
+            # Dynamically get the class from the cortex modules
+            if hasattr(cortex_modules, class_name):
+                CortexClass = getattr(cortex_modules, class_name)
+            else: # Fallback to checking the language_cortex module directly
+                from .cortex import language_cortex
+                CortexClass = getattr(language_cortex, class_name)
+
             if class_name == "DenseCortex":
                 cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
+            elif class_name == "LanguageCortex":
+                # Language cortex needs the model_path_or_id and projects to the agent's obs_dim
+                cortexes[cortex_id] = CortexClass(model_path_or_id=params['model_id'], output_dim=output_dim)
             else:
                 cortexes[cortex_id] = CortexClass(output_dim=output_dim)
         except (AttributeError, ImportError) as e:
@@ -49,14 +60,17 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, obs_dim, action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, **hyperparams):
+    def __init__(self, agent_id, obs_dim, action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, hyperparams=None, **kwargs):
         self.agent_id = agent_id
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
 
-        self.hyperparams = hyperparams
+        # Consolidate hyperparameters from explicit arg and kwargs
+        self.hyperparams = hyperparams or {}
+        self.hyperparams.update(kwargs)
+
         self.history_manager = StateHistoryManager(agent_id)
         self.learning_rate = self.hyperparams.get('learning_rate', 0.01)
         self.gamma = self.hyperparams.get('gamma', 0.99)
@@ -66,29 +80,50 @@ class ChimeraAgent:
         self.max_energy = 100.0
         self.energy = self.max_energy
         self.integrity = 100.0
-        # Define the metabolic cost for just existing for one step
-        self.metabolic_cost = 0.1 # This is a small, constant energy drain
+        self.metabolic_cost = 0.1
 
-        # The agent's current hidden state for the world model
+        # --- Initialize Agent State and Components ---
         self.hidden_state = torch.zeros(1, self.hidden_dim)
-        # Last action taken, for world model input
         self.last_action = torch.tensor(0)
+        self.cortex_configs = cortex_configs or {}
 
-        # Attempt to load the latest state if it exists
+        # Conditionally add language model config to cortex_configs
+        self.language_model_enabled = self.hyperparams.get('language_model', {}).get('enabled', False)
+        lm_path_or_id = None
+        if self.language_model_enabled:
+            lm_config = self.hyperparams.get('language_model', {})
+            # Prioritize local path, fall back to hub ID
+            local_path = lm_config.get('local_model_path')
+            if local_path and os.path.isdir(local_path):
+                lm_path_or_id = local_path
+            else:
+                lm_path_or_id = lm_config.get('model_id')
+
+            if lm_path_or_id:
+                self.cortex_configs['language_cortex'] = {
+                    "type": "LanguageCortex", "params": {"model_id": lm_path_or_id} # param name is still model_id
+                }
+
+        # Initialize all components with a default architecture first
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.obs_dim)
+        self.world_model = WorldModel(obs_dim, action_dim, latent_dim, hidden_dim)
+        self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
+        self.action_head = ActionHead(
+            input_dim=self.hidden_dim,
+            n_actions=self.action_dim,
+            learning_rate=self.learning_rate
+        )
+        self.text_generation_head = None
+        if self.language_model_enabled and lm_path_or_id:
+            self.text_generation_head = TextGenerationHead(
+                model_path_or_id=lm_path_or_id,
+                input_dim=self.hidden_dim
+            )
+
+        # Attempt to load saved state, otherwise save the initial state
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
-            # Initialize a new agent state
-            self.cortex_configs = cortex_configs or {}
-            self.cortexes = _initialize_cortexes(self.cortex_configs, self.obs_dim)
-            self.world_model = WorldModel(obs_dim, action_dim, latent_dim, hidden_dim)
-            self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
-            self.action_head = ActionHead(
-                input_dim=self.hidden_dim,
-                n_actions=self.action_dim,
-                learning_rate=self.learning_rate
-            )
-            # Save the initial state as version 0
             self.save_state(version_info={"message": "Initial state."})
 
         # Initialize Replay Buffer for online learning
@@ -239,6 +274,18 @@ class ChimeraAgent:
             "world_model_loss": total_wm_loss.item(),
             "policy_loss": policy_loss.item()
         }
+
+    def generate_response(self, max_new_tokens=50):
+        """
+        Generates a natural language response based on the agent's current state.
+        """
+        if not self.language_model_enabled or not self.text_generation_head:
+            return "I am currently unable to speak."
+
+        return self.text_generation_head.generate(
+            self.hidden_state,
+            max_new_tokens=max_new_tokens
+        )
 
     def get_graph_structure(self):
         return self.stag.get_flattened_structure()

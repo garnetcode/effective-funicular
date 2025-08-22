@@ -8,6 +8,8 @@ import shutil
 from .services.gng_engine import GNG_Engine
 from .services.chimera_agent import ChimeraAgent
 from .services.state_history_manager import StateHistoryManager
+from .services.cortex.language_cortex import LanguageCortex
+from .services.action.generation_head import TextGenerationHead
 
 class GNG_EngineTests(TestCase):
     def setUp(self):
@@ -218,3 +220,60 @@ class StateHistoryManagerTests(TestCase):
         self.assertEqual(history[3]['type'], 'base')
         self.assertEqual(history[4]['type'], 'diff')
         self.assertEqual(history[4]['info']['loss'], 6.0)
+
+
+# Patch the components where they are imported and used by ChimeraAgent
+@patch('api.services.chimera_agent.TextGenerationHead')
+@patch('api.services.chimera_agent.LanguageCortex')
+class LanguageComponentsIntegrationTests(TestCase):
+
+    def test_language_integration_and_toggle(self, mock_language_cortex_class, mock_text_generation_head_class):
+        """
+        Tests that ChimeraAgent correctly initializes, uses, and toggles the language components.
+        This test mocks the components themselves to focus on the integration logic.
+        """
+        # --- Configure Mocks ---
+        # When the mocked class is instantiated, its return_value is a mock instance.
+        # We can configure the methods of that mock instance.
+        mock_cortex_instance = mock_language_cortex_class.return_value
+        mock_cortex_instance.process.return_value = np.random.rand(64)
+
+        mock_generation_head_instance = mock_text_generation_head_class.return_value
+        mock_generation_head_instance.generate.return_value = "A mocked response."
+
+        # --- 1. Test with Hub ID (local path not provided) ---
+        hub_hyperparams = {"language_model": {"enabled": True, "model_id": "google/gemma-hub-id"}}
+        agent_hub = ChimeraAgent("test-hub-agent", 64, 4, hyperparams=hub_hyperparams, load_from_storage=False)
+
+        # Assert that constructors were called with the hub ID
+        mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-hub-id", output_dim=64)
+        mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-hub-id", input_dim=128)
+
+        # --- 2. Test with a valid Local Path ---
+        # Reset mocks to check calls for the next agent instance
+        mock_language_cortex_class.reset_mock()
+        mock_text_generation_head_class.reset_mock()
+
+        local_path = "backend/test_storage/mock_model_dir"
+        os.makedirs(local_path, exist_ok=True) # Create a dummy directory
+
+        local_hyperparams = {
+            "language_model": {
+                "enabled": True,
+                "model_id": "google/gemma-hub-id", # Should be ignored
+                "local_model_path": local_path
+            }
+        }
+        agent_local = ChimeraAgent("test-local-agent", 64, 4, hyperparams=local_hyperparams, load_from_storage=False)
+
+        # Assert that constructors were called with the local path
+        mock_language_cortex_class.assert_called_with(model_path_or_id=local_path, output_dim=64)
+        mock_text_generation_head_class.assert_called_with(model_path_or_id=local_path, input_dim=128)
+
+        shutil.rmtree(local_path) # Clean up dummy directory
+
+        # --- 3. Test with Language Model DISABLED ---
+        disabled_hyperparams = { "language_model": { "enabled": False } }
+        disabled_agent = ChimeraAgent("test-disabled-agent", 64, 4, hyperparams=disabled_hyperparams, load_from_storage=False)
+        self.assertFalse(disabled_agent.language_model_enabled)
+        self.assertIsNone(disabled_agent.text_generation_head)
