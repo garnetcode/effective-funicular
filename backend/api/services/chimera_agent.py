@@ -47,8 +47,8 @@ def _initialize_cortexes(configs, output_dim):
             if class_name == "DenseCortex":
                 cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
             elif class_name == "LanguageCortex":
-                # Language cortex needs the model_id and projects to the agent's obs_dim
-                cortexes[cortex_id] = CortexClass(model_id=params['model_id'], output_dim=output_dim)
+                # Language cortex needs the model_path_or_id and projects to the agent's obs_dim
+                cortexes[cortex_id] = CortexClass(model_path_or_id=params['model_id'], output_dim=output_dim)
             else:
                 cortexes[cortex_id] = CortexClass(output_dim=output_dim)
         except (AttributeError, ImportError) as e:
@@ -89,12 +89,19 @@ class ChimeraAgent:
 
         # Conditionally add language model config to cortex_configs
         self.language_model_enabled = self.hyperparams.get('language_model', {}).get('enabled', False)
+        lm_path_or_id = None
         if self.language_model_enabled:
             lm_config = self.hyperparams.get('language_model', {})
-            model_id = lm_config.get('model_id')
-            if model_id:
+            # Prioritize local path, fall back to hub ID
+            local_path = lm_config.get('local_model_path')
+            if local_path and os.path.isdir(local_path):
+                lm_path_or_id = local_path
+            else:
+                lm_path_or_id = lm_config.get('model_id')
+
+            if lm_path_or_id:
                 self.cortex_configs['language_cortex'] = {
-                    "type": "LanguageCortex", "params": {"model_id": model_id}
+                    "type": "LanguageCortex", "params": {"model_id": lm_path_or_id} # param name is still model_id
                 }
 
         # Initialize all components with a default architecture first
@@ -107,9 +114,9 @@ class ChimeraAgent:
             learning_rate=self.learning_rate
         )
         self.text_generation_head = None
-        if self.language_model_enabled and self.hyperparams.get('language_model', {}).get('model_id'):
+        if self.language_model_enabled and lm_path_or_id:
             self.text_generation_head = TextGenerationHead(
-                model_id=self.hyperparams['language_model']['model_id'],
+                model_path_or_id=lm_path_or_id,
                 input_dim=self.hidden_dim
             )
 

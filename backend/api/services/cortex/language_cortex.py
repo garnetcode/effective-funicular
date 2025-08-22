@@ -10,17 +10,17 @@ class LanguageCortex(nn.Module):
     """
     A cortex that processes text input into a fixed-size embedding.
     """
-    def __init__(self, model_id, output_dim, device='cpu'):
+    def __init__(self, model_path_or_id, output_dim, device='cpu'):
         super(LanguageCortex, self).__init__()
         self.device = device
 
         # For memory efficiency, we can use quantization
         quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path_or_id)
         # We use the base model to get the last hidden state as an embedding
         self.model = Gemma3Model.from_pretrained(
-            model_id,
+            model_path_or_id,
             quantization_config=quantization_config
         ).to(self.device)
 

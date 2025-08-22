@@ -10,16 +10,16 @@ class TextGenerationHead(nn.Module):
     """
     A module that generates text based on an agent's internal state.
     """
-    def __init__(self, model_id, input_dim, device='cpu'):
+    def __init__(self, model_path_or_id, input_dim, device='cpu'):
         super(TextGenerationHead, self).__init__()
         self.device = device
 
         quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path_or_id)
         # We use the CausalLM model for text generation
         self.model = Gemma3ForCausalLM.from_pretrained(
-            model_id,
+            model_path_or_id,
             quantization_config=quantization_config
         ).to(self.device)
 
