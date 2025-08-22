@@ -46,7 +46,11 @@ def _initialize_cortexes(configs, output_dim):
             if class_name == "DenseCortex":
                 cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
             elif class_name == "LanguageCortex":
-                cortexes[cortex_id] = CortexClass(model_path_or_id=params['model_id'], output_dim=output_dim)
+                cortexes[cortex_id] = CortexClass(
+                    model_path_or_id=params['model_id'],
+                    output_dim=output_dim,
+                    api_base=params.get('api_base')  # Pass Ollama API base
+                )
             else: # For TextCortex, VisionCortex etc.
                 cortexes[cortex_id] = CortexClass(output_dim=output_dim)
         except (AttributeError, ImportError) as e:
@@ -97,9 +101,12 @@ class ChimeraAgent:
             else:
                 lm_path_or_id = lm_config.get('model_id')
 
+            api_base = lm_config.get('api_base')
+
             if lm_path_or_id:
                 self.cortex_configs['language_cortex'] = {
-                    "type": "LanguageCortex", "params": {"model_id": lm_path_or_id} # param name is still model_id
+                    "type": "LanguageCortex",
+                    "params": {"model_id": lm_path_or_id, "api_base": api_base}
                 }
 
         # Initialize all components with a default architecture first
@@ -115,7 +122,8 @@ class ChimeraAgent:
         if self.language_model_enabled and lm_path_or_id:
             self.text_generation_head = TextGenerationHead(
                 model_path_or_id=lm_path_or_id,
-                input_dim=self.hidden_dim
+                input_dim=self.hidden_dim,
+                api_base=api_base  # Pass Ollama API base
             )
 
         # Attempt to load saved state, otherwise save the initial state
