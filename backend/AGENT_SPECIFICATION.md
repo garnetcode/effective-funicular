@@ -1,105 +1,117 @@
 # Chimera Agent Technical Specification
 
-This document provides a detailed technical specification of the Chimera cognitive architecture. It is intended for developers who wish to understand the internal workings of the agent, its learning mechanisms, and how to interact with its API.
+This document provides a detailed technical specification of the Chimera cognitive architecture. It is intended for developers who wish to understand the internal workings of the agent, its learning mechanisms, and how to interact with it.
 
 ## 1. High-Level Architecture
 
-The Chimera agent is a modular, biologically-inspired cognitive architecture. The flow of information for learning and decision-making follows three main stages:
+The Chimera agent is a modular, biologically-inspired cognitive architecture based on a **Recurrent Latent World Model**. This architecture allows the agent to build an internal, predictive model of its environment, enabling it to plan and learn from "imagined" futures.
 
-1.  **Sensory Cortexes**: Raw input from the environment (e.g., vectors, text, images) is processed by a corresponding **Cortex** module. The cortex converts the raw data into a fixed-size numerical vector called an "embedding". This is the agent's internal representation of the sensory event.
+The flow of information for learning and decision-making follows these main stages:
 
-2.  **Associative Memory (Hopfield Core)**: The embedding vector is then passed to a **Hopfield Network**. The Hopfield network is a form of associative memory. It takes the embedding and recalls the closest "stable pattern" or "attractor state". This process cleans up noise and results in a canonical, stable representation of the memory.
+1.  **Sensory Cortexes**: Raw input from the environment (e.g., vectors, text from a user) is processed by a corresponding **Cortex** module. The cortex converts the raw data into a fixed-size numerical observation vector.
 
-3.  **Hierarchical World Model (STAG Framework)**: The stable attractor from the Hopfield network is then used to train the **STAG (Self-organizing Tree-like Adaptive Graph)** framework. This is the agent's long-term memory and "world model". It is a hierarchical structure of **Growing Neural Gas (GNG)** networks that organizes memories and concepts, from general at the root to specific at the leaves.
+2.  **World Model**: The observation vector is passed to the **World Model**. This is the agent's core "brain" and consists of three parts:
+    *   **Encoder**: Compresses the observation into a smaller, more abstract **latent state (`z`)**.
+    *   **Recurrent Core (GRU)**: The agent's temporal memory. It integrates the latent state `z`, the agent's last action, and its own previous memory state (`h_old`) to produce a new, context-rich memory state (`h_new`).
+    *   **Decoder**: Takes the new memory state `h_new` and uses it to predict the future: the expected next observation and the expected reward.
+
+3.  **Action Selection**: The agent's internal memory state `h` is fed into an **Action Head**, which decides on the next action to take.
+
+4.  **Hierarchical World Model (STAG Framework)**: The agent's memory states (`h`) are continuously organized by the **STAG (Self-organizing Tree-like Adaptive Graph)** framework. This provides a long-term, hierarchical conceptual model of the situations the agent has encountered.
 
 ## 2. Core Components
 
-### 2.1. GNG Engine (`gng_engine.py`)
+### 2.1. World Model (`world_model_core.py`)
 
-The Growing Neural Gas (GNG) is the fundamental building block of the agent's world model. Each GNG is a neural network that learns the topological structure of the data it is exposed to.
+This is the central predictive component of the agent. It is a single PyTorch `nn.Module` containing:
+-   **Encoder**: A multi-layer perceptron (MLP) that maps observations to latent states.
+-   **Recurrent Core**: A Gated Recurrent Unit (GRU) cell that updates the agent's hidden memory state.
+-   **Decoder**: Two separate MLPs that predict the next observation and the next reward from the hidden state.
 
--   **Growth**: A GNG starts with two neurons (nodes) and adds new neurons in regions of high error, allowing it to increase its representational capacity where needed.
--   **Adaptation**: When an input vector is presented, the closest neuron (the "winner") and its direct neighbors are moved slightly closer to the input vector.
--   **Pruning**: Edges between neurons have an "age" that increments when they are not used. Old edges are removed, and any neuron that becomes disconnected from the graph is pruned. This ensures the network does not grow indefinitely and forgets unused information.
--   **Performance**: To ensure efficient scaling, the search for the winning neuron is accelerated using a `faiss` (Facebook AI Similarity Search) index. This is significantly faster than a brute-force search, especially when the GNG has many neurons.
+The entire World Model is trained to minimize the difference between its predictions and the actual outcomes from the environment.
 
-#### Memory Protection via Dynamic Learning Rate
+### 2.2. GNG Engine & STAG Framework (`gng_engine.py`, `stag_framework.py`)
 
-To prevent new memories from distorting old, important ones (a problem known as catastrophic forgetting), the GNG implements a utility-based dynamic learning rate.
-
--   **Utility**: Each neuron has a `utility` property. This value increases every time the neuron is a "winner" for an input and decays slowly over time.
--   **Dynamic Learning**: The learning rate for each neuron is now inversely proportional to its utility. This means:
-    -   **New, low-utility neurons** are "plastic" and learn quickly.
-    -   **Established, high-utility neurons** are "rigid" and resistant to change, thus protecting the important memories they represent.
-
-### 2.2. STAG Framework (`stag_framework.py`)
-
-The STAG framework organizes multiple GNGs into a hierarchy, similar to a taxonomic tree.
-
--   **Structure**: The STAG is a tree where each node contains a GNG instance. The root GNG represents the most general concepts, and its children represent more specific sub-concepts.
--   **Traversal**: When a new memory (a stable attractor from the Hopfield network) is presented, it is first given to the root GNG. The winning neuron is found. If that neuron has a child GNG, the memory is passed down to that child, and the process repeats. This continues until a terminal node (a neuron with no child GNG) is found.
--   **Expansion**: The terminal GNG is then trained with the new memory. If the error for the winning neuron in the terminal GNG exceeds a certain threshold, it signals that the current representation is not sufficient. The agent then **expands** this neuron, creating a new, empty child GNG beneath it. The patterns that were previously mapped to the parent neuron (identified by a robust `(level_id, node_id)` tuple) are then used to train this new, more specialized GNG.
+These components remain from the previous architecture, but their role has changed. Instead of organizing static memories, the STAG framework now organizes the **hidden states (`h`)** from the World Model's recurrent core. This means the agent builds a conceptual hierarchy of *dynamic situations* rather than just static observations.
 
 ### 2.3. Action Head (`action/modules.py`)
 
-The Action Head is the component responsible for decision-making. It is a `torch.nn.Module` that implements a simple linear layer mapping the agent's internal state representation to a set of logits over the possible actions.
+The Action Head is an `nn.Module` that maps the agent's current hidden state `h` to a probability distribution over possible actions. It is trained alongside the World Model to take actions that lead to states with high predicted rewards.
 
--   **PyTorch Integration**: By using PyTorch, the Action Head can be trained efficiently using standard deep learning techniques.
--   **Optimization**: It uses an `Adam` optimizer to update its weights based on the policy gradient loss calculated during the `train()` step. This is more robust and maintainable than a manual numpy-based gradient implementation.
+### 2.4. State History Manager (`state_history_manager.py`)
 
-## 3. Learning and Memory Processes
+This service provides a "self-preservation" mechanism for the agent. It implements a Git-like versioning system for the agent's learnable parameters (the weights of the `WorldModel` and `ActionHead`).
+-   **Base & Diff Snapshots**: To save memory, it periodically saves a full "base" snapshot of the weights. Between these, it only saves the *difference* (delta) from the previous version.
+-   **History Log**: A `history.json` file tracks every version, allowing the agent's state to be reconstructed or reverted to any point in time.
 
-### 3.1. Online Learning
+## 3. Learning Process (Online Learning)
 
-When new information is presented to the agent, it goes through the following steps:
+The agent learns in a continuous, online fashion after every interaction with the environment.
+1.  **Perceive & Act**: The agent perceives the current state, updates its internal hidden state `h`, and selects an action.
+2.  **Record Experience**: The experience tuple `(observation, action, reward, next_observation)` is stored in a `ReplayBuffer`.
+3.  **Train**: After each step, the agent samples a batch of experiences from the `ReplayBuffer` and performs one gradient descent step to train its models:
+    *   The **World Model** is trained to accurately predict `next_observation` and `reward`.
+    *   The **Action Head** is trained to select actions that lead to states with high predicted rewards.
 
-1.  `perceive()`: A cortex turns the raw input into an embedding.
-2.  `learn_associative()`: The embedding is stored in the Hopfield network. A unique `pattern_id` is created for this memory.
-3.  `organize_memory()`: The agent recalls the stable attractor for the new pattern and uses it to train the STAG framework, finding the appropriate terminal node and updating the GNG. This may trigger an expansion if necessary.
+---
 
-### 3.2. Offline Memory Consolidation
+# User Manual & Procedures
 
-The agent implements a form of memory consolidation to strengthen its knowledge during periods of inactivity.
+This manual provides practical instructions for running and interacting with the ChimeraAgent.
 
--   **Process**: The `consolidate_memories()` method iterates through all the patterns the agent has learned. For each pattern, it replays it through the `organize_memory()` process.
--   **Effect**: This replay strengthens the connections in the GNGs and refines the overall structure of the STAG. It reinforces existing knowledge and further solidifies the utility of important neurons, making them more resistant to future change.
+## A. Configuration (`backend/config.yaml`)
 
-## 4. API Reference
+All training and model parameters are controlled by `backend/config.yaml`.
 
-### 4.1. Cortex Specifications
+-   **`env_name`**: The Gymnasium environment ID to use for the `train_agent` script (e.g., "CartPole-v1").
+-   **`default_agent_id_prefix`**: A prefix for naming agent save files.
+-   **`force_new_agent`**: If `true`, the agent will start with a fresh brain, ignoring any saved state.
+-   **`episodes_per_env`**: The number of episodes to run for each environment in parallel when using the Colosseum trainer.
 
--   **Endpoint**: `GET /api/cortex_specifications/`
--   **Description**: Returns a list of available cortex modules and a specification of the input data they expect. This allows a client to know how to structure data for the agent.
--   **Example Response**:
-    ```json
-    [
-      {
-        "type": "DenseCortex",
-        "description": "Processes a fixed-size vector input...",
-        "input_spec": { "type": "vector", "dtype": "float", "shape": ["input_dim"] },
-        "params": [{"name": "input_dim", "type": "integer", ...}]
-      },
-      ...
-    ]
-    ```
+-   **`language_model`**:
+    -   `enabled`: Set to `true` to enable the Gemma LLM for chatting.
+    -   `model_id`: The model ID from the Hugging Face Hub (e.g., "google/gemma-3-270m").
+    -   `local_model_path`: If you have the model files locally, provide the path to the directory here to prevent downloading. This path is prioritized over `model_id`.
 
-### 4.2. Activity Probing
+-   **`agent_config`**:
+    -   `latent_dim`, `hidden_dim`: The dimensions of the World Model's internal vectors.
+    -   `hyperparams`: Contains learning parameters like `learning_rate`, `gamma`, `batch_size`, and `buffer_capacity`.
 
--   **Endpoint**: `POST /api/agents/<agent_id>/probe_activity/`
--   **Description**: Allows you to "see" what the agent is "thinking". It takes a sensory input and returns the chain of winning neurons that were activated in the STAG hierarchy.
--   **Request Body**:
-    ```json
-    {
-      "cortex_id": "text_input",
-      "raw_input": "A sample sentence for the agent to process."
-    }
-    ```
--   **Response Body**: The response is a list of activated nodes. Each element corresponds to a level in the STAG hierarchy, from the root downwards. The `level_id` and `winner_id` can be used to identify the specific neuron in the graph structure returned by the `/structure/` endpoint.
-    ```json
-    {
-      "activation_path": [
-        { "level_id": 0, "winner_id": 4 },
-        { "level_id": 2, "winner_id": 1 }
-      ]
-    }
-    ```
+## B. Training the Agent
+
+There are two ways to train the agent:
+
+### 1. Local Training (Single Environment)
+
+This is useful for simple debugging and testing.
+
+```bash
+python backend/manage.py train_agent
+```
+- This script uses the `env_name` specified in `config.yaml`.
+- It saves the agent's state history in `backend/storage/<agent_id>_history/`.
+
+### 2. Colosseum Training (Multi-Environment, Real-time)
+
+This is the primary method for large-scale, parallel training. It requires the Colosseum server to be running.
+
+```bash
+python backend/run_colosseum_agents.py
+```
+- This script reads the `env_list` from the file itself (can be moved to config).
+- It launches a separate agent for each environment and runs them all concurrently.
+
+## C. Interactive Chat Mode
+
+To chat with an agent that has a language model enabled:
+
+1.  Ensure `language_model.enabled` is `true` in `config.yaml`.
+2.  Ensure you have a trained agent state saved in the history directory.
+3.  Run the interactive script:
+
+```bash
+python backend/interactive_mode.py
+```
+- The script will load the latest version of the agent specified in the config.
+- You can then type messages in the console and receive responses from the agent.
+- Type `quit` to exit.
