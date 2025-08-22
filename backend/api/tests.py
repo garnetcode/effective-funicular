@@ -222,9 +222,9 @@ class StateHistoryManagerTests(TestCase):
         self.assertEqual(history[4]['info']['loss'], 6.0)
 
 
-# Patch the components where they are imported and used by ChimeraAgent
+# Patch the components where they are looked up
 @patch('api.services.chimera_agent.TextGenerationHead')
-@patch('api.services.chimera_agent.LanguageCortex')
+@patch('api.services.chimera_agent.cortex_modules.LanguageCortex')
 class LanguageComponentsIntegrationTests(TestCase):
 
     def test_language_integration_and_toggle(self, mock_language_cortex_class, mock_text_generation_head_class):
@@ -246,6 +246,7 @@ class LanguageComponentsIntegrationTests(TestCase):
         agent_hub = ChimeraAgent("test-hub-agent", 64, 4, hyperparams=hub_hyperparams, load_from_storage=False)
 
         # Assert that constructors were called with the hub ID
+        self.assertIn('language_cortex', agent_hub.cortexes)
         mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-hub-id", output_dim=64)
         mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-hub-id", input_dim=128)
 

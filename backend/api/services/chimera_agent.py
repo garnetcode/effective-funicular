@@ -25,31 +25,29 @@ from .world_model_core import WorldModel
 from .stag_framework import STAG_Framework
 from .state_history_manager import StateHistoryManager
 from .replay_buffer import ReplayBuffer, Experience
-from .cortex import modules as cortex_modules
-from .cortex.language_cortex import LanguageCortex
+from . import cortex as cortex_modules
 from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
 
 def _initialize_cortexes(configs, output_dim):
+    """
+    Initializes all cortex modules based on the provided configurations.
+    It dynamically loads the class from the cortex package.
+    """
     cortexes = {}
     if configs is None: return cortexes
     for cortex_id, config in configs.items():
         class_name = config['type']
         params = config.get('params', {})
         try:
-            # Dynamically get the class from the cortex modules
-            if hasattr(cortex_modules, class_name):
-                CortexClass = getattr(cortex_modules, class_name)
-            else: # Fallback to checking the language_cortex module directly
-                from .cortex import language_cortex
-                CortexClass = getattr(language_cortex, class_name)
+            CortexClass = getattr(cortex_modules, class_name)
 
+            # Pass parameters based on cortex type
             if class_name == "DenseCortex":
                 cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
             elif class_name == "LanguageCortex":
-                # Language cortex needs the model_path_or_id and projects to the agent's obs_dim
                 cortexes[cortex_id] = CortexClass(model_path_or_id=params['model_id'], output_dim=output_dim)
-            else:
+            else: # For TextCortex, VisionCortex etc.
                 cortexes[cortex_id] = CortexClass(output_dim=output_dim)
         except (AttributeError, ImportError) as e:
             print(f"Warning: Could not initialize cortex '{cortex_id}' of type '{class_name}': {e}")
