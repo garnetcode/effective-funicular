@@ -86,10 +86,10 @@ class ChimeraAgent:
         self.cortex_configs = cortex_configs or {}
 
         # Conditionally add language model config to cortex_configs
-        self.language_model_enabled = self.hyperparams.get('language_model', {}).get('enabled', False)
+        lm_config = self.hyperparams.get('language_model', {})
+        self.language_model_enabled = lm_config.get('enabled', False)
         lm_path_or_id = None
         if self.language_model_enabled:
-            lm_config = self.hyperparams.get('language_model', {})
             # Prioritize local path, fall back to hub ID
             local_path = lm_config.get('local_model_path')
             if local_path and os.path.isdir(local_path):

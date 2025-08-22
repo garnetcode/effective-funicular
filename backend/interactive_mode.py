@@ -31,7 +31,8 @@ def main():
 
     agent_id = config.get('default_agent_id_prefix', 'agent-') + "interactive"
     agent_config = config.get('agent_config', {})
-    agent_config['hyperparams'] = {**agent_config.get('hyperparams', {}), **config.get('language_model', {})}
+    # Pass the language model config as a top-level item in agent_config
+    agent_config['language_model'] = config.get('language_model', {})
 
     agent = ChimeraAgent(
         agent_id=agent_id,
