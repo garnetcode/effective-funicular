@@ -22,8 +22,11 @@ class StateHistoryManager:
     def _read_history(self):
         if not os.path.exists(self.history_file):
             return []
-        with open(self.history_file, 'r') as f:
-            return json.load(f)
+        try:
+            with open(self.history_file, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return [] # Return empty list if history is corrupted
 
     def _write_history(self, history):
         with open(self.history_file, 'w') as f:
@@ -46,7 +49,7 @@ class StateHistoryManager:
                 elif isinstance(value, dict):
                     diff[key] = compute_diff(value, old_dict.get(key, {}))
                 else:
-                    diff[key] = value
+                    diff[key] = value # Non-tensor data is stored in full in the diff
             return diff
 
         snapshot_type = 'base'
@@ -56,11 +59,13 @@ class StateHistoryManager:
             snapshot_type = 'diff'
             try:
                 prev_state_dict = self.load_snapshot(version - 1)
-                data_to_save = compute_diff(state_dict, prev_state_dict)
+                if prev_state_dict:
+                    data_to_save = compute_diff(state_dict, prev_state_dict)
+                else: # Fallback if previous state can't be loaded
+                    snapshot_type = 'base'
             except Exception as e:
                 print(f"Warning: Could not create diff for version {version}. Saving as base. Error: {e}")
                 snapshot_type = 'base'
-                data_to_save = state_dict
 
         torch.save(data_to_save, self._get_version_path(version))
 
@@ -81,7 +86,7 @@ class StateHistoryManager:
         """
         history = self._read_history()
         if not history:
-            return None # No history exists
+            return None
 
         if version == 'latest':
             target_version = len(history) - 1
@@ -99,25 +104,34 @@ class StateHistoryManager:
                 break
 
         if start_version == -1:
-            raise FileNotFoundError("No base snapshot found in history.")
+            # This can happen if history is corrupted and has no base snapshots
+            return None
 
         # Load the base snapshot
-        current_state_dict = torch.load(self._get_version_path(start_version))
+        try:
+            current_state_dict = torch.load(self._get_version_path(start_version))
+        except FileNotFoundError:
+            return None # Base snapshot file is missing
 
         def apply_diff(current_dict, diff_dict):
             """Recursively applies a diff to a state dict."""
             for key, value in diff_dict.items():
-                if isinstance(value, torch.Tensor):
+                if key not in current_dict:
+                    current_dict[key] = value
+                elif isinstance(value, torch.Tensor):
                     current_dict[key] += value
                 elif isinstance(value, dict):
                     apply_diff(current_dict.get(key, {}), value)
-                else:
-                    # For non-tensor data, the diff is the full new value
+                else: # For non-tensor data, the diff is the full new value
                     current_dict[key] = value
 
         # Apply subsequent diffs
         for i in range(start_version + 1, target_version + 1):
-            diff_dict = torch.load(self._get_version_path(i))
-            apply_diff(current_state_dict, diff_dict)
+            try:
+                diff_dict = torch.load(self._get_version_path(i))
+                apply_diff(current_state_dict, diff_dict)
+            except FileNotFoundError:
+                print(f"Warning: Diff file for version {i} not found. State may be inaccurate.")
+                continue
 
         return current_state_dict

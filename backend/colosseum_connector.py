@@ -1,119 +1,112 @@
-import requests
+import asyncio
 import json
+import aiohttp
+import websockets
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ColosseumConnector:
     """
-    Manages the HTTP communication with the Colosseum game server API.
+    Manages communication with a Colosseum game server for a single session,
+    handling both HTTP for session management and WebSockets for real-time gameplay.
     """
-    def __init__(self, base_url="http://localhost:8000/api"):
-        self.base_url = base_url
+    def __init__(self, environment_id, agent_tag, host="127.0.0.1", http_port=8000, ws_port=8000):
+        self.http_base_url = f"http://{host}:{http_port}/api"
+        self.ws_base_url = f"ws://{host}:{ws_port}/ws"
+        self.environment_id = environment_id
+        self.agent_tag = agent_tag
+        self.session_id = None
+        self.websocket = None
 
-    def _post(self, endpoint, data=None):
-        """Helper method for POST requests."""
+    async def create_session(self):
+        """Creates a new game session via the HTTP API."""
+        url = f"{self.http_base_url}/sessions/create/"
+        payload = {
+            "environment_id": self.environment_id,
+            "agent_tag": self.agent_tag,
+            "agent_name": f"ChimeraAgent-{self.agent_tag}",
+            "agent_type": "ai"
+        }
         try:
-            response = requests.post(f"{self.base_url}{endpoint}", json=data)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"An error occurred: {e}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    if data.get("success"):
+                        self.session_id = data.get("session_id")
+                        logger.info(f"Successfully created session: {self.session_id}")
+                        return data
+                    else:
+                        logger.error(f"Failed to create session: {data}")
+                        return None
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP error creating session: {e}")
             return None
 
-    def _get(self, endpoint):
-        """Helper method for GET requests."""
+    async def connect_websocket(self):
+        """Connects to the session's WebSocket endpoint."""
+        if not self.session_id:
+            logger.error("Cannot connect WebSocket without a session ID.")
+            return False
+
+        uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            response = requests.get(f"{self.base_url}{endpoint}")
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"An error occurred: {e}")
+            self.websocket = await websockets.connect(uri)
+            logger.info(f"Successfully connected to WebSocket: {uri}")
+            return True
+        except websockets.exceptions.InvalidURI:
+            logger.error(f"Invalid WebSocket URI: {uri}")
+            return False
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error(f"WebSocket connection closed unexpectedly: {e}")
+            return False
+
+    async def join_session(self):
+        """Sends the agent.join message to formally join the session."""
+        if not self.websocket:
             return None
 
-    def join_session(self, agent_tag, agent_name, environment_id, agent_type="ai"):
-        """Agent joins a session."""
-        data = {
-            "agent_tag": agent_tag,
-            "agent_name": agent_name,
-            "environment_id": environment_id,
-            "agent_type": agent_type
+        join_message = {
+            "type": "agent.join",
+            "agent_tag": self.agent_tag,
+            "environment_id": self.environment_id,
+            "session_id": self.session_id
         }
-        return self._post("/agent/join/", data)
-
-    def take_action(self, session_id, agent_tag, action):
-        """Agent takes an action in the current session."""
-        data = {
-            "session_id": session_id,
-            "agent_tag": agent_tag,
-            "action": action
-        }
-        return self._post("/agent/action/", data)
-
-    def leave_session(self, session_id, agent_tag):
-        """Agent leaves the current session."""
-        data = {
-            "session_id": session_id,
-            "agent_tag": agent_tag
-        }
-        return self._post("/agent/leave/", data)
-
-    def list_sessions(self):
-        """Lists all active game sessions."""
-        return self._get("/sessions/")
-
-    def get_session(self, session_id):
-        """Get detailed information about a specific session."""
-        return self._get(f"/sessions/{session_id}/")
-
-    def list_environments(self):
-        """List all available environments."""
-        return self._get("/environments/")
-
-if __name__ == '__main__':
-    # Example usage based on the provided API specification
-    connector = ColosseumConnector()
-
-    # Step 1: Join Environment
-    join_data = connector.join_session(
-        agent_tag='my-agent-v1',
-        agent_name='My Deep Q Agent',
-        environment_id='cartpole-v1'
-    )
-
-    if join_data and join_data.get("success"):
-        session_id = join_data['session_id']
-        observation = join_data['observation']
-        print(f"Joined session {session_id} with initial observation: {observation}")
-
-        # Simple agent logic: take action 0 until done
-        is_done = False
-        total_reward = 0
-        while not is_done:
-            action_data = connector.take_action(session_id, 'my-agent-v1', 0) # Example action: 0
-            if action_data and action_data.get("success"):
-                observation = action_data['observation']
-                reward = action_data['reward']
-                is_done = action_data['is_done']
-                total_reward += reward
-                print(f"Step: {action_data['step']}, Reward: {reward}, Done: {is_done}")
-            else:
-                print("Failed to take action.")
-                break
-
-        # Step 3: Leave Session
-        leave_data = connector.leave_session(session_id, 'my-agent-v1')
-        if leave_data and leave_data.get("success"):
-            print(f"Left session. Final reward: {leave_data['final_reward']}")
+        await self.websocket.send(json.dumps(join_message))
+        response = await self.receive_message()
+        if response and response.get("type") == "agent.joined":
+            logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
+            return response
         else:
-            print("Failed to leave session.")
-    else:
-        print("Failed to join session.")
+            logger.error(f"Failed to join session, response: {response}")
+            return None
 
-    # Other example usages:
-    print("\nListing active sessions:")
-    sessions = connector.list_sessions()
-    if sessions:
-        print(json.dumps(sessions, indent=2))
+    async def send_action(self, action):
+        """Sends an agent action to the server."""
+        if not self.websocket:
+            return
 
-    print("\nListing available environments:")
-    environments = connector.list_environments()
-    if environments:
-        print(json.dumps(environments, indent=2))
+        action_message = {
+            "type": "agent.action",
+            "action": int(action),
+            "session_id": self.session_id
+        }
+        await self.websocket.send(json.dumps(action_message))
+
+    async def receive_message(self):
+        """Receives and parses a single message from the WebSocket."""
+        if not self.websocket:
+            return None
+        try:
+            message = await self.websocket.recv()
+            return json.loads(message)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Connection closed while waiting for message.")
+            return None
+
+    async def close(self):
+        """Closes the WebSocket connection."""
+        if self.websocket:
+            await self.websocket.close()
+            logger.info("WebSocket connection closed.")

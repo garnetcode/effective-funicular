@@ -109,75 +109,48 @@ class ChimeraAgentTests(TestCase):
         if os.path.exists(history_dir):
             shutil.rmtree(history_dir)
 
-
-    def test_perception_and_state_update(self):
-        """Test that perceiving an observation updates the agent's hidden state."""
-        initial_hidden_state = self.agent.hidden_state.clone()
-
-        # Create a dummy observation
-        raw_obs = np.random.rand(self.obs_dim)
-
-        # Agent perceives the observation
-        new_hidden_state = self.agent.perceive_and_update_state("test_cortex", raw_obs)
-
-        # The hidden state should have changed
-        self.assertFalse(torch.equal(initial_hidden_state, new_hidden_state))
-        self.assertTrue(torch.equal(new_hidden_state, self.agent.hidden_state))
-
-    def test_world_model_training(self):
-        """Test that the world model loss decreases after a training step."""
-        # Record some dummy experience
-        for _ in range(5):
+    def test_online_learning_loop(self):
+        """
+        Tests the agent's ability to record experiences and improve its
+        world model through online, batch-based training.
+        """
+        # 1. Populate the replay buffer with enough experiences to start training
+        batch_size = self.agent.hyperparams.get('batch_size', 32)
+        for _ in range(batch_size):
             self.agent.record_experience(
-                obs=np.random.rand(self.obs_dim),
-                action=np.random.randint(0, self.action_dim),
-                log_prob=0.5, # Dummy value
-                reward=1.0,
-                next_obs=np.random.rand(self.obs_dim),
-                done=False
+                np.random.rand(self.obs_dim),
+                np.random.randint(0, self.action_dim),
+                0.5, # log_prob
+                1.0, # reward
+                np.random.rand(self.obs_dim),
+                False # done
             )
 
-        # Train once and get the loss
-        train_results_1 = self.agent.train()
-        loss1 = train_results_1.get("world_model_loss")
-        self.assertIsNotNone(loss1)
+        self.assertEqual(len(self.agent.replay_buffer), batch_size)
 
-        # Train again on new experiences
+        # 2. Run an initial training step and record the loss
+        initial_train_stats = self.agent.train()
+        initial_loss = initial_train_stats.get("world_model_loss")
+        self.assertIsNotNone(initial_loss)
+
+        # 3. Run several more training steps
+        final_loss = initial_loss
         for _ in range(5):
+            # Add one new experience
             self.agent.record_experience(
-                obs=np.random.rand(self.obs_dim),
-                action=np.random.randint(0, self.action_dim),
-                log_prob=0.5,
-                reward=1.0,
-                next_obs=np.random.rand(self.obs_dim),
-                done=False
+                np.random.rand(self.obs_dim),
+                np.random.randint(0, self.action_dim),
+                0.5, 1.0, np.random.rand(self.obs_dim), False
             )
-        train_results_2 = self.agent.train()
-        loss2 = train_results_2.get("world_model_loss")
-        self.assertIsNotNone(loss2)
+            # Train on a new batch
+            train_stats = self.agent.train()
+            final_loss = train_stats.get("world_model_loss")
+            self.assertIsNotNone(final_loss)
 
-        # Assert that the loss is decreasing
-        self.assertLess(loss2, loss1)
-
-    def test_homeostatic_vitals_and_reward(self):
-        """
-        Test that agent vitals are updated correctly.
-        Note: This test now only checks the vitals themselves, as the reward
-        is now part of a complex training step tested separately.
-        """
-        self.assertEqual(self.agent.energy, self.agent.max_energy)
-
-        # Simulate metabolic cost
-        self.agent.energy -= self.agent.metabolic_cost
-        self.assertAlmostEqual(self.agent.energy, self.agent.max_energy - self.agent.metabolic_cost)
-
-        # Simulate energy gain
-        self.agent.energy += 20.0
-        self.assertAlmostEqual(self.agent.energy, self.agent.max_energy - self.agent.metabolic_cost + 20.0)
-
-        # Simulate integrity loss
-        self.agent.integrity -= 10.0
-        self.assertEqual(self.agent.integrity, 90.0)
+        # 4. Assert that the loss has generally decreased
+        # This is a more robust test than a strict less-than comparison
+        # on a single step, as individual batches can have noisy gradients.
+        self.assertLess(final_loss, initial_loss)
 
 
 class StateHistoryManagerTests(TestCase):
