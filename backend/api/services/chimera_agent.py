@@ -92,21 +92,17 @@ class ChimeraAgent:
         # Conditionally add language model config to cortex_configs
         lm_config = self.hyperparams.get('language_model', {})
         self.language_model_enabled = lm_config.get('enabled', False)
-        lm_path_or_id = None
+        embedding_model_id = None
+        generation_model_id = None
         if self.language_model_enabled:
-            # Prioritize local path, fall back to hub ID
-            local_path = lm_config.get('local_model_path')
-            if local_path and os.path.isdir(local_path):
-                lm_path_or_id = local_path
-            else:
-                lm_path_or_id = lm_config.get('model_id')
-
+            embedding_model_id = lm_config.get('embedding_model_id')
+            generation_model_id = lm_config.get('generation_model_id')
             api_base = lm_config.get('api_base')
 
-            if lm_path_or_id:
+            if embedding_model_id:
                 self.cortex_configs['language_cortex'] = {
                     "type": "LanguageCortex",
-                    "params": {"model_id": lm_path_or_id, "api_base": api_base}
+                    "params": {"model_id": embedding_model_id, "api_base": api_base}
                 }
 
         # Initialize all components with a default architecture first
@@ -119,9 +115,9 @@ class ChimeraAgent:
             learning_rate=self.learning_rate
         )
         self.text_generation_head = None
-        if self.language_model_enabled and lm_path_or_id:
+        if self.language_model_enabled and generation_model_id:
             self.text_generation_head = TextGenerationHead(
-                model_path_or_id=lm_path_or_id,
+                model_path_or_id=generation_model_id,
                 input_dim=self.hidden_dim,
                 api_base=api_base  # Pass Ollama API base
             )
