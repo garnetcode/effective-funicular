@@ -72,18 +72,16 @@ class Command(BaseCommand):
         cortex_configs, cortex_id, _ = get_env_config(env)
         agent_id = config.get('agent_id', f"agent-{env_name}")
 
+        agent_config = config.get('agent_config', {})
         agent = ChimeraAgent(
             agent_id=agent_id,
             obs_dim=obs_dim,
             action_dim=action_dim,
-            latent_dim=config.get('latent_dim', 64),
-            hidden_dim=config.get('hidden_dim', 128),
+            latent_dim=agent_config.get('latent_dim', 64),
+            hidden_dim=agent_config.get('hidden_dim', 128),
             cortex_configs=cortex_configs,
             load_from_storage=not config.get('force_new_agent', False),
-            hyperparams={
-                'learning_rate': config.get('learning_rate', 0.005),
-                'gamma': config.get('gamma', 0.99)
-            }
+            hyperparams=agent_config.get('hyperparams', {})
         )
 
         logger.info(f"Starting training for agent '{agent_id}' in '{env_name}'...")

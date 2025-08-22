@@ -10,6 +10,11 @@ force_new_agent: false # If true, ignores any saved state for the agent
 # Main training settings
 episodes_per_env: 100 # How many episodes each parallel agent should run
 
+# Language Model (LLM) Integration
+language_model:
+  enabled: true # Toggle the language capabilities on/off
+  model_id: "google/gemma-3-1b-it"
+
 # Agent architecture and hyperparameters
 agent_config:
   latent_dim: 64

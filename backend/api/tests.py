@@ -8,6 +8,8 @@ import shutil
 from .services.gng_engine import GNG_Engine
 from .services.chimera_agent import ChimeraAgent
 from .services.state_history_manager import StateHistoryManager
+from .services.cortex.language_cortex import LanguageCortex
+from .services.action.generation_head import TextGenerationHead
 
 class GNG_EngineTests(TestCase):
     def setUp(self):
@@ -218,3 +220,64 @@ class StateHistoryManagerTests(TestCase):
         self.assertEqual(history[3]['type'], 'base')
         self.assertEqual(history[4]['type'], 'diff')
         self.assertEqual(history[4]['info']['loss'], 6.0)
+
+
+# Patch the components where they are imported and used by ChimeraAgent
+@patch('api.services.chimera_agent.TextGenerationHead')
+@patch('api.services.chimera_agent.LanguageCortex')
+class LanguageComponentsIntegrationTests(TestCase):
+
+    def test_language_integration_and_toggle(self, mock_language_cortex_class, mock_text_generation_head_class):
+        """
+        Tests that ChimeraAgent correctly initializes, uses, and toggles the language components.
+        This test mocks the components themselves to focus on the integration logic.
+        """
+        # --- Configure Mocks ---
+        mock_cortex_instance = MagicMock()
+        mock_cortex_instance.process.return_value = np.random.rand(64)
+        mock_language_cortex_class.return_value = mock_cortex_instance
+
+        mock_generation_head_instance = MagicMock()
+        mock_generation_head_instance.generate.return_value = "A mocked response."
+        mock_text_generation_head_class.return_value = mock_generation_head_instance
+
+        # --- 1. Test with Language Model ENABLED ---
+        agent_hyperparams = {
+            "language_model": {
+                "enabled": True,
+                "model_id": "mock/model-id"
+            }
+        }
+        agent = ChimeraAgent(
+            agent_id="test-lang-agent", obs_dim=64, action_dim=4,
+            latent_dim=64, hidden_dim=128,
+            hyperparams=agent_hyperparams,
+            load_from_storage=False
+        )
+
+        # Assert that the language components were initialized
+        self.assertTrue(agent.language_model_enabled)
+        mock_language_cortex_class.assert_called_with(model_id="mock/model-id", output_dim=64)
+        mock_text_generation_head_class.assert_called_with(model_id="mock/model-id", input_dim=128)
+
+        # Assert the agent uses the components correctly
+        agent.perceive_and_update_state('language_cortex', "A test input.")
+        mock_cortex_instance.process.assert_called_with("A test input.")
+
+        response = agent.generate_response()
+        mock_generation_head_instance.generate.assert_called_once()
+        self.assertEqual(response, "A mocked response.")
+
+        # --- 2. Test with Language Model DISABLED ---
+        disabled_agent_hyperparams = { "language_model": { "enabled": False } }
+        disabled_agent = ChimeraAgent(
+            agent_id="test-disabled-agent", obs_dim=64, action_dim=4,
+            hyperparams=disabled_agent_hyperparams,
+            load_from_storage=False
+        )
+
+        # Assert that the language components were NOT initialized
+        self.assertFalse(disabled_agent.language_model_enabled)
+        self.assertNotIn('language_cortex', disabled_agent.cortexes)
+        self.assertIsNone(disabled_agent.text_generation_head)
+        self.assertEqual(disabled_agent.generate_response(), "I am currently unable to speak.")
