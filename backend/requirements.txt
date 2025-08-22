@@ -8,3 +8,4 @@ gymnasium
 torch
 faiss-cpu
 PyYAML
+aiohttp

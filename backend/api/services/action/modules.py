@@ -37,8 +37,10 @@ class ActionHead(nn.Module):
         if not isinstance(state_vector, torch.Tensor):
             state_vector = torch.from_numpy(state_vector).float()
 
-        if state_vector.shape[0] != self.input_dim:
-            raise ValueError(f"Input vector dimension {state_vector.shape[0]} does not match expected {self.input_dim}")
+        # The input can be a single vector or a batch of vectors.
+        # The feature dimension is always the last one.
+        if state_vector.shape[-1] != self.input_dim:
+            raise ValueError(f"Input vector feature dimension {state_vector.shape[-1]} does not match expected {self.input_dim}")
 
         return self.layer(state_vector)
 

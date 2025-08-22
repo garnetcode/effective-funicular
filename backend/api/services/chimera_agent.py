@@ -24,6 +24,7 @@ class NumpyJSONEncoder(json.JSONEncoder):
 from .world_model_core import WorldModel
 from .stag_framework import STAG_Framework
 from .state_history_manager import StateHistoryManager
+from .replay_buffer import ReplayBuffer, Experience
 from .cortex import modules as cortex_modules
 from .action.modules import ActionHead
 
@@ -90,7 +91,9 @@ class ChimeraAgent:
             # Save the initial state as version 0
             self.save_state(version_info={"message": "Initial state."})
 
-        self.episode_memory = []
+        # Initialize Replay Buffer for online learning
+        buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
+        self.replay_buffer = ReplayBuffer(buffer_capacity)
 
     def save_state(self, version_info={}):
         """Saves the agent's core models to a new version snapshot."""
@@ -166,78 +169,75 @@ class ChimeraAgent:
 
         return action, action_log_prob
 
-    def record_experience(self, obs, action, log_prob, reward, next_obs, done):
-        self.episode_memory.append({
-            "obs": obs,
-            "action": action,
-            "log_prob": log_prob,
-            "reward": reward,
-            "next_obs": next_obs,
-            "done": done
-        })
+    def record_experience(self, *args):
+        """Pushes an experience to the replay buffer."""
+        self.replay_buffer.push(*args)
 
     def train(self):
-        if not self.episode_memory:
-            return {"status": "No experiences to train on."}
+        """
+        Samples a batch from the replay buffer and performs one step of training
+        for both the World Model and the Action Head.
+        """
+        batch_size = self.hyperparams.get('batch_size', 32)
+        if len(self.replay_buffer) < batch_size:
+            return {"status": "Not enough experiences in buffer to train."}
 
-        # --- Prepare Batches ---
-        obs_batch = torch.stack([torch.from_numpy(e['obs']) for e in self.episode_memory]).float()
-        action_batch = torch.tensor([e['action'] for e in self.episode_memory])
-        reward_batch = torch.tensor([e['reward'] for e in self.episode_memory]).float()
-        next_obs_batch = torch.stack([torch.from_numpy(e['next_obs']) for e in self.episode_memory]).float()
+        # --- Sample a batch and prepare tensors ---
+        experiences = self.replay_buffer.sample(batch_size)
+        batch = Experience(*zip(*experiences))
+
+        obs_batch = torch.stack([torch.from_numpy(o) for o in batch.obs]).float()
+        action_batch = torch.tensor(batch.action)
+        reward_batch = torch.tensor(batch.reward).float()
+        next_obs_batch = torch.stack([torch.from_numpy(o) for o in batch.next_obs]).float()
+        # done_batch = torch.tensor(batch.done).float() # Not used yet, but good practice
 
         # --- Initialize ---
         world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=self.learning_rate)
         action_head_optimizer = self.action_head.optimizer
-        total_wm_loss = 0
-        total_policy_loss = 0
-        h = torch.zeros(1, self.hidden_dim) # Initial hidden state
 
-        # --- Single Loop Training ---
-        # We iterate through the episode once, calculating both losses simultaneously.
-        for i in range(len(self.episode_memory)):
-            # Detach hidden state to prevent gradients from flowing endlessly through time
-            h = h.detach()
+        # NOTE: This is a simplified training step on a batch.
+        # A full implementation would handle hidden states across batches.
+        # Here, we reset the hidden state for each sampled batch for simplicity.
+        h = torch.zeros(batch_size, self.hidden_dim)
 
-            # --- World Model Forward Pass and Loss ---
-            _, h, obs_pred, reward_pred = self.world_model(obs_batch[i], action_batch[i], h)
+        # --- World Model Training ---
+        _, _, obs_pred_batch, reward_pred_batch = self.world_model(obs_batch, action_batch, h)
 
-            reconstruction_loss = torch.nn.functional.mse_loss(obs_pred, next_obs_batch[i])
-            reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_batch[i].unsqueeze(0))
-            total_wm_loss += reconstruction_loss + reward_loss
+        reconstruction_loss = torch.nn.functional.mse_loss(obs_pred_batch, next_obs_batch)
+        reward_loss = torch.nn.functional.mse_loss(reward_pred_batch, reward_batch.unsqueeze(1))
+        total_wm_loss = reconstruction_loss + reward_loss
 
-            # --- Action Head Forward Pass and Loss ---
-            # The policy acts on the hidden state that *produced* the action.
-            # So we use the hidden state `h` we just calculated.
-            action_logits = self.action_head(h)
-            log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
-            action_log_prob = log_probs.squeeze(0)[action_batch[i]]
-
-            # Simple REINFORCE update (policy gradient)
-            total_policy_loss -= action_log_prob * reward_batch[i]
-
-        # --- Calculate Gradients ---
         world_model_optimizer.zero_grad()
-        action_head_optimizer.zero_grad()
-
-        # We calculate the gradients for both losses before updating any weights.
-        # The backward passes accumulate gradients in the `.grad` attributes of the tensors.
-        total_wm_loss.backward(retain_graph=True)
-        mean_policy_loss = total_policy_loss / len(self.episode_memory)
-        mean_policy_loss.backward()
-
-        # --- Apply Gradients (Update Weights) ---
+        total_wm_loss.backward()
         world_model_optimizer.step()
+
+        # --- Action Head Training ---
+        # The policy loss needs to be re-evaluated based on the current policy.
+        # This is a simplified version. A proper actor-critic or policy gradient
+        # method would be more involved.
+
+        # Re-run forward pass to get hidden states for policy training
+        with torch.no_grad():
+            _, h_policy, _, _ = self.world_model(obs_batch, action_batch, torch.zeros(batch_size, self.hidden_dim))
+
+        action_logits = self.action_head(h_policy)
+        log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
+
+        # Select the log_probs for the actions that were actually taken
+        log_probs_for_actions = log_probs.gather(1, action_batch.unsqueeze(1))
+
+        # A simple REINFORCE-style update
+        policy_loss = (-log_probs_for_actions * reward_batch.unsqueeze(1)).mean()
+
+        action_head_optimizer.zero_grad()
+        policy_loss.backward()
         action_head_optimizer.step()
 
-        # --- Cleanup ---
-        self.episode_memory = []
-        self.save_state()
-
         return {
-            "status": "Training complete",
+            "status": "Training step complete",
             "world_model_loss": total_wm_loss.item(),
-            "policy_loss": mean_policy_loss.item()
+            "policy_loss": policy_loss.item()
         }
 
     def get_graph_structure(self):
