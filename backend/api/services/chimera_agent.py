@@ -21,8 +21,9 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
 
-from .hopfield_core import HopfieldCore
+from .world_model_core import WorldModel
 from .stag_framework import STAG_Framework
+from .state_history_manager import StateHistoryManager
 from .cortex import modules as cortex_modules
 from .action.modules import ActionHead
 
@@ -47,370 +48,197 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, dimensions=64, n_actions=256, cortex_configs=None, load_from_storage=True, **hyperparams):
+    def __init__(self, agent_id, obs_dim, action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, **hyperparams):
         self.agent_id = agent_id
-        self.dimensions = dimensions
-        self.n_actions = n_actions
-        self.storage_path = os.path.join('backend', 'storage', f'{self.agent_id}.npz')
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+
         self.hyperparams = hyperparams
+        self.history_manager = StateHistoryManager(agent_id)
         self.learning_rate = self.hyperparams.get('learning_rate', 0.01)
         self.gamma = self.hyperparams.get('gamma', 0.99)
         self.stag_expansion_threshold = self.hyperparams.get('stag_expansion_threshold', 0.1)
 
-        if load_from_storage and os.path.exists(self.storage_path):
+        # --- Add Homeostatic Vitals ---
+        self.max_energy = 100.0
+        self.energy = self.max_energy
+        self.integrity = 100.0
+        # Define the metabolic cost for just existing for one step
+        self.metabolic_cost = 0.1 # This is a small, constant energy drain
+
+        # The agent's current hidden state for the world model
+        self.hidden_state = torch.zeros(1, self.hidden_dim)
+        # Last action taken, for world model input
+        self.last_action = torch.tensor(0)
+
+        # Attempt to load the latest state if it exists
+        if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
+            # Initialize a new agent state
             self.cortex_configs = cortex_configs or {}
-            self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
-            self.hopfield = HopfieldCore(
-                dimensions,
-                learning_rate=self.hyperparams.get('learning_rate', 0.1),
-                weight_decay=self.hyperparams.get('weight_decay', 0.01)
-            )
-            self.stag = STAG_Framework(dimensions, **self.hyperparams)
+            self.cortexes = _initialize_cortexes(self.cortex_configs, self.obs_dim)
+            self.world_model = WorldModel(obs_dim, action_dim, latent_dim, hidden_dim)
+            self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
             self.action_head = ActionHead(
-                input_dim=dimensions,
-                n_actions=n_actions,
+                input_dim=self.hidden_dim,
+                n_actions=self.action_dim,
                 learning_rate=self.learning_rate
             )
-
-            # Data structures for STAG data partitioning
-            self._next_pattern_id = 0
-            self.patterns = {} # {pattern_id: pattern_vector}
-            # {pattern_id: (tree_node_path, gng_node_id)} - simplified for now
-            self.pattern_node_map = {}
-
-            self.save_state()
+            # Save the initial state as version 0
+            self.save_state(version_info={"message": "Initial state."})
 
         self.episode_memory = []
 
-    def save_state(self):
-        storage_dir = os.path.dirname(self.storage_path)
-        os.makedirs(storage_dir, exist_ok=True)
-
-        stag_state_json = json.dumps(self.stag.get_serializable_structure(), cls=NumpyJSONEncoder)
-        cortex_configs_json = json.dumps(self.cortex_configs, cls=NumpyJSONEncoder)
-        hyperparams_json = json.dumps(self.hyperparams, cls=NumpyJSONEncoder)
-        patterns_json = json.dumps(self.patterns, cls=NumpyJSONEncoder)
-        pattern_node_map_json = json.dumps(self.pattern_node_map, cls=NumpyJSONEncoder)
-
-        state_data = {
-            'agent_id': self.agent_id, 'dimensions': self.dimensions, 'n_actions': self.n_actions,
-            'cortex_configs_json': cortex_configs_json, 'hyperparams_json': hyperparams_json,
-            'hopfield_weights': self.hopfield.weights,
-            'action_head_state': self.action_head.get_state(),
-            'stag_state_json': stag_state_json,
-            'next_pattern_id': self._next_pattern_id,
-            'patterns_json': patterns_json,
-            'pattern_node_map_json': pattern_node_map_json,
+    def save_state(self, version_info={}):
+        """Saves the agent's core models to a new version snapshot."""
+        # Consolidate all learnable model parameters into one dictionary for versioning
+        learnable_params = {
+            'world_model_state_dict': self.world_model.state_dict(),
+            'action_head_state_dict': self.action_head.state_dict(), # Use state_dict for weights only
+            # TODO: Add STAG and other components to versioning if they become learnable
         }
-        np.savez_compressed(self.storage_path, **state_data)
+        self.history_manager.save_snapshot(learnable_params, version_info)
 
-    def load_state(self):
-        with np.load(self.storage_path, allow_pickle=True) as data:
-            self.dimensions = int(data['dimensions'])
-            self.n_actions = int(data['n_actions'])
-            self.hyperparams = json.loads(str(data['hyperparams_json']))
-            self.learning_rate = self.hyperparams.get('learning_rate', 0.01)
-            self.gamma = self.hyperparams.get('gamma', 0.99)
-            self.stag_expansion_threshold = self.hyperparams.get('stag_expansion_threshold', 0.1)
+    def load_state(self, version='latest'):
+        """Loads the agent's core models from a version snapshot."""
+        learnable_params = self.history_manager.load_snapshot(version)
 
-            self.cortex_configs = json.loads(str(data['cortex_configs_json']))
-            self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
-
-            # Reconstruct Hopfield Core by mapping keys correctly.
-            # The hyperparams dictionary contains keys for all services, so we
-            # must pass only the ones relevant to the HopfieldCore.
-            hopfield_state = {
-                'dimensions': self.dimensions,
-                'weights': data['hopfield_weights'],
-                'learning_rate': self.hyperparams.get('learning_rate', 0.1),
-                'weight_decay': self.hyperparams.get('weight_decay', 0.01)
-            }
-            self.hopfield = HopfieldCore.from_state(hopfield_state)
-            self.action_head = ActionHead(
-                self.dimensions,
-                self.n_actions,
-                learning_rate=self.learning_rate
-            )
-            # The action_head_state is a raw object from np.load, not a dict
-            self.action_head.set_state(data['action_head_state'].item())
-
-            stag_structure = json.loads(str(data['stag_state_json']))
-            self.stag = STAG_Framework.from_serializable_structure(stag_structure, **self.hyperparams)
-
-            # Load pattern mapping data
-            self._next_pattern_id = int(data.get('next_pattern_id', 0))
-            self.patterns = json.loads(str(data.get('patterns_json', '{}')))
-            self.patterns = {int(k): np.array(v) for k, v in self.patterns.items()} # Re-numpyfy
-            self.pattern_node_map = json.loads(str(data.get('pattern_node_map_json', '{}')))
-            # Handle backward compatibility for old pattern_node_map format
-            temp_map = {}
-            for k, v in self.pattern_node_map.items():
-                key = int(k)
-                if isinstance(v, int):
-                    # Old format, assume it belongs to the root GNG (level 0)
-                    temp_map[key] = (0, v)
-                else:
-                    # New format, already a tuple
-                    temp_map[key] = tuple(v)
-            self.pattern_node_map = temp_map
+        if learnable_params:
+            self.world_model.load_state_dict(learnable_params['world_model_state_dict'])
+            self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
+            # TODO: Load STAG state etc.
+        else:
+            # This should only happen if there's no history
+            print("Warning: No state to load.")
 
 
-    def learn_associative(self, embedding):
+    def perceive_and_update_state(self, cortex_id, raw_obs):
         """
-        LEARN Mode (Sec 3.3): Learns a new pattern in the Hopfield core.
+        Processes a raw observation through a cortex, then updates the world
+        model's hidden state.
         """
-        if not isinstance(embedding, np.ndarray): embedding = np.array(embedding)
-        self.hopfield.learn(embedding)
+        # 1. Process raw observation through the specified cortex
+        obs_numpy = self.cortexes[cortex_id].process(raw_obs)
+        obs_tensor = torch.from_numpy(obs_numpy).float()
 
-        pattern_id = self._next_pattern_id
-        self.patterns[pattern_id] = embedding
-        self._next_pattern_id += 1
+        # 2. Use the world model to update the hidden state
+        # The 'action' is the last action taken to get to this new observation.
+        with torch.no_grad():
+            _, h_next, _, _ = self.world_model(obs_tensor, self.last_action, self.hidden_state)
 
-        self.save_state()
-        return {"status": "Associative learning complete.", "pattern_id": pattern_id}
+        # 3. Update the agent's internal state
+        self.hidden_state = h_next
 
-    def is_novel(self, embedding, novelty_threshold=0.2):
+        # The STAG framework now organizes the agent's internal, context-rich hidden states
+        h_numpy = self.hidden_state.detach().numpy().flatten()
+
+        # Find the correct terminal GNG and process the input
+        terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_numpy)
+        if terminal_node:
+            terminal_node['gng'].process_input(h_numpy)
+
+        return self.hidden_state
+
+    def select_action(self):
         """
-        Checks if an embedding is novel compared to existing patterns.
-        A simple approach: check the distance to the nearest pattern.
+        Selects an action based on the current internal state of the agent.
         """
-        if not self.patterns:
-            return True
-
-        all_patterns = np.array(list(self.patterns.values()))
-        distances = np.linalg.norm(all_patterns - embedding, axis=1)
-        min_distance = np.min(distances)
-
-        return min_distance > novelty_threshold
-
-    def organize_memory(self, pattern_id, reward=0):
-        """
-        ORGANIZE Mode (Sec 3.3): Updates the GNG/STAG structure.
-        The reward parameter influences the utility of the winning neuron.
-        """
-        if pattern_id not in self.patterns:
-            raise ValueError(f"Pattern ID {pattern_id} not found.")
-
-        cue_vector = self.patterns[pattern_id]
-
-        # 1. Get stable attractor from Hopfield network
-        stable_attractor = self.hopfield.recall(cue_vector)
-
-        # 2. Find the terminal GNG and winner node for this attractor
-        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
-        if winner_id is None: # GNG not initialized enough
-            terminal_node['gng'].process_input(stable_attractor)
-            self.save_state()
-            return {"status": "Organization step skipped, GNG too small."}
-
-        # 3. Update the mapping for this pattern with a robust identifier
-        level_id = terminal_node['level_id']
-        self.pattern_node_map[pattern_id] = (level_id, winner_id)
-
-        # 4. Process the input in the terminal GNG, modulated by reward
-        terminal_gng = terminal_node['gng']
-        terminal_gng.process_input(stable_attractor, reward=reward)
-
-        # 5. Check for expansion condition
-        if terminal_gng.nodes[winner_id]['error'] > self.stag_expansion_threshold:
-            self._trigger_expansion(terminal_node, winner_id)
-
-        self.save_state()
-        return {"status": "Organization step complete."}
-
-    def _trigger_expansion(self, parent_level_node, parent_gng_node_id):
-        """
-        Orchestrates the expansion of a GNG node into a new child GNG.
-        """
-        parent_level_id = parent_level_node['level_id']
-
-        # 1. Find all patterns that belong to the node being expanded
-        patterns_to_remap = []
-        for pid, mapped_id in self.pattern_node_map.items():
-            # Check if the mapped_id is for the node being expanded
-            if isinstance(mapped_id, tuple) and mapped_id == (parent_level_id, parent_gng_node_id):
-                patterns_to_remap.append(pid)
-
-        if not patterns_to_remap:
-            print(f"Node {parent_gng_node_id} in level {parent_level_id} triggered expansion but no patterns mapped to it. Skipping.")
-            return
-
-        # 2. Create the new child GNG in the STAG framework
-        new_child_gng = self.stag.expand_node(parent_level_node, parent_gng_node_id)
-        if new_child_gng is None: return
-
-        new_level_id = self.stag._next_level_id - 1 # The ID of the GNG we just created
-
-        # 3. Train the new child GNG with the identified patterns and remap them
-        print(f"Training new child GNG for level {new_level_id} with {len(patterns_to_remap)} patterns.")
-        for pattern_id in patterns_to_remap:
-            pattern_vector = self.patterns[pattern_id]
-            stable_attractor = self.hopfield.recall(pattern_vector)
-
-            # Train the new GNG
-            new_child_gng.process_input(stable_attractor)
-
-            # Re-map the pattern to its new home in the child GNG
-            new_winner_id, _ = new_child_gng._find_winners(stable_attractor)
-            self.pattern_node_map[pattern_id] = (new_level_id, new_winner_id)
-            print(f"Re-mapped pattern {pattern_id} to new node ({new_level_id}, {new_winner_id})")
-
-    def update_cortex_config(self, new_cortex_configs):
-        """Merges new cortex configs, re-initializes cortexes, and saves the agent."""
-        self.cortex_configs.update(new_cortex_configs)
-        self.cortexes = _initialize_cortexes(self.cortex_configs, self.dimensions)
-        self.save_state()
-        print(f"Agent {self.agent_id} cortex config updated to: {self.cortex_configs}")
-
-    def update_action_space(self, n_actions):
-        """Resets the agent's action head for a new number of actions."""
-        self.n_actions = n_actions
-        self.action_head = ActionHead(
-            input_dim=self.dimensions,
-            n_actions=self.n_actions,
-            learning_rate=self.learning_rate
-        )
-        self.save_state()
-        print(f"Agent {self.agent_id} action space updated to: {n_actions} actions")
-
-    def perceive(self, cortex_id, raw_input):
-        if cortex_id not in self.cortexes: raise ValueError(f"Cortex '{cortex_id}' not found.")
-        return self.cortexes[cortex_id].process(raw_input)
-
-    def get_internal_state_representation(self, input_embedding):
-        stable_attractor = self.hopfield.recall(input_embedding)
-        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
-        if winner_id is not None and winner_id in terminal_node['gng'].nodes:
-            return terminal_node['gng'].nodes[winner_id]['weight']
-        return stable_attractor
-
-    def get_state_novelty_error(self, input_embedding):
-        """
-        Calculates the novelty of a state based on the GNG error of the
-        winning node. A high error indicates a novel, poorly understood state.
-        """
-        stable_attractor = self.hopfield.recall(input_embedding)
-        terminal_node, winner_id, _ = self.stag.find_terminal_node_and_path(stable_attractor)
-        if winner_id is not None and winner_id in terminal_node['gng'].nodes:
-            return terminal_node['gng'].nodes[winner_id]['error']
-        # Return a high error if no node is found, encouraging exploration
-        return 1.0
-
-    def probe_activity(self, cortex_id, raw_input):
-        """
-        Processes an input and returns the activation path through the STAG hierarchy.
-        """
-        # 1. Perceive the input to get an embedding
-        embedding = self.perceive(cortex_id, raw_input)
-
-        # 2. Get the stable attractor state from the Hopfield network
-        stable_attractor = self.hopfield.recall(embedding)
-
-        # 3. Find the activation path in the STAG framework
-        _, _, activation_path = self.stag.find_terminal_node_and_path(stable_attractor)
-
-        return {"activation_path": activation_path}
-
-    def select_action(self, state_embedding):
-        internal_state = self.get_internal_state_representation(state_embedding)
-
-        # Convert to tensor for PyTorch model
-        state_tensor = torch.from_numpy(internal_state).float().unsqueeze(0)
+        # The internal state for action selection is the world model's hidden state
+        internal_state = self.hidden_state
 
         with torch.no_grad():
-            action_logits = self.action_head(state_tensor).squeeze(0)
+            action_logits = self.action_head(internal_state).squeeze(0)
 
-        # Convert back to numpy for softmax and sampling
+        # Convert to numpy for softmax and sampling
         action_probs_np = softmax(action_logits.numpy())
-        action = np.random.choice(self.n_actions, p=action_probs_np)
+        action = np.random.choice(self.action_dim, p=action_probs_np)
+        action_tensor = torch.tensor(action)
 
         # We need the log_prob as a tensor for the loss calculation
         log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
         action_log_prob = log_probs[action]
 
-        return action, action_log_prob, internal_state
+        # Store the chosen action for the next world model update
+        self.last_action = action_tensor
 
-    def record_experience(self, internal_state, action, log_prob, reward, pattern_id=None):
+        return action, action_log_prob
+
+    def record_experience(self, obs, action, log_prob, reward, next_obs, done):
         self.episode_memory.append({
-            "state": internal_state,
+            "obs": obs,
             "action": action,
             "log_prob": log_prob,
             "reward": reward,
-            "pattern_id": pattern_id
+            "next_obs": next_obs,
+            "done": done
         })
 
     def train(self):
-        # This is policy/RL training, separate from unsupervised cognitive learning
         if not self.episode_memory:
             return {"status": "No experiences to train on."}
 
-        # REINFORCE algorithm implementation with manual gradient calculation
-        G = 0
-        returns = []
-        # Calculate discounted returns (rewards-to-go)
-        for step in reversed(self.episode_memory):
-            G = step['reward'] + self.gamma * G
-            returns.insert(0, G)
+        # --- Prepare Batches ---
+        obs_batch = torch.stack([torch.from_numpy(e['obs']) for e in self.episode_memory]).float()
+        action_batch = torch.tensor([e['action'] for e in self.episode_memory])
+        reward_batch = torch.tensor([e['reward'] for e in self.episode_memory]).float()
+        next_obs_batch = torch.stack([torch.from_numpy(e['next_obs']) for e in self.episode_memory]).float()
 
-        returns = np.array(returns)
-        # Normalize returns for stability
-        if len(returns) > 1:
-            returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-9)
+        # --- Initialize ---
+        world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=self.learning_rate)
+        action_head_optimizer = self.action_head.optimizer
+        total_wm_loss = 0
+        total_policy_loss = 0
+        h = torch.zeros(1, self.hidden_dim) # Initial hidden state
 
-        # Process memory organization from the episode
-        for i, step in enumerate(self.episode_memory):
-            pattern_id = step.get('pattern_id')
-            if pattern_id is not None:
-                self.organize_memory(pattern_id, reward=returns[i])
+        # --- Single Loop Training ---
+        # We iterate through the episode once, calculating both losses simultaneously.
+        for i in range(len(self.episode_memory)):
+            # Detach hidden state to prevent gradients from flowing endlessly through time
+            h = h.detach()
 
-        # Policy gradient update
-        log_probs = torch.stack([step['log_prob'] for step in self.episode_memory])
-        returns_tensor = torch.from_numpy(returns).float()
+            # --- World Model Forward Pass and Loss ---
+            _, h, obs_pred, reward_pred = self.world_model(obs_batch[i], action_batch[i], h)
 
-        policy_loss = (-log_probs * returns_tensor).mean()
+            reconstruction_loss = torch.nn.functional.mse_loss(obs_pred, next_obs_batch[i])
+            reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_batch[i].unsqueeze(0))
+            total_wm_loss += reconstruction_loss + reward_loss
 
-        self.action_head.optimizer.zero_grad()
-        policy_loss.backward()
-        self.action_head.optimizer.step()
+            # --- Action Head Forward Pass and Loss ---
+            # The policy acts on the hidden state that *produced* the action.
+            # So we use the hidden state `h` we just calculated.
+            action_logits = self.action_head(h)
+            log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
+            action_log_prob = log_probs.squeeze(0)[action_batch[i]]
 
-        # Clear memory for the next episode
+            # Simple REINFORCE update (policy gradient)
+            total_policy_loss -= action_log_prob * reward_batch[i]
+
+        # --- Calculate Gradients ---
+        world_model_optimizer.zero_grad()
+        action_head_optimizer.zero_grad()
+
+        # We calculate the gradients for both losses before updating any weights.
+        # The backward passes accumulate gradients in the `.grad` attributes of the tensors.
+        total_wm_loss.backward(retain_graph=True)
+        mean_policy_loss = total_policy_loss / len(self.episode_memory)
+        mean_policy_loss.backward()
+
+        # --- Apply Gradients (Update Weights) ---
+        world_model_optimizer.step()
+        action_head_optimizer.step()
+
+        # --- Cleanup ---
         self.episode_memory = []
-
         self.save_state()
-        return {"status": "Training complete", "loss": policy_loss.item()}
 
-    def consolidate_memories(self, n_replays=1):
-        """
-        Performs offline memory consolidation by replaying existing patterns.
-        This strengthens the representations in the STAG/GNG framework.
-        """
-        if not self.patterns:
-            return {"status": "No patterns to consolidate."}
-
-        print(f"Starting memory consolidation for {len(self.patterns)} patterns...")
-        all_pattern_ids = list(self.patterns.keys())
-
-        for i in range(n_replays):
-            # Shuffle the patterns for each replay epoch
-            np.random.shuffle(all_pattern_ids)
-            for pattern_id in all_pattern_ids:
-                # We add a small amount of noise to the cue to promote robustness
-                # without corrupting the core memory.
-                original_pattern = self.patterns[pattern_id]
-                noise = np.random.normal(0, 0.01, self.dimensions)
-                noisy_cue = original_pattern + noise
-
-                # The core of consolidation is re-organizing the memory, which
-                # strengthens the appropriate nodes in the GNG.
-                # We use the noisy cue for recall but the original pattern ID
-                # for the organization process.
-                self.organize_memory(pattern_id)
-
-        self.save_state()
-        print("Memory consolidation complete.")
-        return {"status": "Consolidation complete."}
+        return {
+            "status": "Training complete",
+            "world_model_loss": total_wm_loss.item(),
+            "policy_loss": mean_policy_loss.item()
+        }
 
     def get_graph_structure(self):
         return self.stag.get_flattened_structure()
