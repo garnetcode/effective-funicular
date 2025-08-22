@@ -1,0 +1,19 @@
+# Configuration for training the ChimeraAgent
+
+# Environment settings
+env_name: "CartPole-v1"
+
+# Agent settings
+agent_id: "agent-cartpole-v1" # Can be overridden
+force_new_agent: false # If true, ignores any saved state for the agent_id
+
+# World Model and Agent Core Dimensions
+# These need to match the environment's observation and action space
+# obs_dim is inferred from the environment
+latent_dim: 64
+hidden_dim: 128
+
+# Training Hyperparameters
+episodes: 1000
+learning_rate: 0.005
+gamma: 0.99

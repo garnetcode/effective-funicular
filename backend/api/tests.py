@@ -4,8 +4,10 @@ from django.test import TestCase
 from unittest.mock import patch, MagicMock
 
 import torch
+import shutil
 from .services.gng_engine import GNG_Engine
 from .services.chimera_agent import ChimeraAgent
+from .services.state_history_manager import StateHistoryManager
 
 class GNG_EngineTests(TestCase):
     def setUp(self):
@@ -102,10 +104,11 @@ class ChimeraAgentTests(TestCase):
         self.agent.episode_memory = []
 
     def tearDown(self):
-        # Clean up the created agent file
-        storage_path = os.path.join('backend', 'storage', f'{self.agent_id}.npz')
-        if os.path.exists(storage_path):
-            os.remove(storage_path)
+        # Clean up the created agent history directory
+        history_dir = self.agent.history_manager.storage_dir
+        if os.path.exists(history_dir):
+            shutil.rmtree(history_dir)
+
 
     def test_perception_and_state_update(self):
         """Test that perceiving an observation updates the agent's hidden state."""
@@ -175,3 +178,70 @@ class ChimeraAgentTests(TestCase):
         # Simulate integrity loss
         self.agent.integrity -= 10.0
         self.assertEqual(self.agent.integrity, 90.0)
+
+
+class StateHistoryManagerTests(TestCase):
+    def setUp(self):
+        self.agent_id = "test-history-agent"
+        self.storage_root = "backend/test_storage"
+        self.manager = StateHistoryManager(self.agent_id, storage_root=self.storage_root, base_snapshot_interval=3)
+
+    def tearDown(self):
+        # Clean up the created history directory
+        if os.path.exists(self.manager.storage_dir):
+            shutil.rmtree(self.manager.storage_dir)
+
+    def test_save_and_load_versioning(self):
+        """
+        Tests the full base-and-diff versioning and reconstruction logic.
+        """
+        # Create a series of states
+        states = []
+        state_v0 = {'param1': torch.tensor([1.0, 2.0]), 'param2': torch.tensor([3.0])}
+        states.append(state_v0)
+
+        # Version 0 (base)
+        self.manager.save_snapshot(states[0], version_info={'loss': 10.0})
+
+        # Version 1 (diff)
+        states.append({'param1': torch.tensor([1.5, 2.5]), 'param2': torch.tensor([3.5])})
+        self.manager.save_snapshot(states[1], version_info={'loss': 9.0})
+
+        # Version 2 (diff)
+        states.append({'param1': torch.tensor([1.5, 3.0]), 'param2': torch.tensor([4.0])})
+        self.manager.save_snapshot(states[2], version_info={'loss': 8.0})
+
+        # Version 3 (base)
+        states.append({'param1': torch.tensor([2.0, 2.0]), 'param2': torch.tensor([2.0])})
+        self.manager.save_snapshot(states[3], version_info={'loss': 7.0})
+
+        # Version 4 (diff)
+        states.append({'param1': torch.tensor([2.5, 2.5]), 'param2': torch.tensor([2.5])})
+        self.manager.save_snapshot(states[4], version_info={'loss': 6.0})
+
+        # --- Test Reconstruction ---
+
+        # Test loading the latest version (v4)
+        loaded_v4 = self.manager.load_snapshot('latest')
+        self.assertTrue(torch.allclose(loaded_v4['param1'], states[4]['param1']))
+        self.assertTrue(torch.allclose(loaded_v4['param2'], states[4]['param2']))
+
+        # Test loading an intermediate diff version (v2)
+        loaded_v2 = self.manager.load_snapshot(2)
+        self.assertTrue(torch.allclose(loaded_v2['param1'], states[2]['param1']))
+        self.assertTrue(torch.allclose(loaded_v2['param2'], states[2]['param2']))
+
+        # Test loading a base version (v3)
+        loaded_v3 = self.manager.load_snapshot(3)
+        self.assertTrue(torch.allclose(loaded_v3['param1'], states[3]['param1']))
+        self.assertTrue(torch.allclose(loaded_v3['param2'], states[3]['param2']))
+
+        # Test history log
+        history = self.manager._read_history()
+        self.assertEqual(len(history), 5)
+        self.assertEqual(history[0]['type'], 'base')
+        self.assertEqual(history[1]['type'], 'diff')
+        self.assertEqual(history[2]['type'], 'diff')
+        self.assertEqual(history[3]['type'], 'base')
+        self.assertEqual(history[4]['type'], 'diff')
+        self.assertEqual(history[4]['info']['loss'], 6.0)

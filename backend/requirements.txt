@@ -7,3 +7,4 @@ numpy
 gymnasium
 torch
 faiss-cpu
+PyYAML
