@@ -69,12 +69,37 @@ class Command(BaseCommand):
             episode_reward = 0
 
             while not (terminated or truncated):
+                # --- Homeostasis Integration ---
+                # 1. Get vitals before the action
+                old_energy = agent.energy
+                old_integrity = agent.integrity
+
+                # 2. Perceive state and select action
                 state_embedding = agent.perceive(cortex_id, state)
                 action, log_prob, internal_state = agent.select_action(state_embedding)
-                next_state, reward, terminated, truncated, info = env.step(action)
-                agent.record_experience(internal_state, action, reward)
+
+                # 3. Step the environment
+                next_state, external_reward, terminated, truncated, info = env.step(action)
+
+                # 4. Update agent vitals
+                agent.energy -= agent.metabolic_cost # Apply metabolic cost
+                agent.energy += info.get('energy_change', 0.0)
+                agent.integrity += info.get('integrity_change', 0.0)
+                agent.energy = min(agent.energy, agent.max_energy) # Clamp energy
+
+                # 5. Calculate homeostatic reward
+                energy_reward = agent.energy - old_energy
+                integrity_reward = agent.integrity - old_integrity
+                homeostatic_reward = energy_reward + integrity_reward
+
+                # 6. Calculate total reward
+                total_reward = external_reward + homeostatic_reward
+
+                # 7. Record experience with the total reward
+                agent.record_experience(internal_state, action, log_prob, total_reward)
+
                 state = next_state
-                episode_reward += reward
+                episode_reward += external_reward # Track external reward for reporting
 
             agent.train()
             total_rewards.append(episode_reward)

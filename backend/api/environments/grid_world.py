@@ -69,13 +69,16 @@ class GridWorld:
 
         self.agent_pos = new_pos
 
-        # Check for terminal states
+        # Check for terminal states and set rewards/info
+        info = {'energy_change': 0.0, 'integrity_change': 0.0}
         if tuple(self.agent_pos) == self.goal_pos:
             reward = 10.0
             done = True
+            info['energy_change'] = 20.0 # Gain energy from goal
         elif tuple(self.agent_pos) == self.trap_pos:
             reward = -10.0
             done = True
+            info['integrity_change'] = -10.0 # Lose integrity from trap
         elif self.steps_taken >= self.max_steps:
             reward = -2.0 # Penalty for running out of time
             done = True
@@ -83,7 +86,7 @@ class GridWorld:
             reward = -0.1 # Small penalty for each step to encourage efficiency
             done = False
 
-        return self._get_state(), reward, done, {}
+        return self._get_state(), reward, done, info
 
     def render(self):
         """Prints a text representation of the grid."""

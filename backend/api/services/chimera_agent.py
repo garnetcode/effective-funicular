@@ -57,6 +57,13 @@ class ChimeraAgent:
         self.gamma = self.hyperparams.get('gamma', 0.99)
         self.stag_expansion_threshold = self.hyperparams.get('stag_expansion_threshold', 0.1)
 
+        # --- Add Homeostatic Vitals ---
+        self.max_energy = 100.0
+        self.energy = self.max_energy
+        self.integrity = 100.0
+        # Define the metabolic cost for just existing for one step
+        self.metabolic_cost = 0.1 # This is a small, constant energy drain
+
         if load_from_storage and os.path.exists(self.storage_path):
             self.load_state()
         else:
@@ -103,6 +110,8 @@ class ChimeraAgent:
             'next_pattern_id': self._next_pattern_id,
             'patterns_json': patterns_json,
             'pattern_node_map_json': pattern_node_map_json,
+            'energy': self.energy,
+            'integrity': self.integrity,
         }
         np.savez_compressed(self.storage_path, **state_data)
 
@@ -155,6 +164,10 @@ class ChimeraAgent:
                     # New format, already a tuple
                     temp_map[key] = tuple(v)
             self.pattern_node_map = temp_map
+
+            # Load vitals with backward compatibility
+            self.energy = float(data.get('energy', self.max_energy))
+            self.integrity = float(data.get('integrity', 100.0))
 
 
     def learn_associative(self, embedding):

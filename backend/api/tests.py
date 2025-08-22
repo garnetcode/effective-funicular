@@ -2,8 +2,10 @@ import numpy as np
 from django.test import TestCase
 from unittest.mock import patch, MagicMock
 
+import torch
 from .services.gng_engine import GNG_Engine
 from .services.chimera_agent import ChimeraAgent
+from .services.hopfield_rnn_core import StableHopfieldRNN
 
 class GNG_EngineTests(TestCase):
     def setUp(self):
@@ -105,3 +107,81 @@ class ChimeraAgentTests(TestCase):
         storage_path = os.path.join('backend', 'storage', f'{self.agent_id}.npz')
         if os.path.exists(storage_path):
             os.remove(storage_path)
+
+    def test_homeostatic_vitals_and_reward(self):
+        """
+        Test that agent vitals are updated correctly and influence the reward.
+        """
+        # 1. Check initial state
+        self.assertEqual(self.agent.energy, self.agent.max_energy)
+        self.assertEqual(self.agent.integrity, 100.0)
+
+        # 2. Simulate a basic step with metabolic cost
+        old_energy = self.agent.energy
+        # Manually apply metabolic cost
+        self.agent.energy -= self.agent.metabolic_cost
+        homeostatic_reward = self.agent.energy - old_energy
+        # Record experience with only homeostatic reward for this test
+        self.agent.record_experience(np.random.rand(8), 0, 0.5, homeostatic_reward)
+
+        self.assertAlmostEqual(self.agent.energy, self.agent.max_energy - self.agent.metabolic_cost)
+        # The reward recorded should be the negative metabolic cost
+        self.assertAlmostEqual(self.agent.episode_memory[0]['reward'], -self.agent.metabolic_cost)
+        self.agent.episode_memory = [] # Clear memory
+
+        # 3. Simulate finding food (energy gain)
+        old_energy = self.agent.energy
+        energy_gain = 20.0
+        self.agent.energy += energy_gain
+        homeostatic_reward = self.agent.energy - old_energy
+        self.agent.record_experience(np.random.rand(8), 1, 0.5, homeostatic_reward)
+
+        self.assertAlmostEqual(self.agent.energy, self.agent.max_energy - self.agent.metabolic_cost + energy_gain)
+        self.assertAlmostEqual(self.agent.episode_memory[0]['reward'], energy_gain)
+        self.agent.episode_memory = []
+
+        # 4. Simulate taking damage (integrity loss)
+        old_integrity = self.agent.integrity
+        integrity_loss = -10.0
+        self.agent.integrity += integrity_loss
+        homeostatic_reward = self.agent.integrity - old_integrity
+        self.agent.record_experience(np.random.rand(8), 2, 0.5, homeostatic_reward)
+
+        self.assertAlmostEqual(self.agent.integrity, 100.0 + integrity_loss)
+        self.assertAlmostEqual(self.agent.episode_memory[0]['reward'], integrity_loss)
+
+
+class StableHopfieldRNNTests(TestCase):
+    def setUp(self):
+        """Set up a StableHopfieldRNN instance for testing."""
+        self.num_nodes = 4
+        self.hidden_dim = 8
+        torch.manual_seed(42)
+        self.hrnn = StableHopfieldRNN(num_nodes=self.num_nodes, hidden_dim=self.hidden_dim, alpha=0.1)
+
+    def test_training_and_convergence(self):
+        """
+        Test that the network can learn a pattern and recall it from a noisy cue.
+        """
+        # 1. Define a clear pattern to be memorized
+        # Use tanh to ensure values are in [-1, 1], typical for hidden states
+        pattern_to_memorize = torch.tanh(torch.randn(self.num_nodes, self.hidden_dim))
+
+        # 2. Train the network on this pattern
+        self.hrnn.train_on_pattern(pattern_to_memorize, num_epochs=100, learning_rate=0.01, fixed_point_lambda=0.5)
+
+        # 3. Create a noisy version of the pattern to use as a cue
+        noise = torch.randn(self.num_nodes, self.hidden_dim) * 0.5
+        noisy_cue = pattern_to_memorize + noise
+
+        # 4. Perform the recall process
+        recalled_pattern = self.hrnn.forward(noisy_cue, num_updates=50)
+
+        # 5. Check for convergence
+        # The recalled pattern should be closer to the original than the noisy cue was.
+        initial_distance = torch.norm(pattern_to_memorize - noisy_cue)
+        final_distance = torch.norm(pattern_to_memorize - recalled_pattern)
+
+        print(f"Initial distance: {initial_distance.item()}, Final distance: {final_distance.item()}")
+
+        self.assertLess(final_distance, initial_distance)
