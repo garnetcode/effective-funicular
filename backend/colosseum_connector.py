@@ -33,10 +33,10 @@ class ColosseumConnector:
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
             # The `create_protocol` argument is deprecated. Instead, pass custom
-            # headers using `extra_headers`.
+            # headers using `additional_headers`.
             self.websocket = await websockets.connect(
                 uri,
-                extra_headers={"Origin": "http://localhost:3000"}
+                additional_headers={"Origin": "http://localhost:3000"}
             )
             logger.info(f"Successfully connected to WebSocket: {uri}")
         except websockets.exceptions.InvalidURI:
