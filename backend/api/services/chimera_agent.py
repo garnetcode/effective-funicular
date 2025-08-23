@@ -49,7 +49,8 @@ def _initialize_cortexes(configs, output_dim):
                 cortexes[cortex_id] = CortexClass(
                     model_path_or_id=params['model_id'],
                     output_dim=output_dim,
-                    api_base=params.get('api_base')  # Pass Ollama API base
+                    api_base=params.get('api_base'),
+                    embedding_dim=params.get('embedding_dim')
                 )
             else: # For TextCortex, VisionCortex etc.
                 cortexes[cortex_id] = CortexClass(output_dim=output_dim)
@@ -98,11 +99,16 @@ class ChimeraAgent:
             embedding_model_id = lm_config.get('embedding_model_id')
             generation_model_id = lm_config.get('generation_model_id')
             api_base = lm_config.get('api_base')
+            embedding_dim = lm_config.get('embedding_dim')
 
             if embedding_model_id:
                 self.cortex_configs['language_cortex'] = {
                     "type": "LanguageCortex",
-                    "params": {"model_id": embedding_model_id, "api_base": api_base}
+                    "params": {
+                        "model_id": embedding_model_id,
+                        "api_base": api_base,
+                        "embedding_dim": embedding_dim
+                    }
                 }
 
         # Initialize all components with a default architecture first

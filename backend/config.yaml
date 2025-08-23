@@ -15,6 +15,7 @@ language_model:
   enabled: true # Toggle the language capabilities on/off
   generation_model_id: "gemma-2-9b-it" # Model for generating text responses
   embedding_model_id: "nomic-embed-text" # Model for creating embeddings
+  embedding_dim: 768 # The dimension of the embeddings produced by the model
   api_base: "http://localhost:11434/v1" # Ollama API endpoint
   local_model_path: "" # Set to empty to avoid conflict with API usage
 
