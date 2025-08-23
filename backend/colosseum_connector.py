@@ -44,6 +44,10 @@ class ColosseumConnector:
             logger.error(f"HTTP error creating session: {e}")
             return None
 
+    async def _add_origin_header(self, uri, headers):
+        """A process_request hook to add the Origin header."""
+        headers['Origin'] = 'http://localhost:3000'
+
     async def connect_websocket(self):
         """Connects to the session's WebSocket endpoint."""
         if not self.session_id:
@@ -53,9 +57,8 @@ class ColosseumConnector:
         # The server expects the session ID with hyphens in the URL
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            # Add Origin header to mimic a browser client and avoid 403 Forbidden errors
-            headers = {"Origin": "http://localhost:3000"}
-            self.websocket = await websockets.connect(uri, extra_headers=headers)
+            # Use process_request to add the Origin header for compatibility
+            self.websocket = await websockets.connect(uri, process_request=self._add_origin_header)
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:
