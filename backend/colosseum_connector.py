@@ -53,13 +53,12 @@ class ColosseumConnector:
 
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            # Use a custom protocol factory to inject headers, which is more robust
-            # across different versions of the `websockets` library.
-            protocol_factory = partial(
-                websockets.ClientProtocol,
+            # The `create_protocol` argument is deprecated. Instead, pass custom
+            # headers using `extra_headers`.
+            self.websocket = await websockets.connect(
+                uri,
                 extra_headers={"Origin": "http://localhost:3000"}
             )
-            self.websocket = await websockets.connect(uri, create_protocol=protocol_factory)
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:
