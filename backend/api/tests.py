@@ -97,8 +97,8 @@ class ChimeraAgentTests(TestCase):
 
         self.agent = ChimeraAgent(
             agent_id=self.agent_id,
-            obs_dim=self.obs_dim,
-            action_dim=self.action_dim,
+            max_obs_dim=self.obs_dim,
+            max_action_dim=self.action_dim,
             cortex_configs=cortex_configs,
             load_from_storage=False
         )
@@ -119,7 +119,10 @@ class ChimeraAgentTests(TestCase):
         # 1. Populate the replay buffer with enough experiences to start training
         batch_size = self.agent.hyperparams.get('batch_size', 32)
         for _ in range(batch_size):
+            # hidden_state, stag_context, obs, action, log_prob, reward, next_obs, done
             self.agent.record_experience(
+                torch.rand(1, self.agent.hidden_dim),
+                torch.rand(1, self.agent.hidden_dim),
                 np.random.rand(self.obs_dim),
                 np.random.randint(0, self.action_dim),
                 0.5, # log_prob
@@ -140,6 +143,8 @@ class ChimeraAgentTests(TestCase):
         for _ in range(5):
             # Add one new experience
             self.agent.record_experience(
+                torch.rand(1, self.agent.hidden_dim),
+                torch.rand(1, self.agent.hidden_dim),
                 np.random.rand(self.obs_dim),
                 np.random.randint(0, self.action_dim),
                 0.5, 1.0, np.random.rand(self.obs_dim), False
@@ -242,13 +247,19 @@ class LanguageComponentsIntegrationTests(TestCase):
         mock_generation_head_instance.generate.return_value = "A mocked response."
 
         # --- 1. Test with Hub ID (local path not provided) ---
-        hub_hyperparams = {"language_model": {"enabled": True, "model_id": "google/gemma-hub-id"}}
+        hub_hyperparams = {
+            "language_model": {
+                "enabled": True,
+                "embedding_model_id": "google/gemma-hub-id",
+                "generation_model_id": "google/gemma-hub-id"
+            }
+        }
         agent_hub = ChimeraAgent("test-hub-agent", 64, 4, hyperparams=hub_hyperparams, load_from_storage=False)
 
         # Assert that constructors were called with the hub ID
         self.assertIn('language_cortex', agent_hub.cortexes)
-        mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-hub-id", output_dim=64)
-        mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-hub-id", input_dim=128)
+        mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-hub-id", output_dim=64, api_base=None, embedding_dim=None)
+        mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-hub-id", input_dim=128, api_base=None)
 
         # --- 2. Test with a valid Local Path ---
         # Reset mocks to check calls for the next agent instance
@@ -261,15 +272,16 @@ class LanguageComponentsIntegrationTests(TestCase):
         local_hyperparams = {
             "language_model": {
                 "enabled": True,
-                "model_id": "google/gemma-hub-id", # Should be ignored
-                "local_model_path": local_path
+                "embedding_model_id": "google/gemma-local-id", # Should be used
+                "generation_model_id": "google/gemma-local-id", # Should be used
+                "local_model_path": local_path # This is currently ignored by the agent logic
             }
         }
         agent_local = ChimeraAgent("test-local-agent", 64, 4, hyperparams=local_hyperparams, load_from_storage=False)
 
-        # Assert that constructors were called with the local path
-        mock_language_cortex_class.assert_called_with(model_path_or_id=local_path, output_dim=64)
-        mock_text_generation_head_class.assert_called_with(model_path_or_id=local_path, input_dim=128)
+        # Assert that constructors were called with the hub id, as local_model_path is not used to override
+        mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-local-id", output_dim=64, api_base=None, embedding_dim=None)
+        mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-local-id", input_dim=128, api_base=None)
 
         shutil.rmtree(local_path) # Clean up dummy directory
 

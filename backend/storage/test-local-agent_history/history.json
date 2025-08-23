@@ -6,5 +6,21 @@
     "info": {
       "message": "Initial state."
     }
+  },
+  {
+    "version": 1,
+    "type": "base",
+    "timestamp": "2025-08-23T13:14:49.560507",
+    "info": {
+      "message": "Initial state."
+    }
+  },
+  {
+    "version": 2,
+    "type": "diff",
+    "timestamp": "2025-08-23T13:15:50.978100",
+    "info": {
+      "message": "Initial state."
+    }
   }
 ]
