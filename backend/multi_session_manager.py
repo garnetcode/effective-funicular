@@ -35,12 +35,15 @@ class MultiSessionManager:
             return
 
         # 3. Create a ChimeraAgent instance for this session
-        # We need to get obs_dim and action_dim from the environment spec
-        # This is a simplification; a real implementation would query this from the server
-        # or have it in a config file.
         obs_dim = len(join_response.get("observation", []))
-        # This is a HACK: we need a way to know the action space size.
         action_dim = 4 if "Lunar" in env_id else 2 # Default for CartPole
+
+        # Dynamically set the input dimension for the cortex and get the cortex ID
+        # This assumes the first cortex in the config is the one we want to use for gym envs
+        cortex_id_to_use = None
+        if self.agent_config.get('cortex_configs'):
+            cortex_id_to_use = next(iter(self.agent_config['cortex_configs']))
+            self.agent_config['cortex_configs'][cortex_id_to_use]['params']['input_dim'] = obs_dim
 
         agent = ChimeraAgent(
             agent_id=agent_tag,
@@ -58,7 +61,10 @@ class MultiSessionManager:
 
             while not done:
                 # Agent perceives, acts, and learns online
-                agent.perceive_and_update_state("test_cortex", current_obs) # test_cortex is a placeholder
+                if not cortex_id_to_use:
+                    logger.error(f"[{agent_tag}] No cortex configured for agent. Exiting loop.")
+                    break
+                agent.perceive_and_update_state(cortex_id_to_use, current_obs)
                 action, _ = agent.select_action()
 
                 await connector.send_action(action)
