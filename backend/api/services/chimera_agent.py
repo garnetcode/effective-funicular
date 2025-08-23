@@ -249,6 +249,28 @@ class ChimeraAgent:
 
         return action, action_log_prob, stag_context_vector
 
+    def _update_vitals_and_get_internal_reward(self):
+        """
+        Updates agent's vitals and calculates an internal reward signal.
+        """
+        # --- Update Vitals ---
+        self.energy = max(0, self.energy - self.metabolic_cost)
+
+        # --- Calculate Internal Reward ---
+        internal_reward = -self.metabolic_cost
+
+        # Get penalty parameters from hyperparams with defaults
+        low_energy_threshold = self.hyperparams.get('low_energy_threshold', 0.2)  # 20%
+        low_energy_penalty = self.hyperparams.get('low_energy_penalty', -10.0)
+
+        # Apply penalty if energy is below the threshold
+        if (self.energy / self.max_energy) < low_energy_threshold:
+            internal_reward += low_energy_penalty
+
+        # TODO: Add reward/penalty for integrity changes
+
+        return internal_reward
+
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer."""
         self.replay_buffer.push(*args)
