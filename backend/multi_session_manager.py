@@ -63,6 +63,12 @@ class MultiSessionManager:
         # 6. Main training loop
         try:
             current_obs = np.array(join_response.get("observation"))
+            try:
+                actual_action_dim = join_response['action_space_shape']
+                logger.info(f"[{agent_tag}] Environment action space size: {actual_action_dim}")
+            except (KeyError, TypeError):
+                logger.warning(f"[{agent_tag}] Could not determine action space size. Defaulting to {action_dim}.")
+                actual_action_dim = action_dim
 
             for episode in range(self.num_episodes):
                 done = False
@@ -70,26 +76,37 @@ class MultiSessionManager:
 
                 while not done:
                     agent.perceive_and_update_state("test_cortex", current_obs)
-                    action, log_prob = agent.select_action()
+                    action, log_prob, stag_context = agent.select_action(actual_action_dim)
 
                     await connector.send_action(action)
                     msg = await connector.receive_message()
 
-                    if not msg or msg.get("type") != "action.taken":
-                        logger.warning(f"[{agent_tag}] Unexpected message or disconnection: {msg}")
+                    if not msg:
+                        logger.warning(f"[{agent_tag}] Disconnection detected. Ending episode.")
                         done = True
                         continue
 
-                    next_obs = np.array(msg.get("observation"))
-                    reward = msg.get("reward")
-                    done = msg.get("done")
+                    msg_type = msg.get("type")
 
-                    total_reward = reward
-                    agent.record_experience(agent.hidden_state, None, current_obs, action, log_prob, total_reward, next_obs, done)
-                    agent.train()
+                    if msg_type == "action.taken":
+                        next_obs = np.array(msg.get("observation"))
+                        reward = msg.get("reward")
+                        done = msg.get("done")
 
-                    current_obs = next_obs
-                    episode_reward += reward
+                        total_reward = reward
+                        agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
+                        agent.train()
+
+                        current_obs = next_obs
+                        episode_reward += reward
+
+                    elif msg_type == "game.over":
+                        logger.info(f"[{agent_tag}] Game over message received. Final reward: {msg.get('final_reward')}")
+                        done = True
+                        continue
+
+                    else:
+                        logger.warning(f"[{agent_tag}] Unexpected message type received: {msg_type}")
 
                 logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} finished. Reward: {episode_reward}")
 

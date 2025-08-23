@@ -83,6 +83,7 @@ class GNG_EngineTests(TestCase):
 class ChimeraAgentTests(TestCase):
     def setUp(self):
         """Set up a ChimeraAgent instance for testing with the new WorldModel."""
+        torch.manual_seed(42)
         self.agent_id = "test-world-model-agent"
         self.obs_dim = 10
         self.action_dim = 4
