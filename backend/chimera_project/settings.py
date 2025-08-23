@@ -43,9 +43,8 @@ INSTALLED_APPS = [
     "corsheaders",
 
     # Local
-    "games",
+    "api",
     "channels",
-    "django_rq",
 ]
 
 MIDDLEWARE = [

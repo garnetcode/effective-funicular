@@ -139,15 +139,15 @@ class Command(BaseCommand):
 
                     # --- Reset for next episode ---
                     if episode < num_episodes - 1:
-                        await connector.send_message({"type": "agent.reset"})
-                        msg = await connector.receive_message()
-                        if msg and msg.get("type") == "environment.reset":
-                            current_obs = np.array(msg.get("observation"))
+                        reset_response = await connector.reset_environment()
+                        if reset_response:
+                            current_obs = np.array(reset_response.get("observation"))
                         else:
                             logger.error("Failed to reset environment, stopping training.")
                             break
+
         finally:
             # --- Final cleanup ---
             await connector.close()
             logger.info("Training finished.")
-            logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")
+        logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")

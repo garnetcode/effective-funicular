@@ -1,8 +1,9 @@
 import asyncio
 import json
+import aiohttp
 import websockets
 import logging
-import aiohttp
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,13 @@ class ColosseumConnector:
 
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            self.websocket = await websockets.connect(
-                uri,
-                additional_headers={"Origin": "http://localhost:3000"}
+            # Use a custom protocol factory to inject headers, which is more robust
+            # across different versions of the `websockets` library.
+            protocol_factory = partial(
+                websockets.ClientProtocol,
+                extra_headers={"Origin": "http://localhost:3000"}
             )
+            self.websocket = await websockets.connect(uri, create_protocol=protocol_factory)
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:
@@ -64,12 +68,36 @@ class ColosseumConnector:
         except websockets.exceptions.ConnectionClosed as e:
             logger.error(f"WebSocket connection closed unexpectedly: {e}")
             return False
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
+        except TypeError as e:
+            # Catching the specific TypeError to provide a more helpful message.
+            logger.error(f"A TypeError occurred during WebSocket connection. This might be due to an incompatibility in the `websockets` library version. Error: {e}", exc_info=True)
             return False
 
+    async def join_session(self):
+        """Sends the agent.join message to formally join the session."""
+        if not self.websocket:
+            return None
+
+        # The session is identified by the WebSocket URL, so session_id is not needed in the payload.
+        # Aligning with the frontend client implementation.
+        join_message = {
+            "type": "agent.join",
+            "agent_tag": self.agent_tag,
+            "agent_name": f"ChimeraAgent-{self.agent_tag}",
+            "agent_type": "ai",
+            "environment_id": self.environment_id,
+        }
+        await self.websocket.send(json.dumps(join_message))
+        response = await self.receive_message()
+        if response and response.get("type") == "agent.joined":
+            logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
+            return response
+        else:
+            logger.error(f"Failed to join session, response: {response}")
+            return None
+
     async def send_message(self, message):
-        """Sends a raw JSON message to the server."""
+        """Sends a JSON message to the server."""
         if not self.websocket:
             logger.error("Cannot send message, WebSocket is not connected.")
             return
@@ -77,55 +105,33 @@ class ColosseumConnector:
             await self.websocket.send(json.dumps(message))
         except websockets.exceptions.ConnectionClosed:
             logger.warning("Cannot send message, connection is closed.")
-        except Exception as e:
-            logger.error(f"Failed to send message: {e}", exc_info=True)
-
-    async def join_session(self):
-        """Sends the agent.join message to formally join the session."""
-        if not self.websocket:
-            logger.error("Cannot join session, WebSocket is not connected.")
-            return None
-        try:
-            join_message = {
-                "type": "agent.join",
-                "agent_tag": self.agent_tag,
-                "environment_id": self.environment_id,
-            }
-            await self.websocket.send(json.dumps(join_message))
-            response = await self.receive_message()
-
-            if response and response.get("type") == "agent.joined":
-                logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
-                return response
-            else:
-                error_detail = response.get('message', 'No details provided') if response else "No response from server"
-                logger.error(f"Failed to join session. Server response: {error_detail}")
-                return None
-        except Exception as e:
-            logger.error(f"An error occurred while trying to join the session: {e}", exc_info=True)
-            return None
 
     async def send_action(self, action):
         """Sends an agent action to the server."""
-        if not self.websocket:
-            logger.error("Cannot send action, WebSocket is not connected.")
-            return
-        try:
-            action_message = {
-                "type": "agent.action",
-                "action": int(action),
-                "agent_tag": self.agent_tag
-            }
-            await self.websocket.send(json.dumps(action_message))
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Cannot send action, connection is closed.")
-        except Exception as e:
-            logger.error(f"Failed to send action: {e}", exc_info=True)
+        action_message = {
+            "type": "agent.action",
+            "action": int(action),
+            "agent_tag": self.agent_tag
+        }
+        await self.send_message(action_message)
+
+    async def reset_environment(self):
+        """Sends a reset message and waits for confirmation."""
+        logger.info("Sending agent.reset message.")
+        reset_message = {"type": "agent.reset"}
+        await self.send_message(reset_message)
+
+        response = await self.receive_message()
+        if response and response.get("type") == "environment.reset":
+            logger.info("Environment reset successfully.")
+            return response
+        else:
+            logger.error(f"Failed to reset environment, response: {response}")
+            return None
 
     async def receive_message(self):
         """Receives and parses a single message from the WebSocket."""
         if not self.websocket:
-            logger.warning("Cannot receive message, WebSocket is not connected.")
             return None
         try:
             message = await self.websocket.recv()
@@ -133,18 +139,9 @@ class ColosseumConnector:
         except websockets.exceptions.ConnectionClosed:
             logger.warning("Connection closed while waiting for message.")
             return None
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from message: {e}")
-            return None
 
     async def close(self):
         """Closes the WebSocket connection."""
         if self.websocket:
-            try:
-                await self.websocket.close()
-                logger.info("WebSocket connection closed.")
-            except websockets.exceptions.ConnectionClosed:
-                logger.info("WebSocket connection was already closed.")
-            except Exception as e:
-                logger.error(f"Error while closing WebSocket: {e}", exc_info=True)
-        self.websocket = None
+            await self.websocket.close()
+            logger.info("WebSocket connection closed.")

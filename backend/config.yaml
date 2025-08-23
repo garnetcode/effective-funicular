@@ -28,12 +28,6 @@ language_model:
 agent_config:
   latent_dim: 64
   hidden_dim: 128
-  cortex_configs:
-    # A simple cortex for processing flat vector observations from gym environments
-    vec_obs_cortex:
-      type: "DenseCortex"
-      params:
-        input_dim: 4 # This will be dynamically overwritten by the runner script
   hyperparams:
     learning_rate: 0.005
     gamma: 0.99
