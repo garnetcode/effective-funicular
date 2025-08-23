@@ -290,8 +290,22 @@ class ChimeraAgent:
         if not self.language_model_enabled or not self.text_generation_head:
             return "I am currently unable to speak."
 
+        # Construct a dictionary of the agent's current state and vitals
+        agent_state = {
+            "vitals": {
+                "energy": round(self.energy, 2),
+                "integrity": round(self.integrity, 2),
+            },
+            "state_summary": {
+                "mean": round(self.hidden_state.mean().item(), 4),
+                "max": round(self.hidden_state.max().item(), 4),
+                "min": round(self.hidden_state.min().item(), 4),
+                "std": round(self.hidden_state.std().item(), 4),
+            }
+        }
+
         return self.text_generation_head.generate(
-            self.hidden_state,
+            agent_state,
             max_new_tokens=max_new_tokens
         )
 
