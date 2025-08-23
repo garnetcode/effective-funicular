@@ -68,6 +68,18 @@ class ColosseumConnector:
             logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
             return False
 
+    async def send_message(self, message):
+        """Sends a raw JSON message to the server."""
+        if not self.websocket:
+            logger.error("Cannot send message, WebSocket is not connected.")
+            return
+        try:
+            await self.websocket.send(json.dumps(message))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Cannot send message, connection is closed.")
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}", exc_info=True)
+
     async def join_session(self):
         """Sends the agent.join message to formally join the session."""
         if not self.websocket:
