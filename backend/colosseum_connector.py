@@ -122,35 +122,6 @@ class ColosseumConnector:
         except Exception as e:
             logger.error(f"Failed to send action: {e}", exc_info=True)
 
-    async def drain_messages(self):
-        """
-        Consumes and discards all messages currently in the WebSocket buffer
-        until the buffer is empty.
-        """
-        logger.info("Draining message queue...")
-        drained_count = 0
-        while True:
-            try:
-                # Use a short timeout to quickly check for and drain messages.
-                unexpected_msg = await asyncio.wait_for(self.receive_message(), timeout=0.01)
-                if unexpected_msg:
-                    logger.warning(f"Drained unexpected message: {unexpected_msg}")
-                    drained_count += 1
-                else:
-                    # receive_message returned None, probably connection closed.
-                    logger.error("Connection closed while draining messages.")
-                    break
-            except asyncio.TimeoutError:
-                # This is the expected way to exit the loop when the queue is empty.
-                if drained_count > 0:
-                    logger.info(f"Drained {drained_count} messages.")
-                else:
-                    logger.info("Message queue was already empty.")
-                break
-            except Exception as e:
-                logger.error(f"An unexpected error occurred while draining messages: {e}")
-                break
-
     async def reset_environment(self):
         """
         Sends a reset message and waits for confirmation. It assumes the
@@ -177,19 +148,44 @@ class ColosseumConnector:
             return None
 
     async def receive_message(self):
-        """Receives and parses a single message from the WebSocket."""
+        """
+        Receives, parses, and returns a single message from the WebSocket,
+        ignoring broadcast messages of the agent's own actions.
+        """
         if not self.websocket:
             logger.warning("Cannot receive message, WebSocket is not connected.")
             return None
-        try:
-            message = await self.websocket.recv()
-            return json.loads(message)
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Connection closed while waiting for message.")
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from message: {e}")
-            return None
+
+        while True: # Loop until a relevant message is received
+            try:
+                message = await self.websocket.recv()
+                data = json.loads(message)
+
+                # Check if the message is a reflection of our own action
+                is_own_action = (
+                    data.get("type") == "action.taken" and
+                    data.get("agent_tag") == self.agent_tag
+                )
+
+                if is_own_action:
+                    # In a more complex scenario, the server might send a direct confirmation
+                    # in addition to a broadcast. For now, we assume the broadcast is the
+                    # only response, so we must process it. If the protocol changes,
+                    # this is where we would 'continue' to ignore it.
+                    # logger.info(f"Received own action broadcast: {data}")
+                    pass # For now, we still need this message for obs, reward, done.
+
+                return data # Return the first message received
+
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("Connection closed while waiting for message.")
+                return None
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON from message: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"An unexpected error occurred in receive_message: {e}")
+                return None
 
     async def close(self):
         """Closes the WebSocket connection."""
