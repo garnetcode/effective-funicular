@@ -13,3 +13,4 @@ transformers
 accelerate
 bitsandbytes
 openai
+tqdm
