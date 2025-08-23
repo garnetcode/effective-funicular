@@ -41,13 +41,13 @@ class ColosseumConnector:
             logger.info(f"Successfully connected to WebSocket: {uri}")
         except websockets.exceptions.InvalidURI:
             logger.error(f"Invalid WebSocket URI: {uri}")
-            return False
+            return None
         except websockets.exceptions.ConnectionClosed as e:
             logger.error(f"WebSocket connection closed unexpectedly: {e}")
-            return False
+            return None
         except Exception as e:
             logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
-            return False
+            return None
 
         # 3. Join the session by sending an 'agent.join' message
         try:
@@ -61,16 +61,16 @@ class ColosseumConnector:
 
             if response and response.get("type") == "agent.joined":
                 logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
-                return True
+                return response
             else:
-                error_detail = response.get('message', 'No details provided')
+                error_detail = response.get('message', 'No details provided') if response else "No response from server"
                 logger.error(f"Failed to join session. Server response: {error_detail}")
                 await self.close()
-                return False
+                return None
         except Exception as e:
             logger.error(f"An error occurred while trying to join the session: {e}", exc_info=True)
             await self.close()
-            return False
+            return None
 
     async def send_action(self, action):
         """Sends an agent action to the server."""
