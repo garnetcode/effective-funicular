@@ -189,10 +189,11 @@ class ChimeraAgent:
 
         return self.hidden_state
 
-    def select_action(self):
+    def select_action(self, actual_action_dim):
         """
         Selects an action based on the current internal state of the agent,
-        now augmented with context from the STAG knowledge graph.
+        augmented with context from the STAG knowledge graph, and constrained
+        by the actual action space of the environment.
         """
         internal_state = self.hidden_state
         h_numpy = internal_state.detach().numpy().flatten()
@@ -213,13 +214,16 @@ class ChimeraAgent:
         with torch.no_grad():
             action_logits = self.action_head(combined_input).squeeze(0)
 
+        # Mask the logits to only consider valid actions for the current environment
+        valid_logits = action_logits[:actual_action_dim]
+
         # Convert to numpy for softmax and sampling
-        action_probs_np = softmax(action_logits.numpy())
-        action = np.random.choice(self.max_action_dim, p=action_probs_np)
+        action_probs_np = softmax(valid_logits.numpy())
+        action = np.random.choice(actual_action_dim, p=action_probs_np)
         action_tensor = torch.tensor(action)
 
         # We need the log_prob as a tensor for the loss calculation
-        log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
+        log_probs = torch.nn.functional.log_softmax(valid_logits, dim=-1)
         action_log_prob = log_probs[action]
 
         # Store the chosen action for the next world model update

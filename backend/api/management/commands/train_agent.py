@@ -95,6 +95,15 @@ class Command(BaseCommand):
         total_rewards = []
         current_obs = np.array(join_response.get("observation"))
 
+        # Get the actual action space size from the environment info
+        try:
+            actual_action_dim = join_response['info']['action_space']['n']
+            logger.info(f"Environment action space size: {actual_action_dim}")
+        except (KeyError, TypeError):
+            logger.warning("Could not determine actual action space size from server. Defaulting to max.")
+            actual_action_dim = max_action_dim
+
+
         try:
             with tqdm(total=num_episodes, desc="Training on Colosseum") as pbar:
                 for episode in range(num_episodes):
@@ -104,7 +113,7 @@ class Command(BaseCommand):
                     # --- Gameplay Loop for one episode ---
                     while not done:
                         agent.perceive_and_update_state("vector_input", current_obs)
-                        action, log_prob, stag_context = agent.select_action()
+                        action, log_prob, stag_context = agent.select_action(actual_action_dim)
 
                         await connector.send_action(action)
                         msg = await connector.receive_message()
