@@ -3,6 +3,7 @@ import json
 import aiohttp
 import websockets
 import logging
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -44,21 +45,21 @@ class ColosseumConnector:
             logger.error(f"HTTP error creating session: {e}")
             return None
 
-    async def _add_origin_header(self, uri, headers):
-        """A process_request hook to add the Origin header."""
-        headers['Origin'] = 'http://localhost:3000'
-
     async def connect_websocket(self):
         """Connects to the session's WebSocket endpoint."""
         if not self.session_id:
             logger.error("Cannot connect WebSocket without a session ID.")
             return False
 
-        # The server expects the session ID with hyphens in the URL
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            # Use process_request to add the Origin header for compatibility
-            self.websocket = await websockets.connect(uri, process_request=self._add_origin_header)
+            # Use a custom protocol factory to inject headers, which is more robust
+            # across different versions of the `websockets` library.
+            protocol_factory = partial(
+                websockets.ClientProtocol,
+                extra_headers={"Origin": "http://localhost:3000"}
+            )
+            self.websocket = await websockets.connect(uri, create_protocol=protocol_factory)
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:
@@ -66,6 +67,10 @@ class ColosseumConnector:
             return False
         except websockets.exceptions.ConnectionClosed as e:
             logger.error(f"WebSocket connection closed unexpectedly: {e}")
+            return False
+        except TypeError as e:
+            # Catching the specific TypeError to provide a more helpful message.
+            logger.error(f"A TypeError occurred during WebSocket connection. This might be due to an incompatibility in the `websockets` library version. Error: {e}", exc_info=True)
             return False
 
     async def join_session(self):
