@@ -65,7 +65,7 @@ class MultiSessionManager:
                     logger.error(f"[{agent_tag}] No cortex configured for agent. Exiting loop.")
                     break
                 agent.perceive_and_update_state(cortex_id_to_use, current_obs)
-                action, _ = agent.select_action()
+                action, log_prob, _ = agent.select_action()
 
                 await connector.send_action(action)
 
