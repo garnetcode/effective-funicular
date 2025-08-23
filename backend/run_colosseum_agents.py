@@ -37,11 +37,17 @@ def main():
     agent_config = config.get('agent_config', {})
     agent_config['load_from_storage'] = not config.get('force_new_agent', False)
     history_config = config.get('agent_history', {})
+    num_episodes = config.get('episodes_per_env', 10)
 
     # --- Start the Manager ---
-    manager = MultiSessionManager(agent_config=agent_config, history_config=history_config, env_list=env_list)
+    manager = MultiSessionManager(
+        agent_config=agent_config,
+        history_config=history_config,
+        env_list=env_list,
+        num_episodes=num_episodes
+    )
 
-    logger.info(f"Starting Multi-Session Manager for environments: {env_list}")
+    logger.info(f"Starting Multi-Session Manager for {num_episodes} episodes in environments: {env_list}")
     try:
         asyncio.run(manager.start())
     except KeyboardInterrupt:

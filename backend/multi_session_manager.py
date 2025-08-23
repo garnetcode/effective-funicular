@@ -12,18 +12,20 @@ class MultiSessionManager:
     """
     Orchestrates multiple ChimeraAgent sessions concurrently.
     """
-    def __init__(self, agent_config, history_config, env_list):
+    def __init__(self, agent_config, history_config, env_list, num_episodes):
         self.agent_config = agent_config
         self.history_config = history_config
         self.env_list = env_list
+        self.num_episodes = num_episodes
         self.agents = {}
 
     async def run_agent_session(self, env_id):
         """
-        Manages the lifecycle of a single agent session, from creation to completion.
+        Manages the lifecycle of a single agent session, from creation to completion,
+        running for a specified number of episodes.
         """
         agent_tag = f"chimera-agent-{env_id}-{uuid.uuid4()}"
-        logger.info(f"[{agent_tag}] Starting session for environment: {env_id}")
+        logger.info(f"[{agent_tag}] Starting session for {self.num_episodes} episodes in environment: {env_id}")
 
         # 1. Create a connector for this session
         connector = ColosseumConnector(env_id, agent_tag)
@@ -36,14 +38,7 @@ class MultiSessionManager:
 
         # 3. Create a ChimeraAgent instance for this session
         obs_dim = len(session_data.get("observation", []))
-        action_dim = 4 if "Lunar" in env_id else 2 # Default for CartPole
-
-        # Dynamically set the input dimension for the cortex and get the cortex ID
-        # This assumes the first cortex in the config is the one we want to use for gym envs
-        cortex_id_to_use = None
-        if self.agent_config.get('cortex_configs'):
-            cortex_id_to_use = next(iter(self.agent_config['cortex_configs']))
-            self.agent_config['cortex_configs'][cortex_id_to_use]['params']['input_dim'] = obs_dim
+        action_dim = 4 if "Lunar" in env_id else 2
 
         agent = ChimeraAgent(
             agent_id=agent_tag,
@@ -54,68 +49,57 @@ class MultiSessionManager:
         )
         self.agents[agent_tag] = agent
 
-        # 4. Connect to the WebSocket
+        # 4. Connect to the WebSocket and join the session
         if not await connector.connect_websocket():
             logger.error(f"[{agent_tag}] WebSocket connection failed. Exiting.")
             return
 
-        # 5. Join the session over WebSocket
         join_response = await connector.join_session()
         if not join_response:
             logger.error(f"[{agent_tag}] Failed to join session over WebSocket. Exiting.")
             await connector.close()
             return
 
-        # 6. Main real-time gameplay loop
+        # 6. Main training loop
         try:
             current_obs = np.array(join_response.get("observation"))
-            done = False
 
-            while not done:
-                # Agent perceives, acts, and learns online
-                if not cortex_id_to_use:
-                    logger.error(f"[{agent_tag}] No cortex configured for agent. Exiting loop.")
-                    break
-                agent.perceive_and_update_state(cortex_id_to_use, current_obs)
-                action, log_prob, stag_context = agent.select_action()
+            for episode in range(self.num_episodes):
+                done = False
+                episode_reward = 0
 
-                await connector.send_action(action)
+                while not done:
+                    agent.perceive_and_update_state("test_cortex", current_obs)
+                    action, log_prob = agent.select_action()
 
-                msg = await connector.receive_message()
-                if not msg or msg.get("type") != "action.taken":
-                    logger.warning(f"[{agent_tag}] Unexpected message or disconnection: {msg}")
-                    break
+                    await connector.send_action(action)
+                    msg = await connector.receive_message()
 
-                # Extract results
-                next_obs = np.array(msg.get("observation"))
-                reward = msg.get("reward")
-                done = msg.get("done")
+                    if not msg or msg.get("type") != "action.taken":
+                        logger.warning(f"[{agent_tag}] Unexpected message or disconnection: {msg}")
+                        done = True
+                        continue
 
-                # Homeostatic reward calculation
-                old_energy = agent.energy
-                agent.energy -= agent.metabolic_cost
-                # NOTE: The Colosseum API v4 spec doesn't show energy/integrity change in info dict.
-                # We are only using metabolic cost for now.
-                homeostatic_reward = agent.energy - old_energy
-                total_reward = reward + homeostatic_reward
+                    next_obs = np.array(msg.get("observation"))
+                    reward = msg.get("reward")
+                    done = msg.get("done")
 
-                # Record and train
-                # The log_prob is returned by select_action and needed for the policy loss
-                agent.record_experience(
-                    agent.hidden_state,
-                    stag_context,
-                    current_obs,
-                    action,
-                    log_prob,
-                    total_reward,
-                    next_obs,
-                    done
-                )
-                agent.train()
+                    total_reward = reward
+                    agent.record_experience(agent.hidden_state, None, current_obs, action, log_prob, total_reward, next_obs, done)
+                    agent.train()
 
-                current_obs = next_obs
+                    current_obs = next_obs
+                    episode_reward += reward
 
-            logger.info(f"[{agent_tag}] Session finished. Final reward: {msg.get('total_reward', 0)}")
+                logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} finished. Reward: {episode_reward}")
+
+                if episode < self.num_episodes - 1:
+                    reset_response = await connector.reset_environment()
+                    if reset_response:
+                        current_obs = np.array(reset_response.get("observation"))
+                    else:
+                        logger.error(f"[{agent_tag}] Failed to reset environment. Stopping.")
+                        break
 
         except Exception as e:
             logger.error(f"[{agent_tag}] An error occurred during the session: {e}", exc_info=True)
