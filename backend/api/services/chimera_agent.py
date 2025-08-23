@@ -63,7 +63,7 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, obs_dim, action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, hyperparams=None, **kwargs):
+    def __init__(self, agent_id, obs_dim, action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
         self.obs_dim = obs_dim
         self.action_dim = action_dim
@@ -74,7 +74,8 @@ class ChimeraAgent:
         self.hyperparams = hyperparams or {}
         self.hyperparams.update(kwargs)
 
-        self.history_manager = StateHistoryManager(agent_id)
+        history_config = history_config or {}
+        self.history_manager = StateHistoryManager(agent_id, **history_config)
         self.learning_rate = self.hyperparams.get('learning_rate', 0.01)
         self.gamma = self.hyperparams.get('gamma', 0.99)
         self.stag_expansion_threshold = self.hyperparams.get('stag_expansion_threshold', 0.1)

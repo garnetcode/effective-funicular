@@ -3,8 +3,8 @@ import uuid
 import logging
 import numpy as np
 import torch
-from .colosseum_connector import ColosseumConnector
-from .api.services.chimera_agent import ChimeraAgent
+from colosseum_connector import ColosseumConnector
+from api.services.chimera_agent import ChimeraAgent
 
 logger = logging.getLogger(__name__)
 
@@ -12,8 +12,9 @@ class MultiSessionManager:
     """
     Orchestrates multiple ChimeraAgent sessions concurrently.
     """
-    def __init__(self, agent_config, env_list):
+    def __init__(self, agent_config, history_config, env_list):
         self.agent_config = agent_config
+        self.history_config = history_config
         self.env_list = env_list
         self.agents = {}
 
@@ -45,6 +46,7 @@ class MultiSessionManager:
             agent_id=agent_tag,
             obs_dim=obs_dim,
             action_dim=action_dim,
+            history_config=self.history_config,
             **self.agent_config
         )
         self.agents[agent_tag] = agent
