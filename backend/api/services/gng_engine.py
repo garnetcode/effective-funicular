@@ -59,6 +59,12 @@ class GNG_Engine:
 
     def _add_node(self, weight_vector, error=0.0, utility=1.0):
         node_id = self._next_node_id
+
+        # Normalize the weight vector to have a length of 1
+        norm = np.linalg.norm(weight_vector)
+        if norm > 0:
+            weight_vector = weight_vector / norm
+
         self.nodes[node_id] = {
             'weight': weight_vector.astype('float32'),
             'error': error,
@@ -91,11 +97,23 @@ class GNG_Engine:
         dynamic_winner_lr = self.winner_learning_rate / (1e-5 + np.log1p(winner_utility))
         self.nodes[s1_id]['weight'] += dynamic_winner_lr * (input_vector - self.nodes[s1_id]['weight'])
 
+        # Re-normalize the winner's weight vector
+        winner_weight = self.nodes[s1_id]['weight']
+        norm = np.linalg.norm(winner_weight)
+        if norm > 0:
+            self.nodes[s1_id]['weight'] = winner_weight / norm
+
         neighbor_ids = self._get_neighbors(s1_id)
         for n_id in neighbor_ids:
             neighbor_utility = self.nodes[n_id]['utility']
             dynamic_neighbor_lr = self.neighbor_learning_rate / (1e-5 + np.log1p(neighbor_utility))
             self.nodes[n_id]['weight'] += dynamic_neighbor_lr * (input_vector - self.nodes[n_id]['weight'])
+
+            # Re-normalize the neighbor's weight vector
+            neighbor_weight = self.nodes[n_id]['weight']
+            norm = np.linalg.norm(neighbor_weight)
+            if norm > 0:
+                self.nodes[n_id]['weight'] = neighbor_weight / norm
 
         self.faiss_index = None # Invalidate index due to weight changes
 
