@@ -35,7 +35,7 @@ class ColosseumConnector:
                     data = await response.json()
                     if data.get("success"):
                         self.session_id = data.get("session_id")
-                        logger.info(f"Successfully created session: {self.session_id}")
+                        logger.debug(f"Successfully created session: {self.session_id}")
                         return data
                     else:
                         logger.error(f"Failed to create session: {data}")
@@ -56,7 +56,7 @@ class ColosseumConnector:
                 uri,
                 additional_headers={"Origin": "http://localhost:3000"}
             )
-            logger.info(f"Successfully connected to WebSocket: {uri}")
+            logger.debug(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:
             logger.error(f"Invalid WebSocket URI: {uri}")
@@ -95,7 +95,7 @@ class ColosseumConnector:
             response = await self.receive_message()
 
             if response and response.get("type") == "agent.joined":
-                logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
+                logger.debug(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
                 return response
             else:
                 error_detail = response.get('message', 'No details provided') if response else "No response from server"
@@ -127,7 +127,7 @@ class ColosseumConnector:
         Sends a reset message and waits for confirmation, ignoring any
         other messages that may be in the buffer.
         """
-        logger.info("Sending agent.reset message.")
+        logger.debug("Sending agent.reset message.")
         reset_message = {"type": "agent.reset"}
         await self.send_message(reset_message)
 
@@ -140,7 +140,7 @@ class ColosseumConnector:
                 response = await asyncio.wait_for(self.receive_message(), timeout=1.0)
 
                 if response and response.get("type") == "environment.reset":
-                    logger.info("Environment reset successfully.")
+                    logger.debug("Environment reset successfully.")
                     return response
                 elif response:
                     # Log other messages received while waiting
@@ -205,9 +205,9 @@ class ColosseumConnector:
         if self.websocket:
             try:
                 await self.websocket.close()
-                logger.info("WebSocket connection closed.")
+                logger.debug("WebSocket connection closed.")
             except websockets.exceptions.ConnectionClosed:
-                logger.info("WebSocket connection was already closed.")
+                logger.debug("WebSocket connection was already closed.")
             except Exception as e:
                 logger.error(f"Error while closing WebSocket: {e}", exc_info=True)
         self.websocket = None

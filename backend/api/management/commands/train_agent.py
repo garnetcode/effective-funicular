@@ -8,6 +8,7 @@ from tqdm import tqdm
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 from colosseum_connector import ColosseumConnector
+from api.services.replay_buffer import Experience
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class Command(BaseCommand):
             logger.error(f"Config file not found at: {config_path}")
             return
 
-        logger.info(f"Loaded configuration from {config_path}")
+        logger.debug(f"Loaded configuration from {config_path}")
 
         # --- Environment & Agent Setup ---
         env_name = config['env_name']
@@ -72,7 +73,7 @@ class Command(BaseCommand):
             hyperparams=agent_config.get('hyperparams', {}),
             history_config=history_config
         )
-        logger.info(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
+        logger.debug(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
 
         # --- Create a single session for the entire training run ---
         connector = ColosseumConnector(env_name, agent_id)
@@ -98,7 +99,7 @@ class Command(BaseCommand):
         # Get the actual action space size from the environment info
         try:
             actual_action_dim = join_response['action_space_shape']
-            logger.info(f"Environment action space size: {actual_action_dim}")
+            logger.debug(f"Environment action space size: {actual_action_dim}")
         except (KeyError, TypeError):
             logger.warning("Could not determine actual action space size from server. Defaulting to max.")
             actual_action_dim = max_action_dim
@@ -109,6 +110,7 @@ class Command(BaseCommand):
                 for episode in range(num_episodes):
                     episode_reward = 0
                     done = False
+                    episode_experiences = [] # Buffer for the current episode's experiences
 
                     # --- Gameplay Loop for one episode ---
                     while not done:
@@ -128,28 +130,43 @@ class Command(BaseCommand):
                         if msg_type == "action.taken":
                             next_obs = np.array(msg.get("observation"))
                             reward = msg.get("reward")
-                            # The 'done' flag from the action response signals the end of an episode
                             done = msg.get("done")
 
-                            total_reward = reward  # Simplified reward for training
-                            agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
+                            # Store the experience with the immediate reward for now
+                            episode_experiences.append(Experience(agent.hidden_state, stag_context, current_obs, action, log_prob, reward, next_obs, done))
 
                             current_obs = next_obs
                             episode_reward += reward
 
                         elif msg_type == "game.over":
-                            logger.info(f"Game over message received. Final reward: {msg.get('final_reward')}")
+                            logger.debug(f"Game over message received. Final reward: {msg.get('final_reward')}")
                             done = True
-                            # The final state experience was already recorded by the preceding 'action.taken' message
                             continue
 
                         else:
                             logger.warning(f"Unexpected message type received: {msg_type}")
-                            # We will not end the episode here, just log the warning.
-                            # The loop will continue, waiting for a valid game state message.
 
-                    # --- Post-Episode ---
-                    logger.info(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training and preparing for next episode...")
+                    # --- Post-Episode: Calculate discounted returns and train ---
+                    logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Processing returns and training...")
+
+                    # Calculate discounted returns and record experiences
+                    discounted_return = 0
+                    for experience in reversed(episode_experiences):
+                        # The return G_t is the immediate reward + discounted future returns
+                        discounted_return = experience.reward + agent.gamma * discounted_return
+
+                        # Now record the experience with the correctly calculated discounted return
+                        agent.record_experience(
+                            experience.hidden_state,
+                            experience.stag_context,
+                            experience.obs,
+                            experience.action,
+                            experience.log_prob,
+                            discounted_return, # This is G_t
+                            experience.next_obs,
+                            experience.done
+                        )
+
                     train_stats = agent.train()
                     if (episode + 1) % 50 == 0:
                         agent.save_state(version_info=train_stats)
@@ -175,5 +192,5 @@ class Command(BaseCommand):
         finally:
             # --- Final cleanup ---
             await connector.close()
-            logger.info("Training finished.")
+            logger.debug("Training finished.")
         logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")
