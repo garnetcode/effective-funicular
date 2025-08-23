@@ -50,9 +50,8 @@ class ColosseumConnector:
             logger.error("Cannot connect WebSocket without a session ID.")
             return False
 
-        # Sanitize the session ID for the WebSocket URL by removing hyphens
-        sanitized_session_id = self.session_id.replace('-', '')
-        uri = f"{self.ws_base_url}/session/{sanitized_session_id}/"
+        # The server expects the session ID with hyphens in the URL
+        uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
             self.websocket = await websockets.connect(uri)
             logger.info(f"Successfully connected to WebSocket: {uri}")
