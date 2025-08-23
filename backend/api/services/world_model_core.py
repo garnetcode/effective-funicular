@@ -28,7 +28,8 @@ class WorldModel(nn.Module):
         self.decoder_obs = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, obs_dim)
+            nn.Linear(hidden_dim, obs_dim),
+            nn.Tanh()  # Ensure the output is in the same range as the cortex output [-1, 1]
         )
         self.decoder_reward = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),

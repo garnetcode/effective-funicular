@@ -24,9 +24,11 @@ class DenseCortex(BaseCortex, torch.nn.Module):
     """A trainable cortex for processing vectorized input using PyTorch."""
 
     def __init__(self, input_dim, output_dim):
-        super(DenseCortex, self).__init__() # Calls __init__ for both parent classes
+        super(DenseCortex, self).__init__()  # Calls __init__ for both parent classes
         self.input_dim = input_dim
         self.output_dim = output_dim
+        # LayerNorm for input normalization
+        self.norm = torch.nn.LayerNorm(input_dim)
         self.linear = torch.nn.Linear(input_dim, output_dim)
         self.activation = torch.nn.Tanh()
 
@@ -50,7 +52,9 @@ class DenseCortex(BaseCortex, torch.nn.Module):
         with torch.no_grad():
             padded_input = self._pad_input(raw_input)
             input_tensor = torch.from_numpy(padded_input).float()
-            output_tensor = self.activation(self.linear(input_tensor))
+            # Normalize the input tensor
+            normalized_input = self.norm(input_tensor)
+            output_tensor = self.activation(self.linear(normalized_input))
             return output_tensor.numpy()
 
     def forward(self, batch_tensor: torch.Tensor) -> torch.Tensor:
@@ -58,7 +62,9 @@ class DenseCortex(BaseCortex, torch.nn.Module):
         Processes a batch of tensors through the layers.
         Used during training.
         """
-        return self.activation(self.linear(batch_tensor))
+        # Normalize the input batch
+        normalized_batch = self.norm(batch_tensor)
+        return self.activation(self.linear(normalized_batch))
 
 class TextCortex(BaseCortex):
     """A simple cortex for processing raw text into a reproducible vector."""
