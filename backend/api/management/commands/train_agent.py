@@ -96,9 +96,8 @@ class Command(BaseCommand):
         current_obs = np.array(join_response.get("observation"))
 
         # Get the actual action space size from the environment info
-        logger.info(f"Full join response from server: {join_response}")
         try:
-            actual_action_dim = join_response['info']['action_space']['n']
+            actual_action_dim = join_response['action_space_shape']
             logger.info(f"Environment action space size: {actual_action_dim}")
         except (KeyError, TypeError):
             logger.warning("Could not determine actual action space size from server. Defaulting to max.")
