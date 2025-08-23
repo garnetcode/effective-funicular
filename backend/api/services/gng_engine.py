@@ -49,7 +49,8 @@ class GNG_Engine:
             self.faiss_index = None
             return
 
-        print(f"Building FAISS index for {len(self.nodes)} nodes...")
+        # This was creating too much noise during training.
+        # print(f"Building FAISS index for {len(self.nodes)} nodes...")
         self.faiss_id_map = list(self.nodes.keys())
         weights = np.array([self.nodes[nid]['weight'] for nid in self.faiss_id_map]).astype('float32')
 

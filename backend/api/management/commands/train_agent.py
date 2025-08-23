@@ -3,6 +3,7 @@ import os
 import torch
 import yaml
 import logging
+from tqdm import tqdm
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 
@@ -11,8 +12,6 @@ try:
 except ImportError:
     gym = None
 
-# --- Set up logging ---
-# Moved to a more standard location at the top
 logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
@@ -79,7 +78,7 @@ class Command(BaseCommand):
 
         # --- Agent Initialization ---
         cortex_configs, cortex_id, action_dim = self.get_env_config(env)
-        obs_dim = env.observation_space.shape[0] # obs_dim is the input to the cortex
+        obs_dim = env.observation_space.shape[0]
         agent_id = config.get('agent_id', f"agent-{env_name}")
 
         agent_config = config.get('agent_config', {})
@@ -95,63 +94,49 @@ class Command(BaseCommand):
         )
 
         logger.info(f"Starting training for agent '{agent.agent_id}' in '{env_name}'...")
-        logger.info(f"Agent dimensions: obs={agent.obs_dim}, action={agent.action_dim}, latent={agent.latent_dim}, hidden={agent.hidden_dim}")
 
         total_rewards = []
-        num_episodes = config.get('episodes_per_env', 100) # Use the correct config key
+        num_episodes = config.get('episodes_per_env', 100)
 
-        for episode in range(num_episodes):
-            state, info = env.reset()
-            terminated = False
-            truncated = False
-            episode_reward = 0
+        # --- Training Loop with tqdm ---
+        with tqdm(total=num_episodes, desc="Training Agent") as pbar:
+            for episode in range(num_episodes):
+                state, info = env.reset()
+                terminated = False
+                truncated = False
+                episode_reward = 0
 
-            # Reset agent's internal state at the start of each episode
-            agent.hidden_state = torch.zeros(1, agent.hidden_dim)
-            agent.last_action = torch.tensor(0)
+                agent.hidden_state = torch.zeros(1, agent.hidden_dim)
+                agent.last_action = torch.tensor(0)
 
-            while not (terminated or truncated):
-                # Perceive state and select action
-                agent.perceive_and_update_state(cortex_id, state)
-                action, log_prob = agent.select_action()
+                while not (terminated or truncated):
+                    agent.perceive_and_update_state(cortex_id, state)
+                    action, log_prob = agent.select_action()
+                    next_state, external_reward, terminated, truncated, info = env.step(action)
 
-                # Step the environment
-                next_state, external_reward, terminated, truncated, info = env.step(action)
+                    agent.energy -= agent.metabolic_cost
+                    agent.energy = min(agent.energy, agent.max_energy)
 
-                # Update agent vitals (homeostasis)
-                agent.energy -= agent.metabolic_cost
-                agent.energy = min(agent.energy, agent.max_energy)
+                    total_reward = external_reward  # Simplified reward for this env
+                    agent.record_experience(state, action, log_prob, total_reward, next_state, (terminated or truncated))
 
-                # For this simple env, we can use a placeholder for homeostatic reward
-                homeostatic_reward = 0.0
-                total_reward = external_reward + homeostatic_reward
+                    state = next_state
+                    episode_reward += external_reward
 
-                # Record experience with the total reward
-                agent.record_experience(state, action, log_prob, total_reward, next_state, (terminated or truncated))
+                train_stats = agent.train()
+                agent.save_state(version_info=train_stats)
+                total_rewards.append(episode_reward)
 
-                state = next_state
-                episode_reward += external_reward
-
-            # Post-episode training and state saving
-            train_stats = agent.train()
-            agent.save_state(version_info=train_stats)
-            total_rewards.append(episode_reward)
-
-            if episode % 10 == 0 or episode == num_episodes - 1:
+                # Update tqdm progress bar with useful stats
                 avg_reward = np.mean(total_rewards[-100:])
-                wm_loss = self._safe_format(train_stats.get('world_model_loss'), '.4f')
-                policy_loss = self._safe_format(train_stats.get('policy_loss'), '.4f')
-
-                log_message = (
-                    f"Episode {episode + 1}/{num_episodes} | "
-                    f"Reward: {episode_reward:.2f} | "
-                    f"Avg Reward (last 100): {avg_reward:.2f} | "
-                    f"WM Loss: {wm_loss} | "
-                    f"Policy Loss: {policy_loss}"
-                )
-                logger.info(log_message)
+                pbar.set_postfix({
+                    "Reward": f"{episode_reward:.2f}",
+                    "Avg Reward": f"{avg_reward:.2f}",
+                    "WM Loss": self._safe_format(train_stats.get('world_model_loss'), '.4f'),
+                    "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
+                })
+                pbar.update(1)
 
         env.close()
         logger.info("Training finished.")
-        # Fix: Use the correct attribute to get the storage path
         logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")
