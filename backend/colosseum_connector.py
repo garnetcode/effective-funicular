@@ -69,11 +69,14 @@ class ColosseumConnector:
         if not self.websocket:
             return None
 
+        # The session is identified by the WebSocket URL, so session_id is not needed in the payload.
+        # Aligning with the frontend client implementation.
         join_message = {
             "type": "agent.join",
             "agent_tag": self.agent_tag,
+            "agent_name": f"ChimeraAgent-{self.agent_tag}",
+            "agent_type": "ai",
             "environment_id": self.environment_id,
-            "session_id": self.session_id
         }
         await self.websocket.send(json.dumps(join_message))
         response = await self.receive_message()
@@ -92,7 +95,7 @@ class ColosseumConnector:
         action_message = {
             "type": "agent.action",
             "action": int(action),
-            "session_id": self.session_id
+            "agent_tag": self.agent_tag # The server identifies the agent by its tag within the session
         }
         await self.websocket.send(json.dumps(action_message))
 
