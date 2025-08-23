@@ -124,8 +124,6 @@ class Command(BaseCommand):
                         current_obs = next_obs
                         episode_reward += reward
 
-                    logger.info(f"Episode {episode + 1} finished. Done flag: {done}")
-
                     # --- Post-Episode ---
                     train_stats = agent.train()
                     agent.save_state(version_info=train_stats)
@@ -141,6 +139,7 @@ class Command(BaseCommand):
 
                     # --- Reset for next episode ---
                     if episode < num_episodes - 1:
+                        await asyncio.sleep(0.1)  # Allow server time to process
                         reset_response = await connector.reset_environment()
                         if reset_response:
                             current_obs = np.array(reset_response.get("observation"))
