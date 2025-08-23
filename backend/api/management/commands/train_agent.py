@@ -167,7 +167,7 @@ class Command(BaseCommand):
                             experience.done
                         )
 
-                    train_stats = agent.train()
+                    train_stats = agent.train(cortex_id="vector_input")
                     if (episode + 1) % 50 == 0:
                         agent.save_state(version_info=train_stats)
                     total_rewards.append(episode_reward)

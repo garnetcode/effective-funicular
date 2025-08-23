@@ -135,7 +135,7 @@ class ChimeraAgentTests(TestCase):
         self.assertEqual(len(self.agent.replay_buffer), batch_size)
 
         # 2. Run an initial training step and record the loss
-        initial_train_stats = self.agent.train()
+        initial_train_stats = self.agent.train(cortex_id="test_cortex")
         initial_loss = initial_train_stats.get("world_model_loss")
         self.assertIsNotNone(initial_loss)
 
@@ -151,7 +151,7 @@ class ChimeraAgentTests(TestCase):
                 0.5, 1.0, np.random.rand(self.obs_dim), False
             )
             # Train on a new batch
-            train_stats = self.agent.train()
+            train_stats = self.agent.train(cortex_id="test_cortex")
             final_loss = train_stats.get("world_model_loss")
             self.assertIsNotNone(final_loss)
 

@@ -1,5 +1,6 @@
 import abc
 import numpy as np
+import torch
 
 class BaseCortex(abc.ABC):
     """Abstract base class for all sensory cortex modules."""
@@ -17,31 +18,47 @@ class BaseCortex(abc.ABC):
         """
         pass
 
-class DenseCortex(BaseCortex):
-    """A simple cortex for processing already-vectorized input."""
+import torch
+
+class DenseCortex(BaseCortex, torch.nn.Module):
+    """A trainable cortex for processing vectorized input using PyTorch."""
 
     def __init__(self, input_dim, output_dim):
+        super(DenseCortex, self).__init__() # Calls __init__ for both parent classes
         self.input_dim = input_dim
         self.output_dim = output_dim
-        # Initialize weights for a simple linear layer
-        self.weights = np.random.randn(input_dim, output_dim) * 0.1
-        self.biases = np.random.randn(output_dim) * 0.1
+        self.linear = torch.nn.Linear(input_dim, output_dim)
+        self.activation = torch.nn.Tanh()
 
-    def process(self, raw_input: np.array):
+    def _pad_input(self, raw_input: np.array) -> np.array:
+        """Pads a single numpy input vector to the expected input_dim."""
         input_len = raw_input.shape[0]
         if input_len > self.input_dim:
             raise ValueError(f"Input dimension {input_len} exceeds the maximum expected dimension of {self.input_dim}")
 
-        # Pad the input if it's smaller than the expected dimension
         if input_len < self.input_dim:
             padded_input = np.zeros(self.input_dim)
             padded_input[:input_len] = raw_input
-        else:
-            padded_input = raw_input
+            return padded_input
+        return raw_input
 
-        # Simple linear transformation + tanh activation
-        output = np.tanh(np.dot(padded_input, self.weights) + self.biases)
-        return output
+    def process(self, raw_input: np.array) -> np.array:
+        """
+        Processes a single raw numpy vector for inference.
+        Converts to tensor, processes, and converts back to numpy.
+        """
+        with torch.no_grad():
+            padded_input = self._pad_input(raw_input)
+            input_tensor = torch.from_numpy(padded_input).float()
+            output_tensor = self.activation(self.linear(input_tensor))
+            return output_tensor.numpy()
+
+    def forward(self, batch_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Processes a batch of tensors through the layers.
+        Used during training.
+        """
+        return self.activation(self.linear(batch_tensor))
 
 class TextCortex(BaseCortex):
     """A simple cortex for processing raw text into a reproducible vector."""
