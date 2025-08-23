@@ -1,1 +1,21 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
 /backend/venv/
+
+# Log files
+*.log
+/training.log
+
+# OS-specific files
+.DS_Store
+
+# Django
+/backend/db.sqlite3
+
+# Chimera Agent Storage
+/backend/storage/
