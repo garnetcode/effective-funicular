@@ -2,6 +2,7 @@
 # This module uses a causal language model API (like Ollama) to
 # translate the agent's internal state into a text response.
 
+import json
 import torch
 import torch.nn as nn
 from openai import OpenAI
@@ -24,23 +25,37 @@ class TextGenerationHead(nn.Module):
             api_key='ollama',  # Required for the client, but not used by Ollama
         )
 
-        # A simple layer to create a text prompt from the agent's hidden state
-        self.prompt_formatter = lambda h: f"Based on my current internal state, my response is: "
+    def _format_prompt(self, agent_state: dict) -> str:
+        """
+        Creates a detailed prompt for the language model, including the agent's
+        state serialized as a JSON object.
+        """
+        state_json = json.dumps(agent_state, indent=2)
 
-    def generate(self, agent_hidden_state: torch.Tensor, max_new_tokens=50):
+        prompt = (
+            "You are the mind of a cognitive agent. Your internal state is provided below as a JSON object, "
+            "containing your vital signs and a summary of your current neural state. "
+            "Based on this information, generate a brief, first-person response that reflects your current condition or thought process.\n\n"
+            "```json\n"
+            f"{state_json}\n"
+            "```\n\n"
+            "Response:"
+        )
+        return prompt
+
+    def generate(self, agent_state: dict, max_new_tokens=50):
         """
-        Generates a text response from the agent's hidden state.
+        Generates a text response from the agent's state dictionary.
         """
-        # 1. Create a prompt from the hidden state
-        prompt = self.prompt_formatter(agent_hidden_state)
+        # 1. Create a detailed prompt from the agent state
+        prompt = self._format_prompt(agent_state)
 
         # 2. Generate the response using the API
         try:
             response = self.client.chat.completions.create(
                 model=self.model_id,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt} # The prompt now contains all context
                 ],
                 max_tokens=max_new_tokens
             )
