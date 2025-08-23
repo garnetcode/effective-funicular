@@ -43,6 +43,7 @@ class LanguageCortex(nn.Module):
             )
             embedding = response.data[0].embedding
 
+
             # Ensure the embedding is a numpy array and on the correct device
             embedding_tensor = torch.tensor(embedding, dtype=torch.float32).to(self.device)
 

@@ -35,6 +35,11 @@ class WorldModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
+        self.decoder_value = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
 
     def forward(self, obs, action, h_prev):
         """
@@ -46,11 +51,12 @@ class WorldModel(nn.Module):
             h_prev (torch.Tensor): The previous hidden state of the recurrent core.
 
         Returns:
-            tuple: (z, h_next, obs_pred, reward_pred)
+            tuple: (z, h_next, obs_pred, reward_pred, value_pred)
                    - z: The new latent state.
                    - h_next: The next hidden state.
                    - obs_pred: The predicted next observation.
                    - reward_pred: The predicted reward.
+                   - value_pred: The predicted state value.
         """
         # Ensure obs is 2D (batch_size, obs_dim)
         if obs.dim() == 1:
@@ -79,6 +85,7 @@ class WorldModel(nn.Module):
         # 4. Decode the new hidden state to make predictions
         obs_pred = self.decoder_obs(h_next)
         reward_pred = self.decoder_reward(h_next)
+        value_pred = self.decoder_value(h_next)
 
         # Return tensors with the batch dimension intact
-        return z, h_next, obs_pred, reward_pred
+        return z, h_next, obs_pred, reward_pred, value_pred

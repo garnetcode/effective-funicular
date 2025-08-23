@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     # --- Load Configuration ---
-    config_path = "backend/config.yaml"
+    config_path = "config.yaml"
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)

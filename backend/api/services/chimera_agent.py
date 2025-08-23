@@ -79,9 +79,10 @@ class ChimeraAgent:
 
         history_config = history_config or {}
         self.history_manager = StateHistoryManager(agent_id, **history_config)
-        self.learning_rate = self.hyperparams.get('learning_rate', 0.01)
+        self.learning_rate = self.hyperparams.get('learning_rate', 0.0001)
         self.gamma = self.hyperparams.get('gamma', 0.99)
         self.stag_expansion_threshold = self.hyperparams.get('stag_expansion_threshold', 0.1)
+        self.max_grad_norm = self.hyperparams.get('max_grad_norm', 1.0)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -177,18 +178,13 @@ class ChimeraAgent:
         # 2. Use the world model to update the hidden state
         # The 'action' is the last action taken to get to this new observation.
         with torch.no_grad():
-            _, h_next, _, _ = self.world_model(obs_tensor, self.last_action, self.hidden_state)
+            _, h_next, _, _, _ = self.world_model(obs_tensor, self.last_action, self.hidden_state)
 
         # 3. Update the agent's internal state
         self.hidden_state = h_next
 
         # The STAG framework now organizes the agent's internal, context-rich hidden states
         h_numpy = self.hidden_state.detach().numpy().flatten()
-
-        # Normalize the hidden state vector to prevent numerical instability in the GNG
-        h_norm = np.linalg.norm(h_numpy)
-        if h_norm > 0:
-            h_numpy = h_numpy / h_norm
 
         # Find the correct terminal GNG and process the input
         terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_numpy)
@@ -205,11 +201,6 @@ class ChimeraAgent:
         """
         internal_state = self.hidden_state
         h_numpy = internal_state.detach().numpy().flatten()
-
-        # Normalize the hidden state vector before passing it to the STAG
-        h_norm = np.linalg.norm(h_numpy)
-        if h_norm > 0:
-            h_numpy = h_numpy / h_norm
 
         # Find the current conceptual context from the STAG
         terminal_level_node, winner_id, _ = self.stag.find_terminal_node_and_path(h_numpy)
@@ -291,17 +282,12 @@ class ChimeraAgent:
 
         action_batch = torch.tensor(batch.action)
         reward_batch = torch.tensor(batch.reward).float()
-
-        # Normalize the returns (which are used as advantages) for stable training
-        reward_mean = reward_batch.mean()
-        reward_std = reward_batch.std() + 1e-5 # Add epsilon to prevent division by zero
-        reward_batch = (reward_batch - reward_mean) / reward_std
+        done_batch = torch.tensor(batch.done).float()
 
         # --- Initialize Optimizers ---
-        # Combine parameters of the world model and the cortex for joint training
-        world_model_and_cortex_params = list(self.world_model.parameters()) + list(cortex.parameters())
-        world_model_optimizer = torch.optim.Adam(world_model_and_cortex_params, lr=self.learning_rate)
-        action_head_optimizer = self.action_head.optimizer
+        # Combine parameters of all models for joint training
+        all_params = list(self.world_model.parameters()) + list(cortex.parameters()) + list(self.action_head.parameters())
+        optimizer = torch.optim.Adam(all_params, lr=self.learning_rate)
 
         # --- World Model and Cortex Training ---
         # Process raw observations through the cortex first
@@ -310,36 +296,55 @@ class ChimeraAgent:
             next_obs_batch_processed = cortex(next_obs_batch_raw)
 
         # The world model predicts the next processed state from the processed current state
-        _, h_next, obs_pred_batch, reward_pred_batch = self.world_model(obs_batch_processed, action_batch, hidden_state_batch)
+        _, _, obs_pred_batch, reward_pred_batch, value_pred_batch = self.world_model(obs_batch_processed, action_batch, hidden_state_batch)
+        with torch.no_grad():
+            _, _, _, _, next_value_pred_batch = self.world_model(next_obs_batch_processed, action_batch, hidden_state_batch) # Action here is not used for next_value
 
         reconstruction_loss = torch.nn.functional.mse_loss(obs_pred_batch, next_obs_batch_processed)
         reward_loss = torch.nn.functional.mse_loss(reward_pred_batch, reward_batch.unsqueeze(1))
-        total_wm_loss = reconstruction_loss + reward_loss
+        
+        # --- Critic (Value) Loss ---
+        target_values = reward_batch.unsqueeze(1) + self.gamma * next_value_pred_batch * (1 - done_batch.unsqueeze(1))
+        critic_loss = torch.nn.functional.mse_loss(value_pred_batch, target_values.detach())
 
-        world_model_optimizer.zero_grad()
-        total_wm_loss.backward()
-        torch.nn.utils.clip_grad_norm_(world_model_and_cortex_params, max_norm=1.0)
-        world_model_optimizer.step()
+        # --- Action Head Training (Actor) ---
+        advantage = (target_values - value_pred_batch).detach()
 
-        # --- Action Head Training ---
-        # The ActionHead is trained on the combined state (WorldModel hidden state + STAG context)
         combined_input_batch = torch.cat((hidden_state_batch, stag_context_batch), dim=1)
         action_logits = self.action_head(combined_input_batch)
         log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
         log_probs_for_actions = log_probs.gather(1, action_batch.unsqueeze(1))
 
-        # The reward is the discounted return G_t calculated before buffering
-        policy_loss = (-log_probs_for_actions * reward_batch.unsqueeze(1)).mean()
+        policy_loss = (-log_probs_for_actions * advantage).mean()
 
-        action_head_optimizer.zero_grad()
-        policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.action_head.parameters(), max_norm=1.0)
-        action_head_optimizer.step()
+        # --- Entropy Regularization ---
+        entropy = -(torch.exp(log_probs) * log_probs).sum(dim=-1).mean()
+        entropy_bonus = self.hyperparams.get('entropy_bonus', 0.01) * entropy
+
+        # --- Total Loss ---
+        policy_loss_weight = self.hyperparams.get('policy_loss_weight', 1.0)
+        value_loss_weight = self.hyperparams.get('value_loss_weight', 0.5)
+        reconstruction_loss_weight = self.hyperparams.get('reconstruction_loss_weight', 1.0)
+        reward_loss_weight = self.hyperparams.get('reward_loss_weight', 1.0)
+
+        total_loss = (reconstruction_loss_weight * reconstruction_loss + 
+                      reward_loss_weight * reward_loss + 
+                      value_loss_weight * critic_loss + 
+                      policy_loss_weight * policy_loss - 
+                      entropy_bonus)
+
+        optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(all_params, max_norm=self.max_grad_norm)
+        optimizer.step()
 
         return {
             "status": "Training step complete",
-            "world_model_loss": total_wm_loss.item(),
-            "policy_loss": policy_loss.item()
+            "total_loss": total_loss.item(),
+            "world_model_loss": (reconstruction_loss + reward_loss).item(),
+            "policy_loss": policy_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "entropy": entropy.item()
         }
 
     def generate_response(self, max_new_tokens=50):

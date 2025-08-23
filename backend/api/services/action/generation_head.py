@@ -41,6 +41,8 @@ class TextGenerationHead(nn.Module):
             "```\n\n"
             "Response:"
         )
+
+        print(prompt)
         return prompt
 
     def generate(self, agent_state: dict, max_new_tokens=50):

@@ -1,10 +1,10 @@
 # Configuration for training the ChimeraAgent
 
 # Environment settings
-env_name: "CartPole-v1"
+env_name: "LunarLander-v3"
 
 # Agent settings
-default_agent_id_prefix: "agent-"
+default_agent_id_prefix: "Kymera-"
 force_new_agent: false # If true, ignores any saved state for the agent
 
 # Agent History Settings
@@ -13,12 +13,12 @@ agent_history:
   base_snapshot_interval: 10 # How often to save a full "base" snapshot.
 
 # Main training settings
-episodes_per_env: 100 # How many episodes each parallel agent should run
+episodes_per_env: 10000 # How many episodes each parallel agent should run
 
 # Language Model (LLM) Integration
 language_model:
   enabled: true # Toggle the language capabilities on/off
-  generation_model_id: "gemma-2-9b-it" # Model for generating text responses
+  generation_model_id: "gemma3:1b" # Model for generating text responses
   embedding_model_id: "nomic-embed-text" # Model for creating embeddings
   embedding_dim: 768 # The dimension of the embeddings produced by the model
   api_base: "http://localhost:11434/v1" # Ollama API endpoint

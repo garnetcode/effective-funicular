@@ -94,11 +94,11 @@ async def main(args):
 
             # Main interaction loop for the episode
             while not terminated:
-                # 1. Perceive the state
-                state_embedding = agent.perceive(cortex_id, np.array(state))
+                # 1. Perceive the state and update the hidden state
+                hidden_state = agent.perceive_and_update_state(cortex_id, np.array(state))
 
                 # 2. Select an action
-                action, log_prob, internal_state = agent.select_action(state_embedding)
+                action, log_prob, stag_context = agent.select_action(local_env.action_space.n)
 
                 # 3. Take action in the environment
                 await connector.send_action(int(action))
@@ -110,16 +110,19 @@ async def main(args):
                     break
 
                 reward = result_msg.get('reward', 0)
+                print(f"Received reward: {reward}")
                 is_terminated = result_msg.get('terminated', False)
+                next_state = result_msg.get('observation')
 
-                agent.record_experience(internal_state, action, reward)
+                # 5. Record the experience
+                agent.record_experience(hidden_state, stag_context, np.array(state), action, log_prob, reward, np.array(next_state), is_terminated)
                 episode_reward += reward
 
                 if is_terminated:
                     print(f"Episode finished. Total reward: {episode_reward:.2f}")
                     break
 
-                # 5. Wait for the next turn
+                # 6. Wait for the next turn
                 turn_msg = await connector.receive_message()
                 if not turn_msg or turn_msg.get('type') != 'game.turn':
                     print(f"Unexpected message or connection closed: {turn_msg}")

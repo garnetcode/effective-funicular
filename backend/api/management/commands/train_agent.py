@@ -16,7 +16,7 @@ class Command(BaseCommand):
     help = 'Train a ChimeraAgent against a Colosseum server.'
 
     def add_arguments(self, parser):
-        parser.add_argument("--config", type=str, default="backend/config.yaml", help="Path to the configuration file.")
+        parser.add_argument("--config", type=str, default="config.yaml", help="Path to the configuration file.")
 
     def _safe_format(self, value, format_spec):
         """Safely format a value, returning a placeholder if it's not a number."""
