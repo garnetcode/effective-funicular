@@ -26,6 +26,8 @@ language_model:
 
 # Agent architecture and hyperparameters
 agent_config:
+  max_obs_dim: 2048
+  max_action_dim: 256
   latent_dim: 64
   hidden_dim: 128
   hyperparams:

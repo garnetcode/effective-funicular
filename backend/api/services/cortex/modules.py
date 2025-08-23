@@ -28,11 +28,19 @@ class DenseCortex(BaseCortex):
         self.biases = np.random.randn(output_dim) * 0.1
 
     def process(self, raw_input: np.array):
-        if raw_input.shape[0] != self.input_dim:
-            raise ValueError(f"Input dimension {raw_input.shape[0]} does not match expected {self.input_dim}")
+        input_len = raw_input.shape[0]
+        if input_len > self.input_dim:
+            raise ValueError(f"Input dimension {input_len} exceeds the maximum expected dimension of {self.input_dim}")
+
+        # Pad the input if it's smaller than the expected dimension
+        if input_len < self.input_dim:
+            padded_input = np.zeros(self.input_dim)
+            padded_input[:input_len] = raw_input
+        else:
+            padded_input = raw_input
 
         # Simple linear transformation + tanh activation
-        output = np.tanh(np.dot(raw_input, self.weights) + self.biases)
+        output = np.tanh(np.dot(padded_input, self.weights) + self.biases)
         return output
 
 class TextCortex(BaseCortex):
