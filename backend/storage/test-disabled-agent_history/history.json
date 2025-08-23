@@ -30,5 +30,13 @@
     "info": {
       "message": "Initial state."
     }
+  },
+  {
+    "version": 14,
+    "type": "diff",
+    "timestamp": "2025-08-23T16:03:27.204133",
+    "info": {
+      "message": "Initial state."
+    }
   }
 ]

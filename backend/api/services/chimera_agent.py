@@ -185,6 +185,11 @@ class ChimeraAgent:
         # The STAG framework now organizes the agent's internal, context-rich hidden states
         h_numpy = self.hidden_state.detach().numpy().flatten()
 
+        # Normalize the hidden state vector to prevent numerical instability in the GNG
+        h_norm = np.linalg.norm(h_numpy)
+        if h_norm > 0:
+            h_numpy = h_numpy / h_norm
+
         # Find the correct terminal GNG and process the input
         terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_numpy)
         if terminal_node:
