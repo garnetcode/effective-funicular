@@ -102,6 +102,8 @@ class AgentConsumer(AsyncWebsocketConsumer):
                 await self.handle_agent_join(data)
             elif message_type == "agent.action":
                 await self.handle_agent_action(data)
+            elif message_type == "agent.reset":
+                await self.handle_agent_reset(data)
             else:
                 logger.warning(f"Unknown message type: {message_type}")
                 await self.send_error("Unknown message type", "UNKNOWN_MESSAGE_TYPE")
@@ -289,12 +291,34 @@ class AgentConsumer(AsyncWebsocketConsumer):
 
             if done:
                 logger.info(f"Episode completed for session {self.session_id}")
-                await self.broadcast_game_over(self.total_reward, self.steps, "episode_complete")
 
         except Exception as e:
             logger.error(f"Error in handle_agent_action: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             await self.send_error(f"Action failed: {str(e)}", "ACTION_FAILED")
+
+    async def handle_agent_reset(self, data):
+        """Handles an agent's request to reset the environment for a new episode."""
+        if not self.env:
+            await self.send_error("Environment not initialized", "ENV_NOT_INITIALIZED")
+            return
+
+        try:
+            observation, info = self.env.reset()
+            self.total_reward = 0.0
+            self.steps = 0
+            logger.info(f"Environment reset for session {self.session_id}")
+
+            response = {
+                "type": "environment.reset",
+                "observation": observation.tolist() if hasattr(observation, 'tolist') else observation,
+                "info": info
+            }
+            await self.send(text_data=safe_json_dumps(response))
+
+        except Exception as e:
+            logger.error(f"Error resetting environment for session {self.session_id}: {e}", exc_info=True)
+            await self.send_error(f"Failed to reset environment: {str(e)}", "RESET_FAILED")
 
     async def broadcast_action_taken(self, action, observation, reward, info):
         """Broadcast action taken to all viewers in the same session"""
@@ -589,10 +613,10 @@ class AgentConsumer(AsyncWebsocketConsumer):
 
             await self.channel_layer.group_send(self.room_group_name, {
                 "type": "session_update",
-                "message": message
+                "message": safe_json_dumps(message)
             })
 
-            logger.info(f"Broadcasted game over to room {self.room_group_name}")
+            logger.info(f"Broadcasted game over to room {self.room_group_name}: {termination_reason}")
 
         except Exception as e:
             logger.error(f"Error broadcasting game over: {e}")
@@ -1660,7 +1684,6 @@ class UnifiedSessionConsumer(AsyncWebsocketConsumer):
 
             if done:
                 logger.info(f"Episode completed for session {self.session_id}")
-                await self.broadcast_game_over(self.total_reward, self.steps, "episode_complete")
 
         except Exception as e:
             logger.error(f"Error in handle_agent_action: {e}")
@@ -1926,4 +1949,4 @@ class UnifiedSessionConsumer(AsyncWebsocketConsumer):
 You are now unblocked.
 
 You **must** respond now, using the `message_user` tool.
-System Info: timestamp: 2025-08-23 01:51:54.496029
+System Info: timestamp: 2025-08-23 02:07:36.755170
