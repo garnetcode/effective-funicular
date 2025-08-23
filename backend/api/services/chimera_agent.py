@@ -251,10 +251,21 @@ class ChimeraAgent:
         # Detach hidden states before stacking to prevent gradients from flowing back
         hidden_state_batch = torch.stack([h.detach() for h in batch.hidden_state]).squeeze(1)
         stag_context_batch = torch.stack([s.detach() for s in batch.stag_context]).squeeze(1)
-        obs_batch = torch.stack([torch.from_numpy(o) for o in batch.obs]).float()
+
+        # Pad observations to max_obs_dim
+        def pad_observations(obs_list):
+            padded_obs = []
+            for o in obs_list:
+                padded = np.zeros(self.max_obs_dim)
+                padded[:o.shape[0]] = o
+                padded_obs.append(padded)
+            return torch.from_numpy(np.array(padded_obs)).float()
+
+        obs_batch = pad_observations(batch.obs)
+        next_obs_batch = pad_observations(batch.next_obs)
+
         action_batch = torch.tensor(batch.action)
         reward_batch = torch.tensor(batch.reward).float()
-        next_obs_batch = torch.stack([torch.from_numpy(o) for o in batch.next_obs]).float()
         done_batch = torch.tensor(batch.done).float()
 
         # --- Initialize ---

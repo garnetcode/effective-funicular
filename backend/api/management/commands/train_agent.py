@@ -135,7 +135,8 @@ class Command(BaseCommand):
 
                     # --- Post-Episode ---
                     train_stats = agent.train()
-                    agent.save_state(version_info=train_stats)
+                    if (episode + 1) % 50 == 0:
+                        agent.save_state(version_info=train_stats)
                     total_rewards.append(episode_reward)
 
                     avg_reward = np.mean(total_rewards[-100:])
