@@ -122,13 +122,12 @@ class ColosseumConnector:
         except Exception as e:
             logger.error(f"Failed to send action: {e}", exc_info=True)
 
-    async def reset_environment(self):
+    async def drain_messages(self):
         """
-        Sends a reset message and waits for confirmation. Before sending, it
-        drains any messages that might be left over from the previous episode.
+        Consumes and discards all messages currently in the WebSocket buffer
+        until the buffer is empty.
         """
-        # Drain any lingering messages from the previous episode to ensure a clean state.
-        logger.info("Draining message queue before sending reset...")
+        logger.info("Draining message queue...")
         drained_count = 0
         while True:
             try:
@@ -139,8 +138,8 @@ class ColosseumConnector:
                     drained_count += 1
                 else:
                     # receive_message returned None, probably connection closed.
-                    logger.error("Failed to reset: connection closed while draining messages.")
-                    return None
+                    logger.error("Connection closed while draining messages.")
+                    break
             except asyncio.TimeoutError:
                 # This is the expected way to exit the loop when the queue is empty.
                 if drained_count > 0:
@@ -150,8 +149,13 @@ class ColosseumConnector:
                 break
             except Exception as e:
                 logger.error(f"An unexpected error occurred while draining messages: {e}")
-                return None
+                break
 
+    async def reset_environment(self):
+        """
+        Sends a reset message and waits for confirmation. It assumes the
+        message buffer has been drained by the caller.
+        """
         logger.info("Sending agent.reset message.")
         reset_message = {"type": "agent.reset"}
         await self.send_message(reset_message)

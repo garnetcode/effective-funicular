@@ -149,7 +149,7 @@ class Command(BaseCommand):
 
                     # --- Reset for next episode ---
                     if episode < num_episodes - 1:
-                        await asyncio.sleep(0.1)  # Allow server time to process
+                        await connector.drain_messages()
                         reset_response = await connector.reset_environment()
                         if reset_response:
                             current_obs = np.array(reset_response.get("observation"))
