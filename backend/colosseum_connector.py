@@ -53,13 +53,10 @@ class ColosseumConnector:
 
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            # Use a custom protocol factory to inject headers, which is more robust
-            # across different versions of the `websockets` library.
-            protocol_factory = partial(
-                websockets.ClientProtocol,
+            self.websocket = await websockets.connect(
+                uri,
                 extra_headers={"Origin": "http://localhost:3000"}
             )
-            self.websocket = await websockets.connect(uri, create_protocol=protocol_factory)
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:
@@ -69,8 +66,20 @@ class ColosseumConnector:
             logger.error(f"WebSocket connection closed unexpectedly: {e}")
             return False
         except TypeError as e:
-            # Catching the specific TypeError to provide a more helpful message.
-            logger.error(f"A TypeError occurred during WebSocket connection. This might be due to an incompatibility in the `websockets` library version. Error: {e}", exc_info=True)
+            # Fallback for older websockets versions that might not support extra_headers directly
+            try:
+                protocol_factory = partial(
+                    websockets.ClientProtocol,
+                    extra_headers={"Origin": "http://localhost:3000"}
+                )
+                self.websocket = await websockets.connect(uri, create_protocol=protocol_factory)
+                logger.info(f"Successfully connected to WebSocket using fallback protocol factory: {uri}")
+                return True
+            except Exception as inner_e:
+                logger.error(f"A TypeError occurred during WebSocket connection, and the fallback also failed. This might be due to an incompatibility in the `websockets` library version. Initial Error: {e}, Fallback Error: {inner_e}", exc_info=True)
+                return False
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
             return False
 
     async def join_session(self):
