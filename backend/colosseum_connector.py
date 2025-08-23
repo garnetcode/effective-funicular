@@ -1,55 +1,78 @@
 import asyncio
 import json
-import uuid
 import websockets
 import logging
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
 class ColosseumConnector:
     """
     Manages communication with a Colosseum game server for a single session,
-    handling WebSocket connection and gameplay.
+    handling both HTTP for session management and WebSockets for real-time gameplay.
     """
     def __init__(self, environment_id, agent_tag, host="127.0.0.1", http_port=8000, ws_port=8000):
-        # http_port is no longer used but kept for compatibility with existing configs
+        self.http_base_url = f"http://{host}:{http_port}/api"
         self.ws_base_url = f"ws://{host}:{ws_port}/ws"
         self.environment_id = environment_id
         self.agent_tag = agent_tag
         self.session_id = None
         self.websocket = None
 
-    async def connect(self):
-        """
-        Establishes a connection to the Colosseum server by generating a new
-        session ID, creating a WebSocket connection, and joining the session.
-        Returns True on success, False on failure.
-        """
-        # 1. Generate a session ID on the client-side
-        self.session_id = str(uuid.uuid4())
-        logger.info(f"Generated new session ID: {self.session_id}")
+    async def create_session(self):
+        """Creates a new game session via the HTTP API."""
+        url = f"{self.http_base_url}/sessions/create/"
+        payload = {
+            "environment_id": self.environment_id,
+            "agent_tag": self.agent_tag,
+            "agent_name": f"ChimeraAgent-{self.agent_tag}",
+            "agent_type": "ai"
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    if data.get("success"):
+                        self.session_id = data.get("session_id")
+                        logger.info(f"Successfully created session: {self.session_id}")
+                        return data
+                    else:
+                        logger.error(f"Failed to create session: {data}")
+                        return None
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP error creating session: {e}")
+            return None
 
-        # 2. Connect to the WebSocket endpoint
+    async def connect_websocket(self):
+        """Connects to the session's WebSocket endpoint."""
+        if not self.session_id:
+            logger.error("Cannot connect WebSocket without a session ID.")
+            return False
+
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            # The `create_protocol` argument is deprecated. Instead, pass custom
-            # headers using `additional_headers`.
             self.websocket = await websockets.connect(
                 uri,
                 additional_headers={"Origin": "http://localhost:3000"}
             )
             logger.info(f"Successfully connected to WebSocket: {uri}")
+            return True
         except websockets.exceptions.InvalidURI:
             logger.error(f"Invalid WebSocket URI: {uri}")
-            return None
+            return False
         except websockets.exceptions.ConnectionClosed as e:
             logger.error(f"WebSocket connection closed unexpectedly: {e}")
-            return None
+            return False
         except Exception as e:
             logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
-            return None
+            return False
 
-        # 3. Join the session by sending an 'agent.join' message
+    async def join_session(self):
+        """Sends the agent.join message to formally join the session."""
+        if not self.websocket:
+            logger.error("Cannot join session, WebSocket is not connected.")
+            return None
         try:
             join_message = {
                 "type": "agent.join",
@@ -65,11 +88,9 @@ class ColosseumConnector:
             else:
                 error_detail = response.get('message', 'No details provided') if response else "No response from server"
                 logger.error(f"Failed to join session. Server response: {error_detail}")
-                await self.close()
                 return None
         except Exception as e:
             logger.error(f"An error occurred while trying to join the session: {e}", exc_info=True)
-            await self.close()
             return None
 
     async def send_action(self, action):
@@ -77,7 +98,6 @@ class ColosseumConnector:
         if not self.websocket:
             logger.error("Cannot send action, WebSocket is not connected.")
             return
-
         try:
             action_message = {
                 "type": "agent.action",
@@ -89,7 +109,6 @@ class ColosseumConnector:
             logger.warning("Cannot send action, connection is closed.")
         except Exception as e:
             logger.error(f"Failed to send action: {e}", exc_info=True)
-
 
     async def receive_message(self):
         """Receives and parses a single message from the WebSocket."""
