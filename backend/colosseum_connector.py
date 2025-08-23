@@ -53,7 +53,9 @@ class ColosseumConnector:
         # The server expects the session ID with hyphens in the URL
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
-            self.websocket = await websockets.connect(uri)
+            # Add Origin header to mimic a browser client and avoid 403 Forbidden errors
+            headers = {"Origin": "http://localhost:3000"}
+            self.websocket = await websockets.connect(uri, extra_headers=headers)
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
         except websockets.exceptions.InvalidURI:

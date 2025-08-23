@@ -3,41 +3,19 @@ import os
 import torch
 import yaml
 import logging
+import asyncio
 from tqdm import tqdm
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
-
-try:
-    import gymnasium as gym
-except ImportError:
-    gym = None
+from colosseum_connector import ColosseumConnector
 
 logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
-    help = 'Train a ChimeraAgent in a Gymnasium environment using a config file.'
+    help = 'Train a ChimeraAgent against a Colosseum server.'
 
     def add_arguments(self, parser):
         parser.add_argument("--config", type=str, default="backend/config.yaml", help="Path to the configuration file.")
-
-    @staticmethod
-    def get_env_config(env):
-        """Inspects a gymnasium environment to determine agent configuration."""
-        if not gym:
-            raise ImportError("Gymnasium library not found.")
-
-        obs_space = env.observation_space
-        if not isinstance(obs_space, gym.spaces.Box) or len(obs_space.shape) != 1:
-            raise NotImplementedError("Only 1D Box observation spaces are supported.")
-
-        act_space = env.action_space
-        if not isinstance(act_space, gym.spaces.Discrete):
-            raise NotImplementedError("Only Discrete action spaces are supported.")
-
-        input_dim = obs_space.shape[0]
-        cortex_configs = {"vector_input": {"type": "DenseCortex", "params": {"input_dim": input_dim}}}
-        n_actions = act_space.n
-        return cortex_configs, "vector_input", n_actions
 
     def _safe_format(self, value, format_spec):
         """Safely format a value, returning a placeholder if it's not a number."""
@@ -46,6 +24,10 @@ class Command(BaseCommand):
         return str(value)
 
     def handle(self, *args, **options):
+        # We are calling an async method from a sync command.
+        asyncio.run(self.a_handle(*args, **options))
+
+    async def a_handle(self, *args, **options):
         # Configure logging
         logging.basicConfig(
             level=logging.INFO,
@@ -55,10 +37,6 @@ class Command(BaseCommand):
                 logging.StreamHandler()
             ]
         )
-
-        if not gym:
-            logger.error("FATAL: gymnasium library not found. Please install it with `pip install gymnasium`")
-            return
 
         # --- Load Configuration ---
         config_path = options['config']
@@ -71,80 +49,94 @@ class Command(BaseCommand):
 
         logger.info(f"Loaded configuration from {config_path}")
 
-        # --- Environment Setup ---
+        # --- Environment & Agent Setup ---
         env_name = config['env_name']
-        logger.info(f"Initializing environment: {env_name}")
-        env = gym.make(env_name)
-
-        # --- Agent Initialization ---
-        cortex_configs, cortex_id, action_dim = self.get_env_config(env)
-        obs_dim = env.observation_space.shape[0]
         agent_id = config.get('agent_id', f"agent-{env_name}")
-
         agent_config = config.get('agent_config', {})
         history_config = config.get('agent_history', {})
+        num_episodes = config.get('episodes_per_env', 100)
+
+        # HACK: Dimensions should ideally come from server. Using CartPole-v1 defaults.
+        obs_dim = 4
+        action_dim = 2
+
+        # --- Create a single, persistent agent ---
         agent = ChimeraAgent(
             agent_id=agent_id,
             obs_dim=obs_dim,
             action_dim=action_dim,
             latent_dim=agent_config.get('latent_dim', 64),
             hidden_dim=agent_config.get('hidden_dim', 128),
-            cortex_configs=cortex_configs,
+            cortex_configs={"vector_input": {"type": "DenseCortex", "params": {"input_dim": obs_dim}}},
             load_from_storage=not config.get('force_new_agent', False),
             hyperparams=agent_config.get('hyperparams', {}),
             history_config=history_config
         )
-
-        logger.info(f"Starting training for agent '{agent.agent_id}' in '{env_name}'...")
+        logger.info(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
 
         total_rewards = []
-        num_episodes = config.get('episodes_per_env', 100)
 
-        # --- Training Loop with tqdm ---
-        with tqdm(total=num_episodes, desc="Training Agent") as pbar:
+        with tqdm(total=num_episodes, desc="Training on Colosseum") as pbar:
             for episode in range(num_episodes):
-                state, info = env.reset()
-                terminated = False
-                truncated = False
+                # --- Create a new session for each episode ---
+                connector = ColosseumConnector(env_name, agent_id)
+                session_data = await connector.create_session()
+                if not session_data:
+                    logger.error(f"Episode {episode + 1}: Could not create Colosseum session. Skipping.")
+                    pbar.update(1)
+                    continue
+
+                if not await connector.connect_websocket():
+                    logger.error(f"Episode {episode + 1}: WebSocket connection failed. Skipping.")
+                    pbar.update(1)
+                    continue
+
+                join_response = await connector.join_session()
+                if not join_response:
+                    logger.error(f"Episode {episode + 1}: Failed to join session. Skipping.")
+                    await connector.close()
+                    pbar.update(1)
+                    continue
+
+                # --- Gameplay Loop ---
+                current_obs = np.array(join_response.get("observation"))
                 episode_reward = 0
+                done = False
 
-                agent.hidden_state = torch.zeros(1, agent.hidden_dim)
-                agent.last_action = torch.tensor(0)
-
-                while not (terminated or truncated):
-                    agent.perceive_and_update_state(cortex_id, state)
+                while not done:
+                    agent.perceive_and_update_state("vector_input", current_obs)
                     action, log_prob, stag_context = agent.select_action()
-                    next_state, external_reward, terminated, truncated, info = env.step(action)
 
-                    agent.energy -= agent.metabolic_cost
-                    agent.energy = min(agent.energy, agent.max_energy)
+                    await connector.send_action(action)
+                    msg = await connector.receive_message()
 
-                    total_reward = external_reward  # Simplified reward for this env
-                    # Pass the agent's current hidden state to be stored with the experience
-                    agent.record_experience(agent.hidden_state, stag_context, state, action, log_prob, total_reward, next_state, (terminated or truncated))
+                    if not msg or msg.get("type") != "action.taken":
+                        logger.warning(f"Unexpected message or disconnection: {msg}")
+                        break
 
-                    state = next_state
-                    episode_reward += external_reward
+                    next_obs = np.array(msg.get("observation"))
+                    reward = msg.get("reward")
+                    done = msg.get("done")
 
+                    total_reward = reward  # Simplified reward
+                    agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
+
+                    current_obs = next_obs
+                    episode_reward += reward
+
+                # --- Post-Episode ---
+                await connector.close()
                 train_stats = agent.train()
                 agent.save_state(version_info=train_stats)
                 total_rewards.append(episode_reward)
 
-                # Update tqdm progress bar with useful stats
                 avg_reward = np.mean(total_rewards[-100:])
-                stag_levels = len(agent.stag.level_map)
-                total_stag_nodes = sum(len(gng.nodes) for gng in agent.stag.level_map.values())
-
                 pbar.set_postfix({
                     "Reward": f"{episode_reward:.2f}",
                     "Avg Rwd": f"{avg_reward:.2f}",
-                    "WM Loss": self._safe_format(train_stats.get('world_model_loss'), '.4f'),
-                    "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f'),
-                    "STAG Levels": stag_levels,
-                    "STAG Nodes": total_stag_nodes
+                    "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
                 })
                 pbar.update(1)
 
-        env.close()
         logger.info("Training finished.")
         logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")
