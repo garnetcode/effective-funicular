@@ -111,14 +111,15 @@ class Command(BaseCommand):
 
                 while not (terminated or truncated):
                     agent.perceive_and_update_state(cortex_id, state)
-                    action, log_prob = agent.select_action()
+                    action, log_prob, stag_context = agent.select_action()
                     next_state, external_reward, terminated, truncated, info = env.step(action)
 
                     agent.energy -= agent.metabolic_cost
                     agent.energy = min(agent.energy, agent.max_energy)
 
                     total_reward = external_reward  # Simplified reward for this env
-                    agent.record_experience(state, action, log_prob, total_reward, next_state, (terminated or truncated))
+                    # Pass the agent's current hidden state to be stored with the experience
+                    agent.record_experience(agent.hidden_state, stag_context, state, action, log_prob, total_reward, next_state, (terminated or truncated))
 
                     state = next_state
                     episode_reward += external_reward
@@ -129,11 +130,16 @@ class Command(BaseCommand):
 
                 # Update tqdm progress bar with useful stats
                 avg_reward = np.mean(total_rewards[-100:])
+                stag_levels = len(agent.stag.level_map)
+                total_stag_nodes = sum(len(gng.nodes) for gng in agent.stag.level_map.values())
+
                 pbar.set_postfix({
                     "Reward": f"{episode_reward:.2f}",
-                    "Avg Reward": f"{avg_reward:.2f}",
+                    "Avg Rwd": f"{avg_reward:.2f}",
                     "WM Loss": self._safe_format(train_stats.get('world_model_loss'), '.4f'),
-                    "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
+                    "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f'),
+                    "STAG Levels": stag_levels,
+                    "STAG Nodes": total_stag_nodes
                 })
                 pbar.update(1)
 
