@@ -124,6 +124,8 @@ class Command(BaseCommand):
                         current_obs = next_obs
                         episode_reward += reward
 
+                    logger.info(f"Episode {episode + 1} finished. Done flag: {done}")
+
                     # --- Post-Episode ---
                     train_stats = agent.train()
                     agent.save_state(version_info=train_stats)
