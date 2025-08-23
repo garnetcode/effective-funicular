@@ -149,6 +149,7 @@ class Command(BaseCommand):
                             # The loop will continue, waiting for a valid game state message.
 
                     # --- Post-Episode ---
+                    logger.info(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training and preparing for next episode...")
                     train_stats = agent.train()
                     if (episode + 1) % 50 == 0:
                         agent.save_state(version_info=train_stats)

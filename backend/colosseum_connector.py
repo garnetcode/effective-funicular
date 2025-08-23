@@ -144,7 +144,7 @@ class ColosseumConnector:
                     return response
                 elif response:
                     # Log other messages received while waiting
-                    logger.info(f"Ignoring buffered message while waiting for reset confirmation: {response.get('type')}")
+                    logger.debug(f"Ignoring buffered message while waiting for reset confirmation: {response.get('type')}")
                 # If response is None (due to connection closed), the loop will continue and eventually time out.
 
             except asyncio.TimeoutError:

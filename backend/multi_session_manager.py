@@ -108,7 +108,7 @@ class MultiSessionManager:
                     else:
                         logger.warning(f"[{agent_tag}] Unexpected message type received: {msg_type}")
 
-                logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} finished. Reward: {episode_reward}")
+                logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} gameplay loop finished. Reward: {episode_reward:.2f}. Resetting environment...")
 
                 if episode < self.num_episodes - 1:
                     reset_response = await connector.reset_environment()
