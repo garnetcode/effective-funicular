@@ -56,18 +56,18 @@ class Command(BaseCommand):
         history_config = config.get('agent_history', {})
         num_episodes = config.get('episodes_per_env', 100)
 
-        # HACK: Dimensions should ideally come from server. Using CartPole-v1 defaults.
-        obs_dim = 4
-        action_dim = 2
+        # Load max dimensions from config
+        max_obs_dim = agent_config.get('max_obs_dim', 2048)
+        max_action_dim = agent_config.get('max_action_dim', 256)
 
         # --- Create a single, persistent agent ---
         agent = ChimeraAgent(
             agent_id=agent_id,
-            obs_dim=obs_dim,
-            action_dim=action_dim,
+            max_obs_dim=max_obs_dim,
+            max_action_dim=max_action_dim,
             latent_dim=agent_config.get('latent_dim', 64),
             hidden_dim=agent_config.get('hidden_dim', 128),
-            cortex_configs={"vector_input": {"type": "DenseCortex", "params": {"input_dim": obs_dim}}},
+            cortex_configs={"vector_input": {"type": "DenseCortex", "params": {"input_dim": max_obs_dim}}},
             load_from_storage=not config.get('force_new_agent', False),
             hyperparams=agent_config.get('hyperparams', {}),
             history_config=history_config

@@ -1,9 +1,8 @@
 import asyncio
 import json
-import aiohttp
 import websockets
 import logging
-from functools import partial
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -69,31 +68,8 @@ class ColosseumConnector:
             logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
             return False
 
-    async def join_session(self):
-        """Sends the agent.join message to formally join the session."""
-        if not self.websocket:
-            return None
-
-        # The session is identified by the WebSocket URL, so session_id is not needed in the payload.
-        # Aligning with the frontend client implementation.
-        join_message = {
-            "type": "agent.join",
-            "agent_tag": self.agent_tag,
-            "agent_name": f"ChimeraAgent-{self.agent_tag}",
-            "agent_type": "ai",
-            "environment_id": self.environment_id,
-        }
-        await self.websocket.send(json.dumps(join_message))
-        response = await self.receive_message()
-        if response and response.get("type") == "agent.joined":
-            logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
-            return response
-        else:
-            logger.error(f"Failed to join session, response: {response}")
-            return None
-
     async def send_message(self, message):
-        """Sends a JSON message to the server."""
+        """Sends a raw JSON message to the server."""
         if not self.websocket:
             logger.error("Cannot send message, WebSocket is not connected.")
             return
@@ -101,40 +77,105 @@ class ColosseumConnector:
             await self.websocket.send(json.dumps(message))
         except websockets.exceptions.ConnectionClosed:
             logger.warning("Cannot send message, connection is closed.")
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}", exc_info=True)
+
+    async def join_session(self):
+        """Sends the agent.join message to formally join the session."""
+        if not self.websocket:
+            logger.error("Cannot join session, WebSocket is not connected.")
+            return None
+        try:
+            join_message = {
+                "type": "agent.join",
+                "agent_tag": self.agent_tag,
+                "environment_id": self.environment_id,
+            }
+            await self.websocket.send(json.dumps(join_message))
+            response = await self.receive_message()
+
+            if response and response.get("type") == "agent.joined":
+                logger.info(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
+                return response
+            else:
+                error_detail = response.get('message', 'No details provided') if response else "No response from server"
+                logger.error(f"Failed to join session. Server response: {error_detail}")
+                return None
+        except Exception as e:
+            logger.error(f"An error occurred while trying to join the session: {e}", exc_info=True)
+            return None
 
     async def send_action(self, action):
         """Sends an agent action to the server."""
-        action_message = {
-            "type": "agent.action",
-            "action": int(action),
-            "agent_tag": self.agent_tag
-        }
-        await self.send_message(action_message)
+        if not self.websocket:
+            logger.error("Cannot send action, WebSocket is not connected.")
+            return
+        try:
+            action_message = {
+                "type": "agent.action",
+                "action": int(action),
+                "agent_tag": self.agent_tag
+            }
+            await self.websocket.send(json.dumps(action_message))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Cannot send action, connection is closed.")
+        except Exception as e:
+            logger.error(f"Failed to send action: {e}", exc_info=True)
 
     async def reset_environment(self):
         """
-        Sends a reset message and waits for confirmation, discarding any
-        unexpected messages that may have been in the buffer.
+        Sends a reset message and waits for confirmation. Before sending, it
+        drains any messages that might be left over from the previous episode.
         """
+        # Drain any lingering messages from the previous episode to ensure a clean state.
+        logger.info("Draining message queue before sending reset...")
+        drained_count = 0
+        while True:
+            try:
+                # Use a short timeout to quickly check for and drain messages.
+                unexpected_msg = await asyncio.wait_for(self.receive_message(), timeout=0.01)
+                if unexpected_msg:
+                    logger.warning(f"Drained unexpected message: {unexpected_msg}")
+                    drained_count += 1
+                else:
+                    # receive_message returned None, probably connection closed.
+                    logger.error("Failed to reset: connection closed while draining messages.")
+                    return None
+            except asyncio.TimeoutError:
+                # This is the expected way to exit the loop when the queue is empty.
+                if drained_count > 0:
+                    logger.info(f"Drained {drained_count} messages.")
+                else:
+                    logger.info("Message queue was already empty.")
+                break
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while draining messages: {e}")
+                return None
+
         logger.info("Sending agent.reset message.")
         reset_message = {"type": "agent.reset"}
         await self.send_message(reset_message)
 
-        # Wait for the specific "environment.reset" response
-        for _ in range(5): # Timeout after 5 attempts
-            response = await self.receive_message()
+        # Now, wait for the 'environment.reset' confirmation with a reasonable timeout.
+        try:
+            response = await asyncio.wait_for(self.receive_message(), timeout=10.0) # 10-second timeout
             if response and response.get("type") == "environment.reset":
                 logger.info("Environment reset successfully.")
                 return response
             else:
-                logger.warning(f"Discarding unexpected message while waiting for reset confirmation: {response}")
-
-        logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation.")
-        return None
+                logger.error(f"Failed to reset environment: received unexpected message {response}")
+                return None
+        except asyncio.TimeoutError:
+            logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation within timeout.")
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while waiting for reset confirmation: {e}")
+            return None
 
     async def receive_message(self):
         """Receives and parses a single message from the WebSocket."""
         if not self.websocket:
+            logger.warning("Cannot receive message, WebSocket is not connected.")
             return None
         try:
             message = await self.websocket.recv()
@@ -142,9 +183,18 @@ class ColosseumConnector:
         except websockets.exceptions.ConnectionClosed:
             logger.warning("Connection closed while waiting for message.")
             return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from message: {e}")
+            return None
 
     async def close(self):
         """Closes the WebSocket connection."""
         if self.websocket:
-            await self.websocket.close()
-            logger.info("WebSocket connection closed.")
+            try:
+                await self.websocket.close()
+                logger.info("WebSocket connection closed.")
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("WebSocket connection was already closed.")
+            except Exception as e:
+                logger.error(f"Error while closing WebSocket: {e}", exc_info=True)
+        self.websocket = None

@@ -63,10 +63,10 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, obs_dim, action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
+    def __init__(self, agent_id, max_obs_dim, max_action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
-        self.obs_dim = obs_dim
-        self.action_dim = action_dim
+        self.max_obs_dim = max_obs_dim
+        self.max_action_dim = max_action_dim
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
 
@@ -112,13 +112,13 @@ class ChimeraAgent:
                     }
                 }
 
-        # Initialize all components with a default architecture first
-        self.cortexes = _initialize_cortexes(self.cortex_configs, self.obs_dim)
-        self.world_model = WorldModel(obs_dim, action_dim, latent_dim, hidden_dim)
+        # The agent's internal architecture is fixed to the max dimensions
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.max_obs_dim)
+        self.world_model = WorldModel(self.max_obs_dim, self.max_action_dim, latent_dim, hidden_dim)
         self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
         self.action_head = ActionHead(
             input_dim=self.hidden_dim * 2,  # Hidden state + STAG context vector
-            n_actions=self.action_dim,
+            n_actions=self.max_action_dim,
             learning_rate=self.learning_rate
         )
         self.text_generation_head = None
@@ -215,7 +215,7 @@ class ChimeraAgent:
 
         # Convert to numpy for softmax and sampling
         action_probs_np = softmax(action_logits.numpy())
-        action = np.random.choice(self.action_dim, p=action_probs_np)
+        action = np.random.choice(self.max_action_dim, p=action_probs_np)
         action_tensor = torch.tensor(action)
 
         # We need the log_prob as a tensor for the loss calculation
