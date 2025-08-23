@@ -14,5 +14,13 @@
     "info": {
       "message": "Initial state."
     }
+  },
+  {
+    "version": 2,
+    "type": "base",
+    "timestamp": "2025-08-23T06:27:49.106681",
+    "info": {
+      "message": "Initial state."
+    }
   }
 ]
