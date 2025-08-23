@@ -5,8 +5,11 @@
 
 import os
 import json
+import logging
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 class NumpyJSONEncoder(json.JSONEncoder):
     """ Custom encoder for numpy data types """
@@ -235,11 +238,23 @@ class ChimeraAgent:
         """Pushes an experience to the replay buffer."""
         self.replay_buffer.push(*args)
 
-    def train(self):
+    def train(self, cortex_id="vector_input"):
         """
         Samples a batch from the replay buffer and performs one step of training
-        for both the World Model and the Action Head.
+        for the World Model, the specified Cortex, and the Action Head.
         """
+        if cortex_id not in self.cortexes:
+            logger.error(f"Invalid cortex_id '{cortex_id}' provided for training.")
+            return {"status": f"Invalid cortex_id '{cortex_id}'"}
+
+        cortex = self.cortexes[cortex_id]
+        if not isinstance(cortex, torch.nn.Module):
+            # This cortex is not trainable, so we can't proceed with joint training.
+            # We will train the world model on the pre-processed observations.
+            logger.warning(f"Cortex '{cortex_id}' is not a trainable torch.nn.Module. Only training WorldModel and ActionHead.")
+            # TODO: A separate training path could be implemented here if needed.
+            return {"status": f"Cortex '{cortex_id}' is not trainable."}
+
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < batch_size:
             return {"status": "Not enough experiences in buffer to train."}
@@ -248,11 +263,11 @@ class ChimeraAgent:
         experiences = self.replay_buffer.sample(batch_size)
         batch = Experience(*zip(*experiences))
 
-        # Detach hidden states before stacking to prevent gradients from flowing back
         hidden_state_batch = torch.stack([h.detach() for h in batch.hidden_state]).squeeze(1)
         stag_context_batch = torch.stack([s.detach() for s in batch.stag_context]).squeeze(1)
 
-        # Pad observations to max_obs_dim
+        # The replay buffer stores raw numpy observations.
+        # We need to pad them and convert to a tensor for the cortex.
         def pad_observations(obs_list):
             padded_obs = []
             for o in obs_list:
@@ -261,22 +276,28 @@ class ChimeraAgent:
                 padded_obs.append(padded)
             return torch.from_numpy(np.array(padded_obs)).float()
 
-        obs_batch = pad_observations(batch.obs)
-        next_obs_batch = pad_observations(batch.next_obs)
+        obs_batch_raw = pad_observations(batch.obs)
+        next_obs_batch_raw = pad_observations(batch.next_obs)
 
         action_batch = torch.tensor(batch.action)
         reward_batch = torch.tensor(batch.reward).float()
-        done_batch = torch.tensor(batch.done).float()
 
-        # --- Initialize ---
-        world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=self.learning_rate)
+        # --- Initialize Optimizers ---
+        # Combine parameters of the world model and the cortex for joint training
+        world_model_and_cortex_params = list(self.world_model.parameters()) + list(cortex.parameters())
+        world_model_optimizer = torch.optim.Adam(world_model_and_cortex_params, lr=self.learning_rate)
         action_head_optimizer = self.action_head.optimizer
 
-        # --- World Model Training ---
-        # The world model predicts the next state based on the *actual* hidden state from the episode
-        _, h_next, obs_pred_batch, reward_pred_batch = self.world_model(obs_batch, action_batch, hidden_state_batch)
+        # --- World Model and Cortex Training ---
+        # Process raw observations through the cortex first
+        obs_batch_processed = cortex(obs_batch_raw)
+        with torch.no_grad(): # Don't need gradients for the target
+            next_obs_batch_processed = cortex(next_obs_batch_raw)
 
-        reconstruction_loss = torch.nn.functional.mse_loss(obs_pred_batch, next_obs_batch)
+        # The world model predicts the next processed state from the processed current state
+        _, h_next, obs_pred_batch, reward_pred_batch = self.world_model(obs_batch_processed, action_batch, hidden_state_batch)
+
+        reconstruction_loss = torch.nn.functional.mse_loss(obs_pred_batch, next_obs_batch_processed)
         reward_loss = torch.nn.functional.mse_loss(reward_pred_batch, reward_batch.unsqueeze(1))
         total_wm_loss = reconstruction_loss + reward_loss
 
@@ -289,11 +310,9 @@ class ChimeraAgent:
         combined_input_batch = torch.cat((hidden_state_batch, stag_context_batch), dim=1)
         action_logits = self.action_head(combined_input_batch)
         log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
-
-        # Select the log_probs for the actions that were actually taken
         log_probs_for_actions = log_probs.gather(1, action_batch.unsqueeze(1))
 
-        # A simple REINFORCE-style update
+        # The reward is the discounted return G_t calculated before buffering
         policy_loss = (-log_probs_for_actions * reward_batch.unsqueeze(1)).mean()
 
         action_head_optimizer.zero_grad()

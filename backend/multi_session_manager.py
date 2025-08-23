@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from colosseum_connector import ColosseumConnector
 from api.services.chimera_agent import ChimeraAgent
+from api.services.replay_buffer import Experience
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,18 @@ class MultiSessionManager:
         obs_dim = len(session_data.get("observation", []))
         action_dim = 4 if "Lunar" in env_id else 2
 
+        cortex_configs = {
+            "vector_input": {
+                "type": "DenseCortex",
+                "params": {"input_dim": obs_dim}
+            }
+        }
+
         agent = ChimeraAgent(
             agent_id=agent_tag,
-            obs_dim=obs_dim,
-            action_dim=action_dim,
+            max_obs_dim=obs_dim,
+            max_action_dim=action_dim,
+            cortex_configs=cortex_configs,
             history_config=self.history_config,
             **self.agent_config
         )
@@ -65,7 +74,7 @@ class MultiSessionManager:
             current_obs = np.array(join_response.get("observation"))
             try:
                 actual_action_dim = join_response['action_space_shape']
-                logger.info(f"[{agent_tag}] Environment action space size: {actual_action_dim}")
+                logger.debug(f"[{agent_tag}] Environment action space size: {actual_action_dim}")
             except (KeyError, TypeError):
                 logger.warning(f"[{agent_tag}] Could not determine action space size. Defaulting to {action_dim}.")
                 actual_action_dim = action_dim
@@ -73,9 +82,10 @@ class MultiSessionManager:
             for episode in range(self.num_episodes):
                 done = False
                 episode_reward = 0
+                episode_experiences = []
 
                 while not done:
-                    agent.perceive_and_update_state("test_cortex", current_obs)
+                    agent.perceive_and_update_state("vector_input", current_obs)
                     action, log_prob, stag_context = agent.select_action(actual_action_dim)
 
                     await connector.send_action(action)
@@ -93,22 +103,37 @@ class MultiSessionManager:
                         reward = msg.get("reward")
                         done = msg.get("done")
 
-                        total_reward = reward
-                        agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
-                        agent.train()
+                        episode_experiences.append(Experience(agent.hidden_state, stag_context, current_obs, action, log_prob, reward, next_obs, done))
 
                         current_obs = next_obs
                         episode_reward += reward
 
                     elif msg_type == "game.over":
-                        logger.info(f"[{agent_tag}] Game over message received. Final reward: {msg.get('final_reward')}")
+                        logger.debug(f"[{agent_tag}] Game over message received. Final reward: {msg.get('final_reward')}")
                         done = True
                         continue
 
                     else:
                         logger.warning(f"[{agent_tag}] Unexpected message type received: {msg_type}")
 
-                logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} gameplay loop finished. Reward: {episode_reward:.2f}. Resetting environment...")
+                # Post-episode: Calculate discounted returns and train
+                discounted_return = 0
+                for experience in reversed(episode_experiences):
+                    discounted_return = experience.reward + agent.gamma * discounted_return
+                    agent.record_experience(
+                        experience.hidden_state,
+                        experience.stag_context,
+                        experience.obs,
+                        experience.action,
+                        experience.log_prob,
+                        discounted_return,
+                        experience.next_obs,
+                        experience.done
+                    )
+
+                agent.train(cortex_id="vector_input") # Train with the correct cortex
+                logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} finished. Reward: {episode_reward:.2f}.")
+
 
                 if episode < self.num_episodes - 1:
                     reset_response = await connector.reset_environment()
