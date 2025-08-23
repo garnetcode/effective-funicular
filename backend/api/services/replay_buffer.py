@@ -4,7 +4,7 @@ import random
 from collections import namedtuple, deque
 
 Experience = namedtuple('Experience',
-                        ('obs', 'action', 'log_prob', 'reward', 'next_obs', 'done'))
+                        ('hidden_state', 'stag_context', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done'))
 
 class ReplayBuffer:
     def __init__(self, capacity):

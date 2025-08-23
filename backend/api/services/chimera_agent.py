@@ -116,7 +116,7 @@ class ChimeraAgent:
         self.world_model = WorldModel(obs_dim, action_dim, latent_dim, hidden_dim)
         self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
         self.action_head = ActionHead(
-            input_dim=self.hidden_dim,
+            input_dim=self.hidden_dim * 2,  # Hidden state + STAG context vector
             n_actions=self.action_dim,
             learning_rate=self.learning_rate
         )
@@ -190,13 +190,27 @@ class ChimeraAgent:
 
     def select_action(self):
         """
-        Selects an action based on the current internal state of the agent.
+        Selects an action based on the current internal state of the agent,
+        now augmented with context from the STAG knowledge graph.
         """
-        # The internal state for action selection is the world model's hidden state
         internal_state = self.hidden_state
+        h_numpy = internal_state.detach().numpy().flatten()
+
+        # Find the current conceptual context from the STAG
+        terminal_level_node, winner_id, _ = self.stag.find_terminal_node_and_path(h_numpy)
+
+        if winner_id is not None:
+            stag_context_vector = terminal_level_node['gng'].nodes[winner_id]['weight']
+            stag_context_vector = torch.from_numpy(stag_context_vector).float().unsqueeze(0)
+        else:
+            # If no specific node, use a zero vector as context
+            stag_context_vector = torch.zeros(1, self.hidden_dim)
+
+        # The ActionHead now receives both the transient hidden state and the stable STAG context
+        combined_input = torch.cat((internal_state, stag_context_vector), dim=1)
 
         with torch.no_grad():
-            action_logits = self.action_head(internal_state).squeeze(0)
+            action_logits = self.action_head(combined_input).squeeze(0)
 
         # Convert to numpy for softmax and sampling
         action_probs_np = softmax(action_logits.numpy())
@@ -210,7 +224,7 @@ class ChimeraAgent:
         # Store the chosen action for the next world model update
         self.last_action = action_tensor
 
-        return action, action_log_prob
+        return action, action_log_prob, stag_context_vector
 
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer."""
@@ -229,23 +243,22 @@ class ChimeraAgent:
         experiences = self.replay_buffer.sample(batch_size)
         batch = Experience(*zip(*experiences))
 
+        # Detach hidden states before stacking to prevent gradients from flowing back
+        hidden_state_batch = torch.stack([h.detach() for h in batch.hidden_state]).squeeze(1)
+        stag_context_batch = torch.stack([s.detach() for s in batch.stag_context]).squeeze(1)
         obs_batch = torch.stack([torch.from_numpy(o) for o in batch.obs]).float()
         action_batch = torch.tensor(batch.action)
         reward_batch = torch.tensor(batch.reward).float()
         next_obs_batch = torch.stack([torch.from_numpy(o) for o in batch.next_obs]).float()
-        # done_batch = torch.tensor(batch.done).float() # Not used yet, but good practice
+        done_batch = torch.tensor(batch.done).float()
 
         # --- Initialize ---
         world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=self.learning_rate)
         action_head_optimizer = self.action_head.optimizer
 
-        # NOTE: This is a simplified training step on a batch.
-        # A full implementation would handle hidden states across batches.
-        # Here, we reset the hidden state for each sampled batch for simplicity.
-        h = torch.zeros(batch_size, self.hidden_dim)
-
         # --- World Model Training ---
-        _, _, obs_pred_batch, reward_pred_batch = self.world_model(obs_batch, action_batch, h)
+        # The world model predicts the next state based on the *actual* hidden state from the episode
+        _, h_next, obs_pred_batch, reward_pred_batch = self.world_model(obs_batch, action_batch, hidden_state_batch)
 
         reconstruction_loss = torch.nn.functional.mse_loss(obs_pred_batch, next_obs_batch)
         reward_loss = torch.nn.functional.mse_loss(reward_pred_batch, reward_batch.unsqueeze(1))
@@ -256,15 +269,9 @@ class ChimeraAgent:
         world_model_optimizer.step()
 
         # --- Action Head Training ---
-        # The policy loss needs to be re-evaluated based on the current policy.
-        # This is a simplified version. A proper actor-critic or policy gradient
-        # method would be more involved.
-
-        # Re-run forward pass to get hidden states for policy training
-        with torch.no_grad():
-            _, h_policy, _, _ = self.world_model(obs_batch, action_batch, torch.zeros(batch_size, self.hidden_dim))
-
-        action_logits = self.action_head(h_policy)
+        # The ActionHead is trained on the combined state (WorldModel hidden state + STAG context)
+        combined_input_batch = torch.cat((hidden_state_batch, stag_context_batch), dim=1)
+        action_logits = self.action_head(combined_input_batch)
         log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
 
         # Select the log_probs for the actions that were actually taken

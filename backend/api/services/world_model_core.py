@@ -80,4 +80,5 @@ class WorldModel(nn.Module):
         obs_pred = self.decoder_obs(h_next)
         reward_pred = self.decoder_reward(h_next)
 
-        return z.squeeze(0), h_next.squeeze(0), obs_pred.squeeze(0), reward_pred.squeeze(0)
+        # Return tensors with the batch dimension intact
+        return z, h_next, obs_pred, reward_pred
