@@ -1,85 +1,5 @@
 [
   {
-    "version": 0,
-    "type": "base",
-    "timestamp": "2025-08-22T14:03:05.598248",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 1,
-    "type": "diff",
-    "timestamp": "2025-08-22T17:19:42.150287",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 2,
-    "type": "base",
-    "timestamp": "2025-08-23T13:13:31.674266",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 3,
-    "type": "diff",
-    "timestamp": "2025-08-23T13:14:49.528542",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 4,
-    "type": "diff",
-    "timestamp": "2025-08-23T13:15:50.967038",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 5,
-    "type": "diff",
-    "timestamp": "2025-08-23T13:44:42.491297",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 6,
-    "type": "diff",
-    "timestamp": "2025-08-23T13:46:18.567140",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 7,
-    "type": "diff",
-    "timestamp": "2025-08-23T14:08:48.404522",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 8,
-    "type": "diff",
-    "timestamp": "2025-08-23T14:24:50.246500",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
-    "version": 9,
-    "type": "diff",
-    "timestamp": "2025-08-23T15:09:49.895104",
-    "info": {
-      "message": "Initial state."
-    }
-  },
-  {
     "version": 10,
     "type": "base",
     "timestamp": "2025-08-23T15:28:09.584382",
@@ -107,6 +27,22 @@
     "version": 13,
     "type": "diff",
     "timestamp": "2025-08-23T15:44:46.029646",
+    "info": {
+      "message": "Initial state."
+    }
+  },
+  {
+    "version": 14,
+    "type": "diff",
+    "timestamp": "2025-08-23T15:52:24.199367",
+    "info": {
+      "message": "Initial state."
+    }
+  },
+  {
+    "version": 15,
+    "type": "diff",
+    "timestamp": "2025-08-23T15:54:22.981979",
     "info": {
       "message": "Initial state."
     }

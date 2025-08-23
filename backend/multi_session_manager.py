@@ -131,7 +131,9 @@ class MultiSessionManager:
                         experience.done
                     )
 
-                agent.train(cortex_id="vector_input") # Train with the correct cortex
+                train_stats = agent.train(cortex_id="vector_input") # Train with the correct cortex
+                if (episode + 1) % 1000 == 0:
+                    agent.save_state(version_info=train_stats)
                 logger.info(f"[{agent_tag}] Episode {episode + 1}/{self.num_episodes} finished. Reward: {episode_reward:.2f}.")
 
 

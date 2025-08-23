@@ -165,7 +165,9 @@ class StateHistoryManagerTests(TestCase):
     def setUp(self):
         self.agent_id = "test-history-agent"
         self.storage_root = "backend/test_storage"
-        self.manager = StateHistoryManager(self.agent_id, storage_root=self.storage_root, base_snapshot_interval=3)
+        # Override max_snapshots to a higher value for this specific test
+        # to prevent pruning from interfering with the test logic.
+        self.manager = StateHistoryManager(self.agent_id, storage_root=self.storage_root, base_snapshot_interval=3, max_snapshots=10)
 
     def tearDown(self):
         # Clean up the created history directory
