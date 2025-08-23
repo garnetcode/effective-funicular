@@ -96,6 +96,7 @@ class Command(BaseCommand):
         current_obs = np.array(join_response.get("observation"))
 
         # Get the actual action space size from the environment info
+        logger.info(f"Full join response from server: {join_response}")
         try:
             actual_action_dim = join_response['info']['action_space']['n']
             logger.info(f"Environment action space size: {actual_action_dim}")
