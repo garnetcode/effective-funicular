@@ -74,7 +74,7 @@ class ColosseumConnector:
 
     async def send_action(self, action):
         """Sends an agent action to the server."""
-        if not self.websocket or self.websocket.closed:
+        if not self.websocket:
             logger.error("Cannot send action, WebSocket is not connected.")
             return
 
@@ -85,13 +85,15 @@ class ColosseumConnector:
                 "agent_tag": self.agent_tag
             }
             await self.websocket.send(json.dumps(action_message))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Cannot send action, connection is closed.")
         except Exception as e:
             logger.error(f"Failed to send action: {e}", exc_info=True)
 
 
     async def receive_message(self):
         """Receives and parses a single message from the WebSocket."""
-        if not self.websocket or self.websocket.closed:
+        if not self.websocket:
             logger.warning("Cannot receive message, WebSocket is not connected.")
             return None
         try:
@@ -106,7 +108,12 @@ class ColosseumConnector:
 
     async def close(self):
         """Closes the WebSocket connection."""
-        if self.websocket and not self.websocket.closed:
-            await self.websocket.close()
-            logger.info("WebSocket connection closed.")
+        if self.websocket:
+            try:
+                await self.websocket.close()
+                logger.info("WebSocket connection closed.")
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("WebSocket connection was already closed.")
+            except Exception as e:
+                logger.error(f"Error while closing WebSocket: {e}", exc_info=True)
         self.websocket = None
