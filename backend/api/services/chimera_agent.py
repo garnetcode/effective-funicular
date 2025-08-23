@@ -186,10 +186,17 @@ class ChimeraAgent:
         # The STAG framework now organizes the agent's internal, context-rich hidden states
         h_numpy = self.hidden_state.detach().numpy().flatten()
 
-        # Find the correct terminal GNG and process the input
-        terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_numpy)
+        # Normalize the hidden state for GNG processing
+        norm = np.linalg.norm(h_numpy)
+        if norm > 0:
+            h_normalized = h_numpy / norm
+        else:
+            h_normalized = h_numpy
+
+        # Find the correct terminal GNG and process the input using the normalized state
+        terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_normalized)
         if terminal_node:
-            terminal_node['gng'].process_input(h_numpy)
+            terminal_node['gng'].process_input(h_normalized)
 
         return self.hidden_state
 
@@ -202,8 +209,15 @@ class ChimeraAgent:
         internal_state = self.hidden_state
         h_numpy = internal_state.detach().numpy().flatten()
 
-        # Find the current conceptual context from the STAG
-        terminal_level_node, winner_id, _ = self.stag.find_terminal_node_and_path(h_numpy)
+        # Normalize the hidden state for GNG processing
+        norm = np.linalg.norm(h_numpy)
+        if norm > 0:
+            h_normalized = h_numpy / norm
+        else:
+            h_normalized = h_numpy
+
+        # Find the current conceptual context from the STAG using the normalized state
+        terminal_level_node, winner_id, _ = self.stag.find_terminal_node_and_path(h_normalized)
 
         if winner_id is not None:
             stag_context_vector = terminal_level_node['gng'].nodes[winner_id]['weight']
