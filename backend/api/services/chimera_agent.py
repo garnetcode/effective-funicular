@@ -206,6 +206,11 @@ class ChimeraAgent:
         internal_state = self.hidden_state
         h_numpy = internal_state.detach().numpy().flatten()
 
+        # Normalize the hidden state vector before passing it to the STAG
+        h_norm = np.linalg.norm(h_numpy)
+        if h_norm > 0:
+            h_numpy = h_numpy / h_norm
+
         # Find the current conceptual context from the STAG
         terminal_level_node, winner_id, _ = self.stag.find_terminal_node_and_path(h_numpy)
 
