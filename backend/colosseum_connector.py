@@ -55,7 +55,7 @@ class ColosseumConnector:
         try:
             self.websocket = await websockets.connect(
                 uri,
-                extra_headers={"Origin": "http://localhost:3000"}
+                additional_headers={"Origin": "http://localhost:3000"}
             )
             logger.info(f"Successfully connected to WebSocket: {uri}")
             return True
@@ -65,19 +65,6 @@ class ColosseumConnector:
         except websockets.exceptions.ConnectionClosed as e:
             logger.error(f"WebSocket connection closed unexpectedly: {e}")
             return False
-        except TypeError as e:
-            # Fallback for older websockets versions that might not support extra_headers directly
-            try:
-                protocol_factory = partial(
-                    websockets.ClientProtocol,
-                    extra_headers={"Origin": "http://localhost:3000"}
-                )
-                self.websocket = await websockets.connect(uri, create_protocol=protocol_factory)
-                logger.info(f"Successfully connected to WebSocket using fallback protocol factory: {uri}")
-                return True
-            except Exception as inner_e:
-                logger.error(f"A TypeError occurred during WebSocket connection, and the fallback also failed. This might be due to an incompatibility in the `websockets` library version. Initial Error: {e}, Fallback Error: {inner_e}", exc_info=True)
-                return False
         except Exception as e:
             logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
             return False
@@ -125,18 +112,25 @@ class ColosseumConnector:
         await self.send_message(action_message)
 
     async def reset_environment(self):
-        """Sends a reset message and waits for confirmation."""
+        """
+        Sends a reset message and waits for confirmation, discarding any
+        unexpected messages that may have been in the buffer.
+        """
         logger.info("Sending agent.reset message.")
         reset_message = {"type": "agent.reset"}
         await self.send_message(reset_message)
 
-        response = await self.receive_message()
-        if response and response.get("type") == "environment.reset":
-            logger.info("Environment reset successfully.")
-            return response
-        else:
-            logger.error(f"Failed to reset environment, response: {response}")
-            return None
+        # Wait for the specific "environment.reset" response
+        for _ in range(5): # Timeout after 5 attempts
+            response = await self.receive_message()
+            if response and response.get("type") == "environment.reset":
+                logger.info("Environment reset successfully.")
+                return response
+            else:
+                logger.warning(f"Discarding unexpected message while waiting for reset confirmation: {response}")
+
+        logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation.")
+        return None
 
     async def receive_message(self):
         """Receives and parses a single message from the WebSocket."""
