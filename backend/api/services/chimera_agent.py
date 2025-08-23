@@ -287,6 +287,11 @@ class ChimeraAgent:
         action_batch = torch.tensor(batch.action)
         reward_batch = torch.tensor(batch.reward).float()
 
+        # Normalize the returns (which are used as advantages) for stable training
+        reward_mean = reward_batch.mean()
+        reward_std = reward_batch.std() + 1e-5 # Add epsilon to prevent division by zero
+        reward_batch = (reward_batch - reward_mean) / reward_std
+
         # --- Initialize Optimizers ---
         # Combine parameters of the world model and the cortex for joint training
         world_model_and_cortex_params = list(self.world_model.parameters()) + list(cortex.parameters())
