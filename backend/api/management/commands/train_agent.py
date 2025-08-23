@@ -80,7 +80,18 @@ class Command(BaseCommand):
             for episode in range(num_episodes):
                 # --- Create a new session for each episode ---
                 connector = ColosseumConnector(env_name, agent_id)
-                join_response = await connector.connect()
+                session_data = await connector.create_session()
+                if not session_data:
+                    logger.error(f"Episode {episode + 1}: Could not create Colosseum session. Skipping.")
+                    pbar.update(1)
+                    continue
+
+                if not await connector.connect_websocket():
+                    logger.error(f"Episode {episode + 1}: WebSocket connection failed. Skipping.")
+                    pbar.update(1)
+                    continue
+
+                join_response = await connector.join_session()
                 if not join_response:
                     logger.error(f"Episode {episode + 1}: Failed to join session. Skipping.")
                     await connector.close()

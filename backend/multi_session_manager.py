@@ -28,14 +28,14 @@ class MultiSessionManager:
         # 1. Create a connector for this session
         connector = ColosseumConnector(env_id, agent_tag)
 
-        # 2. Connect to the Colosseum and join the session
-        join_response = await connector.connect()
-        if not join_response:
-            logger.error(f"[{agent_tag}] Could not connect to Colosseum. Exiting.")
+        # 2. Create the Colosseum session
+        session_data = await connector.create_session()
+        if not session_data:
+            logger.error(f"[{agent_tag}] Could not create Colosseum session. Exiting.")
             return
 
         # 3. Create a ChimeraAgent instance for this session
-        obs_dim = len(join_response.get("observation", []))
+        obs_dim = len(session_data.get("observation", []))
         action_dim = 4 if "Lunar" in env_id else 2 # Default for CartPole
 
         # Dynamically set the input dimension for the cortex and get the cortex ID
@@ -54,7 +54,19 @@ class MultiSessionManager:
         )
         self.agents[agent_tag] = agent
 
-        # 4. Main real-time gameplay loop
+        # 4. Connect to the WebSocket
+        if not await connector.connect_websocket():
+            logger.error(f"[{agent_tag}] WebSocket connection failed. Exiting.")
+            return
+
+        # 5. Join the session over WebSocket
+        join_response = await connector.join_session()
+        if not join_response:
+            logger.error(f"[{agent_tag}] Failed to join session over WebSocket. Exiting.")
+            await connector.close()
+            return
+
+        # 6. Main real-time gameplay loop
         try:
             current_obs = np.array(join_response.get("observation"))
             done = False
