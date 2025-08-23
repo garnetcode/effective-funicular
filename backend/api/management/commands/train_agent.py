@@ -118,20 +118,35 @@ class Command(BaseCommand):
                         await connector.send_action(action)
                         msg = await connector.receive_message()
 
-                        if not msg or msg.get("type") != "action.taken":
-                            logger.warning(f"Unexpected message or disconnection: {msg}")
-                            done = True  # End episode on error
+                        if not msg:
+                            logger.warning("Disconnection detected. Ending episode.")
+                            done = True
                             continue
 
-                        next_obs = np.array(msg.get("observation"))
-                        reward = msg.get("reward")
-                        done = msg.get("done")
+                        msg_type = msg.get("type")
 
-                        total_reward = reward  # Simplified reward
-                        agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
+                        if msg_type == "action.taken":
+                            next_obs = np.array(msg.get("observation"))
+                            reward = msg.get("reward")
+                            # The 'done' flag from the action response signals the end of an episode
+                            done = msg.get("done")
 
-                        current_obs = next_obs
-                        episode_reward += reward
+                            total_reward = reward  # Simplified reward for training
+                            agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
+
+                            current_obs = next_obs
+                            episode_reward += reward
+
+                        elif msg_type == "game.over":
+                            logger.info(f"Game over message received. Final reward: {msg.get('final_reward')}")
+                            done = True
+                            # The final state experience was already recorded by the preceding 'action.taken' message
+                            continue
+
+                        else:
+                            logger.warning(f"Unexpected message type received: {msg_type}")
+                            # We will not end the episode here, just log the warning.
+                            # The loop will continue, waiting for a valid game state message.
 
                     # --- Post-Episode ---
                     train_stats = agent.train()
