@@ -82,6 +82,7 @@ class Command(BaseCommand):
         agent_id = config.get('agent_id', f"agent-{env_name}")
 
         agent_config = config.get('agent_config', {})
+        history_config = config.get('agent_history', {})
         agent = ChimeraAgent(
             agent_id=agent_id,
             obs_dim=obs_dim,
@@ -90,7 +91,8 @@ class Command(BaseCommand):
             hidden_dim=agent_config.get('hidden_dim', 128),
             cortex_configs=cortex_configs,
             load_from_storage=not config.get('force_new_agent', False),
-            hyperparams=agent_config.get('hyperparams', {})
+            hyperparams=agent_config.get('hyperparams', {}),
+            history_config=history_config
         )
 
         logger.info(f"Starting training for agent '{agent.agent_id}' in '{env_name}'...")

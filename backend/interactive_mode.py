@@ -31,6 +31,7 @@ def main():
 
     agent_id = config.get('default_agent_id_prefix', 'agent-') + "interactive"
     agent_config = config.get('agent_config', {})
+    history_config = config.get('agent_history', {})
     # Pass the language model config as a top-level item in agent_config
     agent_config['language_model'] = config.get('language_model', {})
 
@@ -40,6 +41,7 @@ def main():
         action_dim=action_dim,
         cortex_configs={}, # Cortexes will be configured by the agent based on hyperparams
         load_from_storage=True, # Try to load a pre-trained agent
+        history_config=history_config,
         **agent_config
     )
 

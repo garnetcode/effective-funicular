@@ -36,9 +36,10 @@ def main():
     # Agent configuration (hyperparameters, etc.)
     agent_config = config.get('agent_config', {})
     agent_config['load_from_storage'] = not config.get('force_new_agent', False)
+    history_config = config.get('agent_history', {})
 
     # --- Start the Manager ---
-    manager = MultiSessionManager(agent_config=agent_config, env_list=env_list)
+    manager = MultiSessionManager(agent_config=agent_config, history_config=history_config, env_list=env_list)
 
     logger.info(f"Starting Multi-Session Manager for environments: {env_list}")
     try:
