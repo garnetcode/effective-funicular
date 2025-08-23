@@ -124,28 +124,41 @@ class ColosseumConnector:
 
     async def reset_environment(self):
         """
-        Sends a reset message and waits for confirmation. It assumes the
-        message buffer has been drained by the caller.
+        Sends a reset message and waits for confirmation, ignoring any
+        other messages that may be in the buffer.
         """
         logger.info("Sending agent.reset message.")
         reset_message = {"type": "agent.reset"}
         await self.send_message(reset_message)
 
-        # Now, wait for the 'environment.reset' confirmation with a reasonable timeout.
-        try:
-            response = await asyncio.wait_for(self.receive_message(), timeout=10.0) # 10-second timeout
-            if response and response.get("type") == "environment.reset":
-                logger.info("Environment reset successfully.")
-                return response
-            else:
-                logger.error(f"Failed to reset environment: received unexpected message {response}")
-                return None
-        except asyncio.TimeoutError:
-            logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation within timeout.")
-            return None
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while waiting for reset confirmation: {e}")
-            return None
+        # Wait for the 'environment.reset' confirmation, ignoring other messages.
+        start_time = asyncio.get_event_loop().time()
+        timeout = 10.0
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            try:
+                # Use a shorter timeout for each recv() call within the main loop
+                response = await asyncio.wait_for(self.receive_message(), timeout=1.0)
+
+                if response and response.get("type") == "environment.reset":
+                    logger.info("Environment reset successfully.")
+                    return response
+                elif response:
+                    # Log other messages received while waiting
+                    logger.info(f"Ignoring buffered message while waiting for reset confirmation: {response.get('type')}")
+                # If response is None (due to connection closed), the loop will continue and eventually time out.
+
+            except asyncio.TimeoutError:
+                # This is a timeout for a single receive, not the whole operation.
+                # It's okay, we just continue waiting for the confirmation.
+                logger.debug("Timeout waiting for a message, will try again...")
+                continue
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while waiting for reset confirmation: {e}")
+                return None # Exit on other errors
+
+        # If the while loop finishes, it means the main timeout was exceeded
+        logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation within the total timeout.")
+        return None
 
     async def receive_message(self):
         """
