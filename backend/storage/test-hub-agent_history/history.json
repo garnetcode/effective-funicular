@@ -94,5 +94,13 @@
     "info": {
       "message": "Initial state."
     }
+  },
+  {
+    "version": 12,
+    "type": "diff",
+    "timestamp": "2025-08-23T08:14:31.245941",
+    "info": {
+      "message": "Initial state."
+    }
   }
 ]

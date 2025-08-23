@@ -74,69 +74,80 @@ class Command(BaseCommand):
         )
         logger.info(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
 
+        # --- Create a single session for the entire training run ---
+        connector = ColosseumConnector(env_name, agent_id)
+        session_data = await connector.create_session()
+        if not session_data:
+            logger.error("Could not create Colosseum session. Exiting.")
+            return
+
+        if not await connector.connect_websocket():
+            logger.error("WebSocket connection failed. Exiting.")
+            return
+
+        join_response = await connector.join_session()
+        if not join_response:
+            logger.error("Failed to join session. Exiting.")
+            await connector.close()
+            return
+
+        # --- Training Loop ---
         total_rewards = []
+        current_obs = np.array(join_response.get("observation"))
 
-        with tqdm(total=num_episodes, desc="Training on Colosseum") as pbar:
-            for episode in range(num_episodes):
-                # --- Create a new session for each episode ---
-                connector = ColosseumConnector(env_name, agent_id)
-                session_data = await connector.create_session()
-                if not session_data:
-                    logger.error(f"Episode {episode + 1}: Could not create Colosseum session. Skipping.")
+        try:
+            with tqdm(total=num_episodes, desc="Training on Colosseum") as pbar:
+                for episode in range(num_episodes):
+                    episode_reward = 0
+                    done = False
+
+                    # --- Gameplay Loop for one episode ---
+                    while not done:
+                        agent.perceive_and_update_state("vector_input", current_obs)
+                        action, log_prob, stag_context = agent.select_action()
+
+                        await connector.send_action(action)
+                        msg = await connector.receive_message()
+
+                        if not msg or msg.get("type") != "action.taken":
+                            logger.warning(f"Unexpected message or disconnection: {msg}")
+                            done = True  # End episode on error
+                            continue
+
+                        next_obs = np.array(msg.get("observation"))
+                        reward = msg.get("reward")
+                        done = msg.get("done")
+
+                        total_reward = reward  # Simplified reward
+                        agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
+
+                        current_obs = next_obs
+                        episode_reward += reward
+
+                    # --- Post-Episode ---
+                    train_stats = agent.train()
+                    agent.save_state(version_info=train_stats)
+                    total_rewards.append(episode_reward)
+
+                    avg_reward = np.mean(total_rewards[-100:])
+                    pbar.set_postfix({
+                        "Reward": f"{episode_reward:.2f}",
+                        "Avg Rwd": f"{avg_reward:.2f}",
+                        "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
+                    })
                     pbar.update(1)
-                    continue
 
-                if not await connector.connect_websocket():
-                    logger.error(f"Episode {episode + 1}: WebSocket connection failed. Skipping.")
-                    pbar.update(1)
-                    continue
-
-                join_response = await connector.join_session()
-                if not join_response:
-                    logger.error(f"Episode {episode + 1}: Failed to join session. Skipping.")
-                    await connector.close()
-                    pbar.update(1)
-                    continue
-
-                # --- Gameplay Loop ---
-                current_obs = np.array(join_response.get("observation"))
-                episode_reward = 0
-                done = False
-
-                while not done:
-                    agent.perceive_and_update_state("vector_input", current_obs)
-                    action, log_prob, stag_context = agent.select_action()
-
-                    await connector.send_action(action)
-                    msg = await connector.receive_message()
-
-                    if not msg or msg.get("type") != "action.taken":
-                        logger.warning(f"Unexpected message or disconnection: {msg}")
-                        break
-
-                    next_obs = np.array(msg.get("observation"))
-                    reward = msg.get("reward")
-                    done = msg.get("done")
-
-                    total_reward = reward  # Simplified reward
-                    agent.record_experience(agent.hidden_state, stag_context, current_obs, action, log_prob, total_reward, next_obs, done)
-
-                    current_obs = next_obs
-                    episode_reward += reward
-
-                # --- Post-Episode ---
-                await connector.close()
-                train_stats = agent.train()
-                agent.save_state(version_info=train_stats)
-                total_rewards.append(episode_reward)
-
-                avg_reward = np.mean(total_rewards[-100:])
-                pbar.set_postfix({
-                    "Reward": f"{episode_reward:.2f}",
-                    "Avg Rwd": f"{avg_reward:.2f}",
-                    "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
-                })
-                pbar.update(1)
-
-        logger.info("Training finished.")
-        logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")
+                    # --- Reset for next episode ---
+                    if episode < num_episodes - 1:
+                        await connector.send_message({"type": "agent.reset"})
+                        msg = await connector.receive_message()
+                        if msg and msg.get("type") == "environment.reset":
+                            current_obs = np.array(msg.get("observation"))
+                        else:
+                            logger.error("Failed to reset environment, stopping training.")
+                            break
+        finally:
+            # --- Final cleanup ---
+            await connector.close()
+            logger.info("Training finished.")
+            logger.info(f"Final agent state saved to {agent.history_manager.storage_dir}")
