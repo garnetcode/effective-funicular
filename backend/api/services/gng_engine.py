@@ -88,13 +88,13 @@ class GNG_Engine:
 
         # 3. Adaptation with Dynamic Learning Rates
         winner_utility = self.nodes[s1_id]['utility']
-        dynamic_winner_lr = self.winner_learning_rate / np.log1p(winner_utility)
+        dynamic_winner_lr = self.winner_learning_rate / (1e-5 + np.log1p(winner_utility))
         self.nodes[s1_id]['weight'] += dynamic_winner_lr * (input_vector - self.nodes[s1_id]['weight'])
 
         neighbor_ids = self._get_neighbors(s1_id)
         for n_id in neighbor_ids:
             neighbor_utility = self.nodes[n_id]['utility']
-            dynamic_neighbor_lr = self.neighbor_learning_rate / np.log1p(neighbor_utility)
+            dynamic_neighbor_lr = self.neighbor_learning_rate / (1e-5 + np.log1p(neighbor_utility))
             self.nodes[n_id]['weight'] += dynamic_neighbor_lr * (input_vector - self.nodes[n_id]['weight'])
 
         self.faiss_index = None # Invalidate index due to weight changes

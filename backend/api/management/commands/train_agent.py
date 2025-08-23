@@ -143,6 +143,10 @@ class Command(BaseCommand):
                             done = True
                             continue
 
+                        elif msg_type == "viewer.joined":
+                            logger.debug(f"Viewer joined message received. Ignoring.")
+                            continue
+
                         else:
                             logger.warning(f"Unexpected message type received: {msg_type}")
 
@@ -168,7 +172,7 @@ class Command(BaseCommand):
                         )
 
                     train_stats = agent.train(cortex_id="vector_input")
-                    if (episode + 1) % 50 == 0:
+                    if (episode + 1) % 1000 == 0:
                         agent.save_state(version_info=train_stats)
                     total_rewards.append(episode_reward)
 

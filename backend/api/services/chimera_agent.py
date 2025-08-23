@@ -303,6 +303,7 @@ class ChimeraAgent:
 
         world_model_optimizer.zero_grad()
         total_wm_loss.backward()
+        torch.nn.utils.clip_grad_norm_(world_model_and_cortex_params, max_norm=1.0)
         world_model_optimizer.step()
 
         # --- Action Head Training ---
@@ -317,6 +318,7 @@ class ChimeraAgent:
 
         action_head_optimizer.zero_grad()
         policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.action_head.parameters(), max_norm=1.0)
         action_head_optimizer.step()
 
         return {

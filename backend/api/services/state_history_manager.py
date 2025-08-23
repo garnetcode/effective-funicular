@@ -9,7 +9,7 @@ class StateHistoryManager:
     Manages the versioned history of an agent's state using a Git-like
     base-and-diff snapshot system to save memory. Includes history pruning.
     """
-    def __init__(self, agent_id, storage_root='backend/storage', base_snapshot_interval=10, max_snapshots=100):
+    def __init__(self, agent_id, storage_root='backend/storage', base_snapshot_interval=10, max_snapshots=2):
         self.agent_id = agent_id
         self.storage_dir = os.path.join(storage_root, agent_id + "_history")
         self.history_file = os.path.join(self.storage_dir, 'history.json')
