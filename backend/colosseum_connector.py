@@ -124,38 +124,27 @@ class ColosseumConnector:
 
     async def reset_environment(self):
         """
-        Resets the environment for the current session via an HTTP POST request.
+        Sends a reset message and waits for confirmation. It assumes the
+        message buffer has been drained by the caller.
         """
-        if not self.session_id:
-            logger.error("Cannot reset environment, no session ID is available.")
-            return None
+        logger.info("Sending agent.reset message.")
+        reset_message = {"type": "agent.reset"}
+        await self.send_message(reset_message)
 
-        url = f"{self.http_base_url}/sessions/{self.session_id}/reset/"
-        payload = {"agent_tag": self.agent_tag}
-        logger.info(f"Sending HTTP reset request to {url}")
-
+        # Now, wait for the 'environment.reset' confirmation with a reasonable timeout.
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as response:
-                    response.raise_for_status()  # Raises an exception for 4xx/5xx status codes
-                    data = await response.json()
-
-                    if data.get("success"):
-                        logger.info(f"Environment for session {self.session_id} reset successfully.")
-                        # The response contains the initial observation and info after reset
-                        return {
-                            "observation": data.get("observation"),
-                            "info": data.get("info")
-                        }
-                    else:
-                        error_msg = data.get("error", "Unknown error from server.")
-                        logger.error(f"Failed to reset environment: {error_msg}")
-                        return None
-        except aiohttp.ClientError as e:
-            logger.error(f"HTTP error during environment reset: {e}")
+            response = await asyncio.wait_for(self.receive_message(), timeout=10.0) # 10-second timeout
+            if response and response.get("type") == "environment.reset":
+                logger.info("Environment reset successfully.")
+                return response
+            else:
+                logger.error(f"Failed to reset environment: received unexpected message {response}")
+                return None
+        except asyncio.TimeoutError:
+            logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation within timeout.")
             return None
         except Exception as e:
-            logger.error(f"An unexpected error occurred during environment reset: {e}")
+            logger.error(f"An unexpected error occurred while waiting for reset confirmation: {e}")
             return None
 
     async def receive_message(self):
