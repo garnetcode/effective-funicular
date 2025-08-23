@@ -110,7 +110,6 @@ class Command(BaseCommand):
                 for episode in range(num_episodes):
                     episode_reward = 0
                     done = False
-                    episode_experiences = [] # Buffer for the current episode's experiences
 
                     # --- Gameplay Loop for one episode ---
                     while not done:
@@ -129,18 +128,39 @@ class Command(BaseCommand):
 
                         if msg_type == "action.taken":
                             next_obs = np.array(msg.get("observation"))
-                            reward = msg.get("reward")
+                            external_reward = msg.get("reward")
                             done = msg.get("done")
 
-                            # Store the experience with the immediate reward for now
-                            episode_experiences.append(Experience(agent.hidden_state, stag_context, current_obs, action, log_prob, reward, next_obs, done))
+                            # Get internal reward and update vitals
+                            internal_reward = agent._update_vitals_and_get_internal_reward()
+                            total_reward = external_reward + internal_reward
+
+                            # Record experience with the combined, immediate reward
+                            agent.record_experience(
+                                agent.hidden_state,
+                                stag_context,
+                                current_obs,
+                                action,
+                                log_prob,
+                                total_reward,  # Correct immediate reward
+                                next_obs,
+                                done
+                            )
 
                             current_obs = next_obs
-                            episode_reward += reward
+                            episode_reward += external_reward  # Track original env reward for stats
 
                         elif msg_type == "game.over":
                             logger.debug(f"Game over message received. Final reward: {msg.get('final_reward')}")
                             done = True
+                            # Final state might have a reward, let's process it
+                            # Note: In many envs, the final reward is part of the last "action.taken"
+                            # This is for robustness.
+                            internal_reward = agent._update_vitals_and_get_internal_reward()
+                            final_reward = msg.get('reward', 0) + internal_reward # Use reward from game.over if present
+                            # We don't have a 'next_obs' here, but we can record the terminal experience
+                            # This depends on how the replay buffer and training handles terminal states.
+                            # For now, we assume the last 'action.taken' is sufficient.
                             continue
 
                         elif msg_type == "viewer.joined":
@@ -150,27 +170,8 @@ class Command(BaseCommand):
                         else:
                             logger.warning(f"Unexpected message type received: {msg_type}")
 
-                    # --- Post-Episode: Calculate discounted returns and train ---
-                    logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Processing returns and training...")
-
-                    # Calculate discounted returns and record experiences
-                    discounted_return = 0
-                    for experience in reversed(episode_experiences):
-                        # The return G_t is the immediate reward + discounted future returns
-                        discounted_return = experience.reward + agent.gamma * discounted_return
-
-                        # Now record the experience with the correctly calculated discounted return
-                        agent.record_experience(
-                            experience.hidden_state,
-                            experience.stag_context,
-                            experience.obs,
-                            experience.action,
-                            experience.log_prob,
-                            discounted_return, # This is G_t
-                            experience.next_obs,
-                            experience.done
-                        )
-
+                    # --- Post-Episode: Train the agent ---
+                    logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training...")
                     train_stats = agent.train(cortex_id="vector_input")
                     if (episode + 1) % 1000 == 0:
                         agent.save_state(version_info=train_stats)

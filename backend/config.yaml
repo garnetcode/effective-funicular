@@ -35,3 +35,7 @@ agent_config:
     gamma: 0.99
     batch_size: 32
     buffer_capacity: 10000
+    value_loss_weight: 1.0 # Increased from default 0.5 to stabilize critic
+    # Vitals-based reward shaping
+    low_energy_threshold: 0.2 # 20%
+    low_energy_penalty: -10.0
