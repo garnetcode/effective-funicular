@@ -5,7 +5,7 @@ import asyncio
 import uuid
 import torch
 from api.services.chimera_agent import ChimeraAgent
-from colosseum_connector import ColosseumConnector
+from api.services.cortex.factory import create_cortex_configs_from_observation_space
 
 # NOTE: This script requires the `gymnasium` and `websockets` libraries.
 # It was written assuming the libraries are installed. To run this, please ensure you have run:
@@ -18,66 +18,41 @@ except ImportError:
     exit(1)
 
 
-def get_env_config(env):
-    """Inspects a gymnasium environment to determine agent configuration."""
-    obs_space = env.observation_space
-    if isinstance(obs_space, gym.spaces.Box) and len(obs_space.shape) == 1:
-        input_dim = obs_space.shape[0]
-        cortex_configs = {
-            "vector_input": {
-                "type": "DenseCortex",
-                "params": {"input_dim": input_dim}
-            }
-        }
-        cortex_id = "vector_input"
-    else:
-        raise NotImplementedError(f"Observation space type {type(obs_space)} not supported yet for auto-config.")
-    return cortex_configs, cortex_id
-
-
 def main(args):
     """
     Main function to run the RL training loop with a local environment,
-    implementing the Wake-Sleep cycle.
+    implementing the Wake-Sleep cycle and curriculum learning.
     """
     env_names = [env.strip() for env in args.env_curriculum.split(',')]
     print(f"Starting training with curriculum: {env_names}")
 
-    # --- Inspect all environments to determine max dimensions ---
-    max_obs_dim = 0
+    # --- Inspect all environments to build a complete cortex configuration ---
+    master_cortex_configs = {}
     max_action_dim = 0
-    cortex_configs = None
-    cortex_id = None
-
     for name in env_names:
         print(f"Inspecting environment: {name}...")
         temp_env = gym.make(name)
-        obs_space = temp_env.observation_space
-        action_space = temp_env.action_space
+        # Get the cortex config for this specific environment
+        env_cortex_configs, _ = create_cortex_configs_from_observation_space(temp_env.observation_space)
+        # Add it to our master dictionary
+        master_cortex_configs.update(env_cortex_configs)
 
-        if isinstance(obs_space, gym.spaces.Box) and len(obs_space.shape) == 1:
-            max_obs_dim = max(max_obs_dim, obs_space.shape[0])
+        # Determine the max action space size needed for the agent's action head
+        if isinstance(temp_env.action_space, gym.spaces.Discrete):
+            max_action_dim = max(max_action_dim, temp_env.action_space.n)
         else:
-            raise NotImplementedError(f"Observation space type {type(obs_space)} not supported for {name}.")
-
-        if isinstance(action_space, gym.spaces.Discrete):
-            max_action_dim = max(max_action_dim, action_space.n)
-        else:
-            raise NotImplementedError(f"Action space type {type(action_space)} not supported for {name}.")
-
-        if cortex_configs is None:
-            # Use the first environment to determine the cortex config template
-            cortex_configs, cortex_id = get_env_config(temp_env)
-
+            raise NotImplementedError(f"Action space type {type(temp_env.action_space)} not supported for {name}.")
         temp_env.close()
 
-    # Update cortex config to use the max observation dimension
-    if cortex_configs and cortex_id in cortex_configs:
-        cortex_configs[cortex_id]['params']['input_dim'] = max_obs_dim
-    print(f"Max observation dimension: {max_obs_dim}, Max action dimension: {max_action_dim}")
+    print(f"Master cortex configuration: {list(master_cortex_configs.keys())}")
+    print(f"Max action dimension: {max_action_dim}")
 
     # --- Agent Setup ---
+    # The agent is initialized once with all possible cortexes it might need.
     agent_id = args.agent_id or f"agent-{env_names[0]}"
+    # TODO: The embedding_dim should come from a central config, not be hardcoded.
+    # For now, we assume a fixed embedding size for all cortex outputs.
+    embedding_dim = 256
     hyperparams = {
         'learning_rate': args.lr, 'gamma': args.gamma, 'batch_size': args.batch_size,
         'imagine_horizon': 15, 'collect_interval': 100, 'train_steps': 10,
@@ -87,8 +62,8 @@ def main(args):
         'use_stag_in_ac_loss': not args.no_stag
     }
     agent = ChimeraAgent(
-        agent_id=agent_id, max_obs_dim=max_obs_dim, max_action_dim=max_action_dim,
-        cortex_configs=cortex_configs, load_from_storage=not args.force_new,
+        agent_id=agent_id, embedding_dim=embedding_dim, max_action_dim=max_action_dim,
+        cortex_configs=master_cortex_configs, load_from_storage=not args.force_new,
         hyperparams=hyperparams
     )
     print(f"Agent '{agent_id}' configured for curriculum.")
@@ -101,6 +76,8 @@ def main(args):
             print(f"\n--- Starting Curriculum Stage {i+1}/{len(env_names)}: {env_name} ---")
             env = gym.make(env_name)
             actual_action_dim = env.action_space.n
+            # Determine the correct cortex_id for this environment
+            _, cortex_id = create_cortex_configs_from_observation_space(env.observation_space)
 
             steps_in_current_env = 0
             while steps_in_current_env < args.steps_per_env and total_steps < args.total_steps:
@@ -118,12 +95,12 @@ def main(args):
 
                     while not (terminated or truncated):
                         h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
-                        action, _, _, _, _ = agent.select_action(actual_action_dim, activation_path)
+                        action, log_prob, _, _, _ = agent.select_action(actual_action_dim, activation_path)
                         next_state, env_reward, terminated, truncated, _ = env.step(action)
                         agent.update_stag(h_normalized, env_reward)
                         internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
                         total_reward = env_reward + internal_reward
-                        agent.record_experience(h_t, z_t, activation_path, state, action, 0.0, total_reward, next_state, terminated)
+                        agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, total_reward, next_state, terminated)
                         state = next_state
                         episode_reward += env_reward
                         steps_collected += 1
@@ -138,6 +115,7 @@ def main(args):
                 if len(agent.replay_buffer) > args.batch_size:
                     print(f"\n--- Sleep Phase: Training ---")
                     for _ in range(10):
+                        # Pass the correct cortex_id for training
                         wm_stats = agent.train_world_model(cortex_id)
                         ac_stats = agent.train_policy_in_imagination()
                         print(f"  Train Step | WM Loss: {wm_stats.get('wm_loss', -1):.4f} | AC Loss: {ac_stats.get('ac_loss', -1):.4f}")
