@@ -91,6 +91,7 @@ class ChimeraAgent:
         self.metabolic_cost = 0.1
 
         # --- Initialize Agent State and Components ---
+        self.steps_done = 0
         self.hidden_state = torch.zeros(1, self.hidden_dim)
         self.last_action = torch.tensor(0)
         self.cortex_configs = cortex_configs or {}
@@ -234,14 +235,30 @@ class ChimeraAgent:
 
         # Mask the logits to only consider valid actions for the current environment
         valid_logits = action_logits[:actual_action_dim]
-
-        # Convert to numpy for softmax and sampling
-        action_probs_np = softmax(valid_logits.numpy())
-        action = np.random.choice(actual_action_dim, p=action_probs_np)
-        action_tensor = torch.tensor(action)
-
-        # We need the log_prob as a tensor for the loss calculation
         log_probs = torch.nn.functional.log_softmax(valid_logits, dim=-1)
+
+        # --- Epsilon-Greedy Exploration ---
+        epsilon_start = self.hyperparams.get('epsilon_start', 0.9)
+        epsilon_end = self.hyperparams.get('epsilon_end', 0.05)
+        epsilon_decay_steps = self.hyperparams.get('epsilon_decay_steps', 20000)
+
+        # Linear decay for epsilon
+        if self.steps_done < epsilon_decay_steps:
+            epsilon = epsilon_start - (epsilon_start - epsilon_end) * (self.steps_done / epsilon_decay_steps)
+        else:
+            epsilon = epsilon_end
+        self.steps_done += 1
+
+        if np.random.rand() < epsilon:
+            # Take a random action
+            action = np.random.randint(0, actual_action_dim)
+        else:
+            # Take action based on policy
+            action_probs_np = softmax(valid_logits.numpy())
+            action = np.random.choice(actual_action_dim, p=action_probs_np)
+
+        # Get the log_prob for the action that was actually taken
+        action_tensor = torch.tensor(action)
         action_log_prob = log_probs[action]
 
         # Store the chosen action for the next world model update
