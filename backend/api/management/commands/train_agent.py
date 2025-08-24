@@ -177,8 +177,12 @@ class Command(BaseCommand):
                             done = msg.get("done")
 
                             # Get internal reward and update vitals
-                            internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
-                            total_reward = external_reward + internal_reward
+                            use_internal_reward = agent.hyperparams.get('use_internal_reward', True)
+                            if use_internal_reward:
+                                internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
+                                total_reward = external_reward + internal_reward
+                            else:
+                                total_reward = external_reward
 
                             # Record experience with the combined, immediate reward
                             agent.record_experience(
