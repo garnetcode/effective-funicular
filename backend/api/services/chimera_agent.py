@@ -391,7 +391,7 @@ class ChimeraAgent:
         next_obs_batch_raw = pad_observations(batch.next_obs)
 
         # Process observations through the cortex
-        obs_batch_processed = cortex(next_obs_batch_raw) # Note: we are predicting the *next* observation
+        obs_batch_processed = torch.from_numpy(cortex.process(next_obs_batch_raw.numpy())).float()
 
         h_prev_batch = torch.stack(batch.h).squeeze(1)
         z_prev_batch = torch.stack(batch.z).squeeze(1)
@@ -457,47 +457,45 @@ class ChimeraAgent:
         imagined_stag_contexts = []
 
         # --- Imagine Trajectories with Dynamic STAG Context ---
-        with torch.no_grad():
-            for _ in range(horizon):
-                # 1. Generate STAG context dynamically for the current imagined state h_t
-                stag_contexts = []
-                for i in range(h_t.size(0)): # Process each state in the batch
-                    h_numpy = h_t[i].detach().numpy().flatten()
-                    norm = np.linalg.norm(h_numpy)
-                    h_normalized = h_numpy / norm if norm > 0 else h_numpy
+        for _ in range(horizon):
+            # 1. Generate STAG context dynamically for the current imagined state h_t
+            # This part needs to have gradient tracking for the StagContextProcessor
+            stag_contexts = []
+            for i in range(h_t.size(0)): # Process each state in the batch
+                h_numpy = h_t[i].detach().numpy().flatten()
+                norm = np.linalg.norm(h_numpy)
+                h_normalized = h_numpy / norm if norm > 0 else h_numpy
 
-                    _, _, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+                _, _, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
 
-                    path_weights = []
-                    if activation_path:
-                        for step in activation_path:
-                            level_gng = self.stag.level_map[step['level_id']]
-                            node_weight = level_gng.nodes[step['winner_id']]['weight']
-                            path_weights.append(torch.from_numpy(node_weight).float())
+                path_weights = []
+                if activation_path:
+                    for step in activation_path:
+                        level_gng = self.stag.level_map[step['level_id']]
+                        node_weight = level_gng.nodes[step['winner_id']]['weight']
+                        path_weights.append(torch.from_numpy(node_weight).float())
 
-                    while len(path_weights) < self.max_stag_path_length:
-                        path_weights.append(torch.zeros(self.hidden_dim))
+                while len(path_weights) < self.max_stag_path_length:
+                    path_weights.append(torch.zeros(self.hidden_dim))
 
-                    # Note: The context processor expects a batch, but we process one by one
-                    # This is less efficient but conceptually simpler for now.
-                    stag_contexts.append(self.stag_context_processor(path_weights))
+                stag_contexts.append(self.stag_context_processor(path_weights))
 
-                stag_context_batch = torch.cat(stag_contexts, dim=0)
+            stag_context_batch = torch.cat(stag_contexts, dim=0)
 
+            # 2. Actor selects action based on h_t and the dynamically generated C_t
+            action_input = torch.cat([h_t, stag_context_batch], dim=1)
+            action_dist = self.action_head(action_input)
+            action = action_dist.sample()
 
-                # 2. Actor selects action based on h_t and the dynamically generated C_t
-                action_input = torch.cat([h_t, stag_context_batch], dim=1)
-                action_dist = self.action_head(action_input)
-                action = action_dist.sample()
-
-                # 3. World model predicts next state
+            # 3. World model predicts next state (do this without tracking gradients)
+            with torch.no_grad():
                 h_t, prior_mean, prior_std = self.world_model.rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
 
-                imagined_h.append(h_t)
-                imagined_z.append(z_t)
-                imagined_actions.append(action)
-                imagined_stag_contexts.append(stag_context_batch)
+            imagined_h.append(h_t)
+            imagined_z.append(z_t)
+            imagined_actions.append(action)
+            imagined_stag_contexts.append(stag_context_batch)
 
         imagined_h = torch.stack(imagined_h) # Shape: [horizon+1, batch, hidden_dim]
         imagined_z = torch.stack(imagined_z) # Shape: [horizon+1, batch, latent_dim]
@@ -522,6 +520,8 @@ class ChimeraAgent:
         # --- Actor-Critic Loss Calculation (ℒ_AC) ---
         # Actor Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
+        # Normalize advantages to stabilize training
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
         log_probs = self.action_head.get_log_probs(action_input, imagined_actions)
         policy_loss = -(log_probs * advantage).mean()
