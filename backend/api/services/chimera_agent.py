@@ -396,7 +396,7 @@ class ChimeraAgent:
         next_obs_batch_raw = pad_observations(batch.next_obs)
 
         # Process observations through the cortex
-        obs_batch_processed = torch.from_numpy(cortex.process(next_obs_batch_raw.numpy())).float()
+        obs_batch_processed = cortex(next_obs_batch_raw) # Note: we are predicting the *next* observation
 
         h_prev_batch = torch.stack(batch.h).squeeze(1)
         z_prev_batch = torch.stack(batch.z).squeeze(1)
