@@ -117,6 +117,7 @@ class ChimeraAgent:
 
         # --- Initialize Agent State and Components ---
         self.steps_done = 0
+        self.train_steps = 0
         # h_t and z_t for the RSSM
         self.hidden_state = torch.zeros(1, self.hidden_dim)
         self.latent_state = torch.zeros(1, self.latent_dim)
@@ -347,11 +348,15 @@ class ChimeraAgent:
         The main training loop that orchestrates the "sleep" phase of the agent,
         which involves training the world model and then training the policy in imagination.
         """
+        self.train_steps += 1
         # Part 1: Train the World Model on real, recently collected data.
         world_model_stats = self.train_world_model(cortex_id)
+        policy_stats = {}
 
-        # Part 2: Train the Actor-Critic policy in imagined trajectories.
-        policy_stats = self.train_policy_in_imagination()
+        # Part 2: Train the Actor-Critic policy in imagined trajectories, but less frequently.
+        policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
+        if self.train_steps % policy_train_frequency == 0:
+            policy_stats = self.train_policy_in_imagination()
 
         # Combine stats for logging
         combined_stats = {**world_model_stats, **policy_stats}
@@ -513,7 +518,7 @@ class ChimeraAgent:
         lambda_returns = []
         for t in reversed(range(horizon)):
             # V_target = r_t + gamma * ( (1-lambda) * V(s_{t+1}) + lambda * V_target_{t+1} )
-            returns = imagined_rewards[t] + self.gamma * ((1 - lambda_) * imagined_values[t+1] + lambda_ * returns)
+            returns = imagined_rewards[t] + self.gamma * ((1 - lambda_) * imagined_values[t+1].detach() + lambda_ * returns)
             lambda_returns.append(returns)
         lambda_returns = torch.stack(list(reversed(lambda_returns)))
 

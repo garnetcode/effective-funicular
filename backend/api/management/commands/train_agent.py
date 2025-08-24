@@ -105,6 +105,49 @@ class Command(BaseCommand):
             actual_action_dim = max_action_dim
 
 
+        burnin_steps = agent_config.get('hyperparams', {}).get('burnin_steps', 1000)
+        logger.info(f"Starting burn-in phase for {burnin_steps} steps...")
+        for _ in tqdm(range(burnin_steps), desc="Burn-in"):
+            # Perceive the environment to get the latest state for the replay buffer
+            _, _, _, activation_path, novelty = agent.perceive_and_update_state("vector_input", current_obs)
+
+            # Take a random action
+            action = np.random.randint(0, actual_action_dim)
+            await connector.send_action(action)
+            msg = await connector.receive_message()
+
+            if not msg or msg.get("type") != "action.taken":
+                if msg and msg.get("type") == "game.over":
+                    reset_response = await connector.reset_environment()
+                    if reset_response:
+                        current_obs = np.array(reset_response.get("observation"))
+                continue
+
+            next_obs = np.array(msg.get("observation"))
+            external_reward = msg.get("reward", 0)
+            done = msg.get("done", False)
+
+            # Store the random experience in the replay buffer
+            # Use dummy values for log_prob as the action was random
+            agent.record_experience(
+                agent.hidden_state,
+                agent.latent_state,
+                activation_path,
+                current_obs,
+                action,
+                torch.tensor(0.0), # Dummy log_prob
+                external_reward, # Use external reward directly
+                next_obs,
+                done
+            )
+
+            current_obs = next_obs
+            if done:
+                reset_response = await connector.reset_environment()
+                if reset_response:
+                    current_obs = np.array(reset_response.get("observation"))
+
+
         try:
             with tqdm(total=num_episodes, desc="Training on Colosseum") as pbar:
                 for episode in range(num_episodes):

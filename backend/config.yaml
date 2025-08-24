@@ -43,3 +43,5 @@ agent_config:
     epsilon_start: 0.9
     epsilon_end: 0.05
     epsilon_decay_steps: 20000
+    burnin_steps: 1000
+    policy_train_frequency: 10
