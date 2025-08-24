@@ -46,3 +46,4 @@ agent_config:
     burnin_steps: 1000
     policy_train_frequency: 10
     use_internal_reward: false
+    use_stag_in_ac_loss: true # If true, the STAG context vector is used in the actor-critic loss.
