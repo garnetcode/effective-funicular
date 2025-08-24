@@ -79,14 +79,14 @@ class Command(BaseCommand):
         # --- Dynamically configure agent based on environment specs ---
         try:
             # Reconstruct the observation space from the server's response
-            obs_space_info = join_response['observation_space']
+            obs_space_info = join_response['environment']['observation_space']
             observation_space = gym.spaces.Box(
                 low=np.array(obs_space_info['low']),
                 high=np.array(obs_space_info['high']),
                 shape=obs_space_info['shape'],
                 dtype=np.dtype(obs_space_info['dtype'])
             )
-            actual_action_dim = join_response['action_space_shape']
+            actual_action_dim = join_response['environment']['action_space']['n']
 
             cortex_configs, cortex_id = create_cortex_configs_from_observation_space(observation_space)
             logger.info(f"Dynamically configured cortex: '{cortex_id}' for observation space {observation_space}")
