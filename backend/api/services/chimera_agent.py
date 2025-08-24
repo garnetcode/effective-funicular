@@ -453,26 +453,41 @@ class ChimeraAgent:
         imagined_z = [z_t]
         imagined_actions = []
 
-        # The STAG context is fixed for the duration of an imagined trajectory,
-        # based on the starting state.
-        # This is a simplification; a more complex version could update the context.
-        path_weights = []
-        for step in batch.activation_path[0]: # Using first path as representative
-            level_gng = self.stag.level_map[step['level_id']]
-            node_weight = level_gng.nodes[step['winner_id']]['weight']
-            path_weights.append(torch.from_numpy(node_weight).float())
-        while len(path_weights) < self.max_stag_path_length:
-            path_weights.append(torch.zeros(self.hidden_dim))
-        stag_context = self.stag_context_processor(path_weights)
-
+        # --- Imagine Trajectories with Dynamic STAG Context ---
         with torch.no_grad():
             for _ in range(horizon):
-                # Actor selects action based on h_t and C_t
-                action_input = torch.cat([h_t, stag_context.repeat(h_t.size(0), 1)], dim=1)
+                # 1. Generate STAG context dynamically for the current imagined state h_t
+                stag_contexts = []
+                for i in range(h_t.size(0)): # Process each state in the batch
+                    h_numpy = h_t[i].detach().numpy().flatten()
+                    norm = np.linalg.norm(h_numpy)
+                    h_normalized = h_numpy / norm if norm > 0 else h_numpy
+
+                    _, _, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+
+                    path_weights = []
+                    if activation_path:
+                        for step in activation_path:
+                            level_gng = self.stag.level_map[step['level_id']]
+                            node_weight = level_gng.nodes[step['winner_id']]['weight']
+                            path_weights.append(torch.from_numpy(node_weight).float())
+
+                    while len(path_weights) < self.max_stag_path_length:
+                        path_weights.append(torch.zeros(self.hidden_dim))
+
+                    # Note: The context processor expects a batch, but we process one by one
+                    # This is less efficient but conceptually simpler for now.
+                    stag_contexts.append(self.stag_context_processor(path_weights))
+
+                stag_context_batch = torch.cat(stag_contexts, dim=0)
+
+
+                # 2. Actor selects action based on h_t and the dynamically generated C_t
+                action_input = torch.cat([h_t, stag_context_batch], dim=1)
                 action_dist = self.action_head(action_input)
                 action = action_dist.sample()
 
-                # World model predicts next state
+                # 3. World model predicts next state
                 h_t, prior_mean, prior_std = self.world_model.rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
 
