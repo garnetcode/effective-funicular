@@ -3,6 +3,7 @@ import os
 import argparse
 import asyncio
 import uuid
+import torch
 from api.services.chimera_agent import ChimeraAgent
 from colosseum_connector import ColosseumConnector
 
@@ -34,17 +35,17 @@ def get_env_config(env):
     return cortex_configs, cortex_id
 
 
-async def main(args):
+def main(args):
     """
-    Main function to run the RL training loop with a Colosseum environment,
+    Main function to run the RL training loop with a local environment,
     implementing the Wake-Sleep cycle.
     """
     # --- Environment and Agent Setup ---
-    print(f"Inspecting local environment for configuration: {args.env}")
-    local_env = gym.make(args.env)
-    cortex_configs, cortex_id = get_env_config(local_env)
-    actual_action_dim = local_env.action_space.n
-    local_env.close()
+    print(f"Creating local environment: {args.env}")
+    env = gym.make(args.env)
+    cortex_configs, cortex_id = get_env_config(env)
+    obs_space_shape = env.observation_space.shape[0]
+    actual_action_dim = env.action_space.n
 
     agent_id = args.agent_id or f"agent-{args.env}"
     # Hyperparameters for the agent and training loop
@@ -52,9 +53,9 @@ async def main(args):
         'learning_rate': args.lr,
         'gamma': args.gamma,
         'batch_size': args.batch_size,
-        'imagine_horizon': args.horizon,
-        'collect_interval': args.collect_interval,
-        'train_steps': args.train_steps,
+        'imagine_horizon': 15, # Dreamer paper default
+        'collect_interval': 100, # Dreamer paper default
+        'train_steps': 10, # Simplified for this example
         'world_model_lr': 1e-3,
         'actor_critic_lr': 3e-4,
         'w_recon': 1.0, 'w_reward': 1.0, 'w_kl': 1.0,
@@ -63,18 +64,13 @@ async def main(args):
     }
     agent = ChimeraAgent(
         agent_id=agent_id,
-        max_obs_dim=256, # Assuming a max obs dim
-        max_action_dim=256, # Assuming a max action dim
+        max_obs_dim=obs_space_shape, # Set to actual obs dim
+        max_action_dim=256, # Keep a max for the model architecture
         cortex_configs=cortex_configs,
         load_from_storage=not args.force_new,
         hyperparams=hyperparams
     )
     print(f"Agent '{agent_id}' configured for '{args.env}'.")
-
-    # --- Colosseum Connection ---
-    player_token = args.token or str(uuid.uuid4())
-    connector = ColosseumConnector(args.env, player_token, args.host, args.port)
-    await connector.connect()
 
     # --- Main Training Loop (Wake-Sleep Cycle) ---
     total_steps = 0
@@ -82,98 +78,79 @@ async def main(args):
     try:
         while total_steps < args.total_steps:
             # --- Wake Phase: Collect Experience ---
-            print(f"\n--- Wake Phase: Collecting experience for {args.collect_interval} steps ---")
+            print(f"\n--- Wake Phase: Collecting experience ---")
             steps_collected = 0
-            while steps_collected < args.collect_interval:
+            while steps_collected < 100: # Collect 100 steps per wake phase
                 episode_num += 1
                 print(f"--- Episode {episode_num} ---")
                 episode_reward = 0
 
-                # Reset agent state at the start of each episode
+                # Reset environment and agent state
+                state, _ = env.reset()
                 agent.hidden_state, agent.latent_state = agent.world_model.get_initial_state()
-                agent.last_action = torch.tensor(0)
+                agent.last_action = torch.tensor([0]) # Reset last action
 
-                # Wait for game start/turn
-                msg = await connector.receive_message()
-                if not msg or msg.get('type') == 'game.over': continue
-                if msg.get('type') == 'match.start': msg = await connector.receive_message()
-
-                state = msg.get('observation')
                 terminated = False
+                truncated = False
 
-                while not terminated:
+                while not (terminated or truncated):
                     # 1. Perceive, update state, and select action
-                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, np.array(state))
-                    action, _ = agent.select_action(actual_action_dim, activation_path)
+                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
+                    action, log_prob, _ = agent.select_action(actual_action_dim, activation_path)
 
                     # 2. Step environment
-                    await connector.send_action(int(action))
-                    result_msg = await connector.receive_message()
-                    if not result_msg or result_msg.get('type') != 'action.result': break
+                    next_state, env_reward, terminated, truncated, _ = env.step(action)
 
-                    # 3. Process results and record experience
-                    env_reward = result_msg.get('reward', 0)
-                    damage = result_msg.get('damage', 0) # Assuming environment provides damage
-                    next_state = result_msg.get('observation')
-                    terminated = result_msg.get('terminated', False)
-
-                    # 4. Update STAG with the environmental reward
+                    # 3. Update STAG with the environmental reward
                     agent.update_stag(h_normalized, env_reward)
 
-                    # 5. Calculate internal rewards and add to env reward for policy training
-                    internal_reward = agent.get_internal_reward(damage, novelty)
+                    # 4. Calculate internal rewards
+                    internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
                     total_reward = env_reward + internal_reward
 
-                    # 6. Store experience for learning
-                    agent.record_experience(h_t, z_t, activation_path, action, total_reward, np.array(next_state), terminated)
+                    # 5. Store experience for learning
+                    agent.record_experience(h_t, z_t, activation_path, action, total_reward, next_state, terminated)
 
-                    episode_reward += reward
+                    state = next_state
+                    episode_reward += env_reward
                     steps_collected += 1
                     total_steps += 1
 
-                    if terminated:
+                    if terminated or truncated:
                         print(f"Episode finished. Reward: {episode_reward:.2f}, Total Steps: {total_steps}")
                         break
 
-                    # Wait for next turn
-                    turn_msg = await connector.receive_message()
-                    if not turn_msg or turn_msg.get('type') != 'game.turn': break
-                    state = turn_msg.get('observation')
-
             # --- Sleep Phase: Train on Collected Data ---
             if len(agent.replay_buffer) > args.batch_size:
-                print(f"\n--- Sleep Phase: Training for {args.train_steps} steps ---")
-                for i in range(args.train_steps):
+                print(f"\n--- Sleep Phase: Training ---")
+                for i in range(10): # Train for 10 steps per sleep phase
                     # a. Train the world model
                     wm_stats = agent.train_world_model(cortex_id)
                     # b. Train the policy in imagination
                     ac_stats = agent.train_policy_in_imagination()
 
-                    if i % 50 == 0: # Log every 50 train steps
-                        print(f"  Train Step {i+1}/{args.train_steps} | WM Loss: {wm_stats.get('wm_loss', -1):.4f} | AC Loss: {ac_stats.get('ac_loss', -1):.4f}")
+                    if i % 5 == 0: # Log every 5 train steps
+                        print(f"  Train Step {i+1} | WM Loss: {wm_stats.get('wm_loss', -1):.4f} | AC Loss: {ac_stats.get('ac_loss', -1):.4f}")
             else:
                 print("Not enough data to enter sleep phase, continuing collection.")
 
-    except (websockets.exceptions.ConnectionClosedOK, KeyboardInterrupt):
-        print("\nTraining interrupted or server closed connection.")
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user.")
     finally:
-        await connector.close()
+        env.close()
         agent.save_state({"message": f"Training completed after {total_steps} steps."})
         print("Training finished and agent state saved.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a ChimeraAgent using the Dreamer (Wake-Sleep) algorithm.")
-    parser.add_argument("--env", type=str, default="CartPole-v1", help="Name of the Colosseum game environment.")
+    parser = argparse.ArgumentParser(description="Train a ChimeraAgent using a local environment.")
+    parser.add_argument("--env", type=str, default="CartPole-v1", help="Name of the gymnasium environment.")
     parser.add_argument("--agent_id", type=str, default=None, help="A unique ID for the agent. Defaults to 'agent-<env_name>'.")
-    parser.add_argument("--token", type=str, default=None, help="Player token for authentication. A new one is generated if not provided.")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Hostname of the Colosseum server.")
-    parser.add_argument("--port", type=int, default=8765, help="Port of the Colosseum server.")
-    parser.add_argument("--episodes", type=int, default=1000, help="Number of episodes to train for.")
-    parser.add_argument("--dims", type=int, default=64, help="Dimensionality of the agent's internal brain space.")
-    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate for the agent.")
+    parser.add_argument("--total_steps", type=int, default=50000, help="Total number of steps to train for.")
+    parser.add_argument("--batch_size", type=int, default=50, help="Batch size for training.")
+    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate for the agent.")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for rewards.")
     parser.add_argument("--force_new", action="store_true", help="Force creation of a new agent, ignoring saved state.")
 
     args = parser.parse_args()
-    asyncio.run(main(args))
+    main(args)

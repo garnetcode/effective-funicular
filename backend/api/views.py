@@ -43,6 +43,30 @@ def get_agent_config(agent_id):
 
 # --- API Views ---
 
+class SessionCreate(APIView):
+    """Creates a new game session."""
+    def post(self, request, format=None):
+        environment_id = request.data.get('environment_id')
+        agent_tag = request.data.get('agent_tag')
+
+        if not environment_id or not agent_tag:
+            return Response({'error': 'environment_id and agent_tag are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        session_id = f"session-{uuid.uuid4()}"
+
+        # In a real application, you would store session details in a database or cache.
+        # For the purpose of this training script, we just need to return a valid session ID
+        # so the connector can proceed to the WebSocket connection.
+        # The WebSocket consumer will handle the actual game state.
+
+        return Response({
+            'success': True,
+            'session_id': session_id,
+            'environment_id': environment_id,
+            'agent_tag': agent_tag
+        }, status=status.HTTP_201_CREATED)
+
+
 class EnvironmentList(APIView):
     """Lists available Gymnasium environments."""
     def get(self, request, format=None):

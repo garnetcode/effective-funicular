@@ -250,7 +250,7 @@ class ChimeraAgent:
 
     def select_action(self, actual_action_dim, activation_path):
         """
-        Selects an action using the policy π(a | h_t, C_t).
+        Selects an action using the policy π(a | h_t, C_t), with masking for the action space.
         """
         # 1. Construct the context vector C_t from the STAG's activation path
         path_weights = []
@@ -271,24 +271,35 @@ class ChimeraAgent:
         # 2. The ActionHead receives the deterministic state h_t and context C_t
         combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
 
+        # 3. Get action distribution, mask it, and select action
         with torch.no_grad():
-            action_dist = self.action_head(combined_input)
+            # Get the raw logits from the action head's linear layer
+            logits = self.action_head.layer(combined_input)
 
-        # 3. Mask logits and select action
-        # Note: For simplicity, we sample from the full distribution. A more robust
-        # implementation would mask the logits before creating the distribution.
+            # Create a mask to disable logits for actions outside the valid range
+            mask = torch.full(logits.shape, -float('inf'))
+            mask[0, :actual_action_dim] = 0
+
+            # Apply the mask to the logits
+            masked_logits = logits + mask
+
+            # Create the distribution from the masked logits
+            action_dist = Categorical(logits=masked_logits)
+
         epsilon = self._get_epsilon()
         self.steps_done += 1
 
         if np.random.rand() < epsilon:
-            action = np.random.randint(0, actual_action_dim)
+            action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)])
         else:
-            action = action_dist.sample().item()
+            action_tensor = action_dist.sample()
 
-        action_tensor = torch.tensor([action])
+        action = action_tensor.item()
+        log_prob = action_dist.log_prob(action_tensor)
+
         self.last_action = action_tensor
 
-        return action, activation_path # Return path for replay buffer
+        return action, log_prob, stag_context_vector
 
     def _get_epsilon(self):
         epsilon_start = self.hyperparams.get('epsilon_start', 0.9)
