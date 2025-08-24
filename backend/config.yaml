@@ -1,7 +1,7 @@
 # Configuration for training the ChimeraAgent
 
 # Environment settings
-env_name: "LunarLander-v3"
+env_name: "LunarLander-v2"
 
 # Agent settings
 default_agent_id_prefix: "Kymera-"
@@ -31,7 +31,7 @@ agent_config:
   latent_dim: 64
   hidden_dim: 128
   hyperparams:
-    learning_rate: 0.005
+    learning_rate: 0.0003
     gamma: 0.99
     batch_size: 32
     buffer_capacity: 10000
