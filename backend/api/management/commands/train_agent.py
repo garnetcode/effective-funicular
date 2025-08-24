@@ -115,7 +115,7 @@ class Command(BaseCommand):
                     while not done:
                         # Perceive the environment and get agent's internal state and novelty
                         _, _, _, activation_path, novelty = agent.perceive_and_update_state("vector_input", current_obs)
-                        action, log_prob, stag_context = agent.select_action(actual_action_dim, activation_path)
+                        action, log_prob, stag_context, decision_maker, epsilon = agent.select_action(actual_action_dim, activation_path)
 
 
                         await connector.send_action(action)
@@ -179,6 +179,11 @@ class Command(BaseCommand):
                     pbar.set_postfix({
                         "Reward": f"{episode_reward:.2f}",
                         "Avg Rwd": f"{avg_reward:.2f}",
+                        "Epsilon": f"{epsilon:.3f}",
+                        "Energy": f"{agent.energy:.1f}",
+                        "Integrity": f"{agent.integrity:.1f}",
+                        "Decision": decision_maker,
+                        "Action Prob": f"{torch.exp(log_prob).item():.3f}",
                         "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
                     })
                     pbar.update(1)

@@ -291,15 +291,17 @@ class ChimeraAgent:
 
         if np.random.rand() < epsilon:
             action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)])
+            decision_maker = "random"
         else:
             action_tensor = action_dist.sample()
+            decision_maker = "policy"
 
         action = action_tensor.item()
         log_prob = action_dist.log_prob(action_tensor)
 
         self.last_action = action_tensor
 
-        return action, log_prob, stag_context_vector
+        return action, log_prob, stag_context_vector, decision_maker, epsilon
 
     def _get_epsilon(self):
         epsilon_start = self.hyperparams.get('epsilon_start', 0.9)
