@@ -107,6 +107,7 @@ class ChimeraAgent:
         # Max length of the STAG activation path for the context processor
         self.max_stag_path_length = self.hyperparams.get('max_stag_path_length', 10)
         self.stag_context_dim = self.hyperparams.get('stag_context_dim', 128)
+        self.use_stag_in_ac_loss = self.hyperparams.get('use_stag_in_ac_loss', True)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -268,6 +269,11 @@ class ChimeraAgent:
         # Process the path to get the context vector C_t
         with torch.no_grad():
             stag_context_vector = self.stag_context_processor(path_weights)
+
+        # If STAG is disabled for training, use a zero vector for the context.
+        # This effectively removes its influence on action selection during policy updates.
+        if not self.use_stag_in_ac_loss:
+            stag_context_vector = torch.zeros_like(stag_context_vector)
 
         # 2. The ActionHead receives the deterministic state h_t and context C_t
         combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
@@ -486,6 +492,10 @@ class ChimeraAgent:
                 stag_contexts.append(self.stag_context_processor(path_weights))
 
             stag_context_batch = torch.cat(stag_contexts, dim=0)
+
+            # If STAG is disabled for training, use a zero vector for the context.
+            if not self.use_stag_in_ac_loss:
+                stag_context_batch = torch.zeros_like(stag_context_batch)
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t
             action_input = torch.cat([h_t, stag_context_batch], dim=1)

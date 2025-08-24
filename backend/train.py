@@ -60,7 +60,8 @@ def main(args):
         'actor_critic_lr': 3e-4,
         'w_recon': 1.0, 'w_reward': 1.0, 'w_kl': 1.0,
         'w_policy': 1.0, 'w_critic': 0.5, 'w_entropy': 1e-4,
-        'lambda': 0.95
+        'lambda': 0.95,
+        'use_stag_in_ac_loss': not args.no_stag
     }
     agent = ChimeraAgent(
         agent_id=agent_id,
@@ -151,6 +152,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate for the agent.")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for rewards.")
     parser.add_argument("--force_new", action="store_true", help="Force creation of a new agent, ignoring saved state.")
+    parser.add_argument("--no-stag", action="store_true", help="If set, STAG context will not be used in the actor-critic loss.")
 
     args = parser.parse_args()
     main(args)
