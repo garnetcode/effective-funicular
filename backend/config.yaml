@@ -57,3 +57,5 @@ agent_config:
     gng_ordering_phase_steps: 2000
     gng_winner_learning_rate_initial: 0.8
     gng_neighbor_learning_rate_initial: 0.1
+    # World Model Regularization
+    world_model_weight_decay: 1.0e-6 # L2 penalty for the world model optimizer

@@ -243,6 +243,41 @@ class ChimeraAgentTests(TestCase):
     #     # on a single step, as individual batches can have noisy gradients.
     #     self.assertLess(final_loss, initial_loss)
 
+    def test_world_model_weight_decay(self):
+        """Tests that the weight_decay hyperparameter is correctly passed to the optimizer."""
+        decay_value = 0.01
+        agent = ChimeraAgent(
+            agent_id="test-weight-decay-agent",
+            max_obs_dim=self.obs_dim,
+            max_action_dim=self.action_dim,
+            cortex_configs=self.agent.cortex_configs,
+            load_from_storage=False,
+            hyperparams={'world_model_weight_decay': decay_value, 'batch_size': 1}
+        )
+
+        # Populate the buffer with enough data to pass the size check
+        for _ in range(2):
+            agent.record_experience(
+                torch.rand(1, agent.hidden_dim), torch.rand(1, agent.latent_dim), [],
+                np.random.rand(self.obs_dim), 0, 0.5, 1.0, np.random.rand(self.obs_dim), False
+            )
+
+        with patch('torch.optim.Adam') as mock_adam:
+            agent.train_world_model(cortex_id="test_cortex")
+
+            # Check if Adam was called
+            self.assertTrue(mock_adam.called)
+
+            # Check the keyword arguments passed to Adam
+            _, kwargs = mock_adam.call_args
+            self.assertIn('weight_decay', kwargs)
+            self.assertEqual(kwargs['weight_decay'], decay_value)
+
+        # Clean up the agent's directory
+        history_dir = agent.history_manager.storage_dir
+        if os.path.exists(history_dir):
+            shutil.rmtree(history_dir)
+
 
 class StateHistoryManagerTests(TestCase):
     def setUp(self):

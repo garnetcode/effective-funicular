@@ -112,6 +112,7 @@ class ChimeraAgent:
         self.stag_update_frequency = self.hyperparams.get('stag_update_frequency', 10)
         self.gng_pruning_frequency = self.hyperparams.get('gng_pruning_frequency', 1000)
         self.gng_min_utility_threshold = self.hyperparams.get('gng_min_utility_threshold', 0.1)
+        self.world_model_weight_decay = self.hyperparams.get('world_model_weight_decay', 1e-6)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -433,7 +434,11 @@ class ChimeraAgent:
         wm_params = list(self.world_model.parameters())
         if isinstance(cortex, torch.nn.Module):
             wm_params += list(cortex.parameters())
-        wm_optimizer = torch.optim.Adam(wm_params, lr=self.hyperparams.get('world_model_lr', 0.001))
+        wm_optimizer = torch.optim.Adam(
+            wm_params,
+            lr=self.hyperparams.get('world_model_lr', 0.001),
+            weight_decay=self.world_model_weight_decay
+        )
 
         # --- Forward Pass ---
         obs_recon, reward_pred, kl_loss, _, _ = self.world_model(
