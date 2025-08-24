@@ -120,7 +120,7 @@ class ChimeraAgent:
         # h_t and z_t for the RSSM
         self.hidden_state = torch.zeros(1, self.hidden_dim)
         self.latent_state = torch.zeros(1, self.latent_dim)
-        self.last_action = torch.tensor(0)
+        self.last_action = torch.tensor([0])
         self.cortex_configs = cortex_configs or {}
 
         # Language Model setup (remains the same)
@@ -285,7 +285,7 @@ class ChimeraAgent:
         else:
             action = action_dist.sample().item()
 
-        action_tensor = torch.tensor(action)
+        action_tensor = torch.tensor([action])
         self.last_action = action_tensor
 
         return action, activation_path # Return path for replay buffer
