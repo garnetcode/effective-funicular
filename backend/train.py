@@ -36,116 +36,134 @@ def get_env_config(env):
 
 async def main(args):
     """
-    Main function to run the RL training loop with a Colosseum environment.
+    Main function to run the RL training loop with a Colosseum environment,
+    implementing the Wake-Sleep cycle.
     """
-    # --- Local Env for Config ---
+    # --- Environment and Agent Setup ---
     print(f"Inspecting local environment for configuration: {args.env}")
     local_env = gym.make(args.env)
     cortex_configs, cortex_id = get_env_config(local_env)
+    actual_action_dim = local_env.action_space.n
     local_env.close()
 
-    # --- Agent Initialization ---
     agent_id = args.agent_id or f"agent-{args.env}"
-    n_actions = 256  # Hardcoded as per user specification
-
+    # Hyperparameters for the agent and training loop
+    hyperparams = {
+        'learning_rate': args.lr,
+        'gamma': args.gamma,
+        'batch_size': args.batch_size,
+        'imagine_horizon': args.horizon,
+        'collect_interval': args.collect_interval,
+        'train_steps': args.train_steps,
+        'world_model_lr': 1e-3,
+        'actor_critic_lr': 3e-4,
+        'w_recon': 1.0, 'w_reward': 1.0, 'w_kl': 1.0,
+        'w_policy': 1.0, 'w_critic': 0.5, 'w_entropy': 1e-4,
+        'lambda': 0.95
+    }
     agent = ChimeraAgent(
         agent_id=agent_id,
-        dimensions=args.dims,
-        n_actions=n_actions,
+        max_obs_dim=256, # Assuming a max obs dim
+        max_action_dim=256, # Assuming a max action dim
         cortex_configs=cortex_configs,
         load_from_storage=not args.force_new,
-        hyperparams={'learning_rate': args.lr, 'gamma': args.gamma}
+        hyperparams=hyperparams
     )
-
     print(f"Agent '{agent_id}' configured for '{args.env}'.")
-    print(f"Agent brain dimensions: {args.dims}, Actions: {n_actions}")
 
     # --- Colosseum Connection ---
     player_token = args.token or str(uuid.uuid4())
     connector = ColosseumConnector(args.env, player_token, args.host, args.port)
     await connector.connect()
 
-    # --- Training Loop ---
-    total_rewards = []
+    # --- Main Training Loop (Wake-Sleep Cycle) ---
+    total_steps = 0
+    episode_num = 0
     try:
-        for episode in range(args.episodes):
-            print(f"--- Episode {episode + 1}/{args.episodes} ---")
-            episode_reward = 0
-            terminated = False
+        while total_steps < args.total_steps:
+            # --- Wake Phase: Collect Experience ---
+            print(f"\n--- Wake Phase: Collecting experience for {args.collect_interval} steps ---")
+            steps_collected = 0
+            while steps_collected < args.collect_interval:
+                episode_num += 1
+                print(f"--- Episode {episode_num} ---")
+                episode_reward = 0
 
-            # Wait for the game to start and for our turn
-            while True:
+                # Reset agent state at the start of each episode
+                agent.hidden_state, agent.latent_state = agent.world_model.get_initial_state()
+                agent.last_action = torch.tensor(0)
+
+                # Wait for game start/turn
                 msg = await connector.receive_message()
-                if not msg: break
+                if not msg or msg.get('type') == 'game.over': continue
+                if msg.get('type') == 'match.start': msg = await connector.receive_message()
 
-                if msg.get('type') == 'match.start':
-                    print("Match has started!")
-                elif msg.get('type') == 'game.turn':
-                    print("Agent's turn.")
-                    state = msg.get('observation')
-                    break # Ready to act
-                elif msg.get('type') == 'game.over':
-                    print("Game over before agent's turn. Starting new episode.")
-                    terminated = True
-                    break
+                state = msg.get('observation')
+                terminated = False
 
-            if terminated:
-                continue
+                while not terminated:
+                    # 1. Perceive, update state, and select action
+                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, np.array(state))
+                    action, _ = agent.select_action(actual_action_dim, activation_path)
 
-            # Main interaction loop for the episode
-            while not terminated:
-                # 1. Perceive the state and update the hidden state
-                hidden_state = agent.perceive_and_update_state(cortex_id, np.array(state))
+                    # 2. Step environment
+                    await connector.send_action(int(action))
+                    result_msg = await connector.receive_message()
+                    if not result_msg or result_msg.get('type') != 'action.result': break
 
-                # 2. Select an action
-                action, log_prob, stag_context = agent.select_action(local_env.action_space.n)
+                    # 3. Process results and record experience
+                    env_reward = result_msg.get('reward', 0)
+                    damage = result_msg.get('damage', 0) # Assuming environment provides damage
+                    next_state = result_msg.get('observation')
+                    terminated = result_msg.get('terminated', False)
 
-                # 3. Take action in the environment
-                await connector.send_action(int(action))
+                    # 4. Update STAG with the environmental reward
+                    agent.update_stag(h_normalized, env_reward)
 
-                # 4. Wait for the result of the action
-                result_msg = await connector.receive_message()
-                if not result_msg or result_msg.get('type') != 'action.result':
-                    print(f"Unexpected message or connection closed: {result_msg}")
-                    break
+                    # 5. Calculate internal rewards and add to env reward for policy training
+                    internal_reward = agent.get_internal_reward(damage, novelty)
+                    total_reward = env_reward + internal_reward
 
-                reward = result_msg.get('reward', 0)
-                print(f"Received reward: {reward}")
-                is_terminated = result_msg.get('terminated', False)
-                next_state = result_msg.get('observation')
+                    # 6. Store experience for learning
+                    agent.record_experience(h_t, z_t, activation_path, action, total_reward, np.array(next_state), terminated)
 
-                # 5. Record the experience
-                agent.record_experience(hidden_state, stag_context, np.array(state), action, log_prob, reward, np.array(next_state), is_terminated)
-                episode_reward += reward
+                    episode_reward += reward
+                    steps_collected += 1
+                    total_steps += 1
 
-                if is_terminated:
-                    print(f"Episode finished. Total reward: {episode_reward:.2f}")
-                    break
+                    if terminated:
+                        print(f"Episode finished. Reward: {episode_reward:.2f}, Total Steps: {total_steps}")
+                        break
 
-                # 6. Wait for the next turn
-                turn_msg = await connector.receive_message()
-                if not turn_msg or turn_msg.get('type') != 'game.turn':
-                    print(f"Unexpected message or connection closed: {turn_msg}")
-                    break
-                state = turn_msg.get('observation')
+                    # Wait for next turn
+                    turn_msg = await connector.receive_message()
+                    if not turn_msg or turn_msg.get('type') != 'game.turn': break
+                    state = turn_msg.get('observation')
 
-            # End of episode: Train the agent
-            agent.train()
-            total_rewards.append(episode_reward)
+            # --- Sleep Phase: Train on Collected Data ---
+            if len(agent.replay_buffer) > args.batch_size:
+                print(f"\n--- Sleep Phase: Training for {args.train_steps} steps ---")
+                for i in range(args.train_steps):
+                    # a. Train the world model
+                    wm_stats = agent.train_world_model(cortex_id)
+                    # b. Train the policy in imagination
+                    ac_stats = agent.train_policy_in_imagination()
 
-            if episode % 10 == 0 and episode > 0:
-                avg_reward = np.mean(total_rewards[-100:])
-                print(f"Episode {episode+1} | Avg Reward (last 100): {avg_reward:.2f}")
+                    if i % 50 == 0: # Log every 50 train steps
+                        print(f"  Train Step {i+1}/{args.train_steps} | WM Loss: {wm_stats.get('wm_loss', -1):.4f} | AC Loss: {ac_stats.get('ac_loss', -1):.4f}")
+            else:
+                print("Not enough data to enter sleep phase, continuing collection.")
 
-    except websockets.exceptions.ConnectionClosedOK:
-        print("Colosseum server closed the connection gracefully.")
+    except (websockets.exceptions.ConnectionClosedOK, KeyboardInterrupt):
+        print("\nTraining interrupted or server closed connection.")
     finally:
         await connector.close()
-        print("Training finished.")
-        print(f"Final agent state saved to {agent.storage_path}")
+        agent.save_state({"message": f"Training completed after {total_steps} steps."})
+        print("Training finished and agent state saved.")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a ChimeraAgent with a Colosseum environment.")
+    parser = argparse.ArgumentParser(description="Train a ChimeraAgent using the Dreamer (Wake-Sleep) algorithm.")
     parser.add_argument("--env", type=str, default="CartPole-v1", help="Name of the Colosseum game environment.")
     parser.add_argument("--agent_id", type=str, default=None, help="A unique ID for the agent. Defaults to 'agent-<env_name>'.")
     parser.add_argument("--token", type=str, default=None, help="Player token for authentication. A new one is generated if not provided.")

@@ -1,92 +1,48 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from .world_model.rssm import RSSM
+from .world_model.observation_model import ObservationModel
+from .world_model.reward_model import RewardModel
 
 class WorldModel(nn.Module):
     """
-    A Recurrent Latent World Model that combines an encoder, a recurrent core,
-    and a decoder to predict future states and rewards.
+    The complete Dreamer-style World Model.
+    This class encapsulates the RSSM, the Observation Model, and the Reward Model.
+    Its sole purpose is to learn a model of the world.
     """
-    def __init__(self, obs_dim, action_dim, latent_dim=64, hidden_dim=128):
-        super(WorldModel, self).__init__()
-        self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
-        self.action_dim = action_dim
+    def __init__(self, obs_dim, action_dim, latent_dim=32, hidden_dim=200, hyperparams=None):
+        super().__init__()
+        self.hyperparams = hyperparams or {}
 
-        # 1. Encoder: Compresses observation into a latent state (z)
-        self.encoder = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, latent_dim)
+        self.rssm = RSSM(obs_dim, action_dim, latent_dim, hidden_dim)
+        self.obs_decoder = ObservationModel(obs_dim, latent_dim, hidden_dim)
+        self.reward_model = RewardModel(latent_dim, hidden_dim)
+
+    def get_initial_state(self, batch_size=1):
+        """Returns the initial hidden and latent states."""
+        return (
+            torch.zeros(batch_size, self.rssm.hidden_dim),
+            torch.zeros(batch_size, self.rssm.latent_dim)
         )
 
-        # 2. Recurrent Core (GRU): Models temporal dynamics
-        # Input to GRU is the latent state + one-hot encoded action
-        self.recurrent_core = nn.GRUCell(latent_dim + action_dim, hidden_dim)
-
-        # 3. Decoder: Reconstructs observation and predicts reward from hidden state (h)
-        self.decoder_obs = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, obs_dim),
-            nn.Tanh()  # Ensure the output is in the same range as the cortex output [-1, 1]
-        )
-        self.decoder_reward = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-        self.decoder_value = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-
-    def forward(self, obs, action, h_prev):
+    def forward(self, obs, action, h_prev, z_prev):
         """
-        Performs one step of the world model loop.
-
-        Args:
-            obs (torch.Tensor): The current observation from the environment.
-            action (torch.Tensor): The action taken in the previous step.
-            h_prev (torch.Tensor): The previous hidden state of the recurrent core.
+        A full step of the world model, including encoding and prediction.
+        This is used during the "Wake" phase to train the world model itself.
 
         Returns:
-            tuple: (z, h_next, obs_pred, reward_pred, value_pred)
-                   - z: The new latent state.
-                   - h_next: The next hidden state.
-                   - obs_pred: The predicted next observation.
-                   - reward_pred: The predicted reward.
-                   - value_pred: The predicted state value.
+            obs_recon (torch.Tensor): Reconstructed observation.
+            reward_pred (torch.Tensor): Predicted reward.
+            kl_loss (torch.Tensor): KL divergence loss for regularization.
+            h_t (torch.Tensor): New deterministic state.
+            z_t (torch.Tensor): New stochastic state.
         """
-        # Ensure obs is 2D (batch_size, obs_dim)
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-        if action.dim() == 0:
-            action = action.unsqueeze(0)
-        if h_prev is not None and h_prev.dim() == 1:
-            h_prev = h_prev.unsqueeze(0)
+        # 1. Update state based on observation using the RSSM
+        h_t, z_t, kl_loss = self.rssm(obs, action, h_prev, z_prev)
 
-        # 1. Encode the observation to get the latent state
-        z = self.encoder(obs)
+        # 2. Reconstruct observation and predict reward from the new state
+        obs_recon = self.obs_decoder(z_t, h_t)
+        reward_pred = self.reward_model(z_t, h_t)
 
-        # 2. Prepare input for the recurrent core
-        # One-hot encode the action, ensuring it's 2D
-        action_squeezed = action.long().squeeze()
-        if action_squeezed.dim() == 0:
-            action_squeezed = action_squeezed.unsqueeze(0)
-        action_one_hot = F.one_hot(action_squeezed, num_classes=self.action_dim).float()
-
-        # Concatenate latent state and action
-        rnn_input = torch.cat([z, action_one_hot], dim=1)
-
-        # 3. Update the hidden state
-        h_next = self.recurrent_core(rnn_input, h_prev)
-
-        # 4. Decode the new hidden state to make predictions
-        obs_pred = self.decoder_obs(h_next)
-        reward_pred = self.decoder_reward(h_next)
-        value_pred = self.decoder_value(h_next)
-
-        # Return tensors with the batch dimension intact
-        return z, h_next, obs_pred, reward_pred, value_pred
+        return obs_recon, reward_pred, kl_loss, h_t, z_t
