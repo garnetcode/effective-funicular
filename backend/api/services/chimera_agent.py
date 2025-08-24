@@ -340,6 +340,21 @@ class ChimeraAgent:
         # The experience tuple will need to be updated for the new training regime
         self.replay_buffer.push(*args)
 
+    def train(self, cortex_id="vector_input"):
+        """
+        The main training loop that orchestrates the "sleep" phase of the agent,
+        which involves training the world model and then training the policy in imagination.
+        """
+        # Part 1: Train the World Model on real, recently collected data.
+        world_model_stats = self.train_world_model(cortex_id)
+
+        # Part 2: Train the Actor-Critic policy in imagined trajectories.
+        policy_stats = self.train_policy_in_imagination()
+
+        # Combine stats for logging
+        combined_stats = {**world_model_stats, **policy_stats}
+        return combined_stats
+
     def train_world_model(self, cortex_id="vector_input"):
         """
         Trains the World Model (RSSM, Obs/Reward Decoders) on a batch of real data.
