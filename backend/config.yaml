@@ -13,7 +13,7 @@ agent_history:
   base_snapshot_interval: 10 # How often to save a full "base" snapshot.
 
 # Main training settings
-episodes_per_env: 10000 # How many episodes each parallel agent should run
+episodes_per_env: 20 # How many episodes each parallel agent should run
 
 # Language Model (LLM) Integration
 language_model:

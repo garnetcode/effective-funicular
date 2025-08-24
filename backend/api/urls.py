@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path('sessions/create/', views.SessionCreate.as_view(), name='session-create'),
     path('environments/', views.EnvironmentList.as_view(), name='environment-list'),
     path('cortex_specifications/', views.CortexSpecificationList.as_view(), name='cortex-specification-list'),
     path('agents/', views.AgentList.as_view(), name='agent-list'),

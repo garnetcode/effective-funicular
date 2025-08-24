@@ -113,8 +113,10 @@ class Command(BaseCommand):
 
                     # --- Gameplay Loop for one episode ---
                     while not done:
-                        agent.perceive_and_update_state("vector_input", current_obs)
-                        action, log_prob, stag_context = agent.select_action(actual_action_dim)
+                        # Perceive the environment and get agent's internal state and novelty
+                        _, _, _, activation_path, novelty = agent.perceive_and_update_state("vector_input", current_obs)
+                        action, log_prob, stag_context = agent.select_action(actual_action_dim, activation_path)
+
 
                         await connector.send_action(action)
                         msg = await connector.receive_message()
@@ -132,17 +134,18 @@ class Command(BaseCommand):
                             done = msg.get("done")
 
                             # Get internal reward and update vitals
-                            internal_reward = agent._update_vitals_and_get_internal_reward()
+                            internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
                             total_reward = external_reward + internal_reward
 
                             # Record experience with the combined, immediate reward
                             agent.record_experience(
                                 agent.hidden_state,
-                                stag_context,
+                                agent.latent_state,
+                                activation_path,
                                 current_obs,
                                 action,
                                 log_prob,
-                                total_reward,  # Correct immediate reward
+                                total_reward,
                                 next_obs,
                                 done
                             )
@@ -153,14 +156,9 @@ class Command(BaseCommand):
                         elif msg_type == "game.over":
                             logger.debug(f"Game over message received. Final reward: {msg.get('final_reward')}")
                             done = True
-                            # Final state might have a reward, let's process it
-                            # Note: In many envs, the final reward is part of the last "action.taken"
-                            # This is for robustness.
-                            internal_reward = agent._update_vitals_and_get_internal_reward()
-                            final_reward = msg.get('reward', 0) + internal_reward # Use reward from game.over if present
-                            # We don't have a 'next_obs' here, but we can record the terminal experience
-                            # This depends on how the replay buffer and training handles terminal states.
-                            # For now, we assume the last 'action.taken' is sufficient.
+                            # Final state might have a reward, let's process it.
+                            # We assume the last 'action.taken' is sufficient for recording experience.
+                            # A more robust implementation might handle a final reward here.
                             continue
 
                         elif msg_type == "viewer.joined":
