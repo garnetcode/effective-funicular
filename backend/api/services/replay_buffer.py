@@ -3,8 +3,11 @@
 import random
 from collections import namedtuple, deque
 
+# The 'obs' is the raw observation from the environment before cortex processing.
+# 'h' and 'z' are the world model states *before* the action was taken.
+# 'activation_path' is the STAG activation path corresponding to the state (h, z).
 Experience = namedtuple('Experience',
-                        ('hidden_state', 'stag_context', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done'))
+                        ('h', 'z', 'activation_path', 'action', 'reward', 'next_obs', 'done'))
 
 class ReplayBuffer:
     def __init__(self, capacity):

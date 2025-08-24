@@ -8,6 +8,8 @@ import json
 import logging
 import numpy as np
 import torch
+import torch.nn as nn
+from torch.distributions import Normal, Categorical
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,25 @@ from .replay_buffer import ReplayBuffer, Experience
 from . import cortex as cortex_modules
 from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
+
+class StagContextProcessor(nn.Module):
+    """
+    Processes the STAG's activation path to create a rich context vector C_t.
+    This version uses a simple linear layer over the concatenated node weights.
+    """
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.processor = nn.Linear(input_dim, output_dim)
+
+    def forward(self, activation_path_weights):
+        # activation_path_weights is a list of weight vectors.
+        # We concatenate them to form a single input vector.
+        if not activation_path_weights:
+            return torch.zeros(1, self.processor.out_features) # Return a zero vector if path is empty
+
+        concatenated_weights = torch.cat(activation_path_weights, dim=0)
+        return self.processor(concatenated_weights.unsqueeze(0))
+
 
 def _initialize_cortexes(configs, output_dim):
     """
@@ -66,7 +87,7 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, max_obs_dim, max_action_dim, latent_dim=64, hidden_dim=128, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
+    def __init__(self, agent_id, max_obs_dim, max_action_dim, latent_dim=32, hidden_dim=200, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
         self.max_obs_dim = max_obs_dim
         self.max_action_dim = max_action_dim
@@ -83,20 +104,26 @@ class ChimeraAgent:
         self.gamma = self.hyperparams.get('gamma', 0.99)
         self.stag_expansion_threshold = self.hyperparams.get('stag_expansion_threshold', 0.1)
         self.max_grad_norm = self.hyperparams.get('max_grad_norm', 1.0)
+        # Max length of the STAG activation path for the context processor
+        self.max_stag_path_length = self.hyperparams.get('max_stag_path_length', 10)
+        self.stag_context_dim = self.hyperparams.get('stag_context_dim', 128)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
         self.energy = self.max_energy
         self.integrity = 100.0
+        self.max_integrity = 100.0
         self.metabolic_cost = 0.1
 
         # --- Initialize Agent State and Components ---
         self.steps_done = 0
+        # h_t and z_t for the RSSM
         self.hidden_state = torch.zeros(1, self.hidden_dim)
+        self.latent_state = torch.zeros(1, self.latent_dim)
         self.last_action = torch.tensor(0)
         self.cortex_configs = cortex_configs or {}
 
-        # Conditionally add language model config to cortex_configs
+        # Language Model setup (remains the same)
         lm_config = self.hyperparams.get('language_model', {})
         self.language_model_enabled = lm_config.get('enabled', False)
         embedding_model_id = None
@@ -106,208 +133,216 @@ class ChimeraAgent:
             generation_model_id = lm_config.get('generation_model_id')
             api_base = lm_config.get('api_base')
             embedding_dim = lm_config.get('embedding_dim')
-
             if embedding_model_id:
-                self.cortex_configs['language_cortex'] = {
-                    "type": "LanguageCortex",
-                    "params": {
-                        "model_id": embedding_model_id,
-                        "api_base": api_base,
-                        "embedding_dim": embedding_dim
-                    }
-                }
+                self.cortex_configs['language_cortex'] = {"type": "LanguageCortex", "params": {"model_id": embedding_model_id, "api_base": api_base, "embedding_dim": embedding_dim}}
 
-        # The agent's internal architecture is fixed to the max dimensions
+        # --- Initialize Architecture Components ---
         self.cortexes = _initialize_cortexes(self.cortex_configs, self.max_obs_dim)
-        self.world_model = WorldModel(self.max_obs_dim, self.max_action_dim, latent_dim, hidden_dim)
+
+        # World Model (RSSM-based)
+        self.world_model = WorldModel(self.max_obs_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
+
+        # STAG Framework
+        # The STAG still operates on the deterministic hidden state `h_t`
         self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
+
+        # STAG Context Processor
+        # Input dimension is the max path length * the dimension of a node's weight vector (hidden_dim)
+        self.stag_context_processor = StagContextProcessor(
+            input_dim=self.max_stag_path_length * self.hidden_dim,
+            output_dim=self.stag_context_dim
+        )
+
+        # Actor-Critic Planner
+        # Actor (Policy Head)
         self.action_head = ActionHead(
-            input_dim=self.hidden_dim * 2,  # Hidden state + STAG context vector
+            input_dim=self.hidden_dim + self.stag_context_dim,  # Takes h_t and C_t
             n_actions=self.max_action_dim,
             learning_rate=self.learning_rate
         )
+        # Critic (Value Head)
+        self.value_head = nn.Sequential(
+            nn.Linear(self.hidden_dim + self.latent_dim, 400), # Takes h_t and z_t
+            nn.ReLU(),
+            nn.Linear(400, 1)
+        )
+
         self.text_generation_head = None
         if self.language_model_enabled and generation_model_id:
             self.text_generation_head = TextGenerationHead(
                 model_path_or_id=generation_model_id,
                 input_dim=self.hidden_dim,
-                api_base=api_base  # Pass Ollama API base
+                api_base=api_base
             )
 
-        # Attempt to load saved state, otherwise save the initial state
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
             self.save_state(version_info={"message": "Initial state."})
 
-        # Initialize Replay Buffer for online learning
         buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
         self.replay_buffer = ReplayBuffer(buffer_capacity)
 
     def save_state(self, version_info={}):
         """Saves the agent's core models to a new version snapshot."""
-        # Consolidate all learnable model parameters into one dictionary for versioning
         learnable_params = {
             'world_model_state_dict': self.world_model.state_dict(),
-            'action_head_state_dict': self.action_head.state_dict(), # Use state_dict for weights only
-            # TODO: Add STAG and other components to versioning if they become learnable
+            'action_head_state_dict': self.action_head.state_dict(),
+            'value_head_state_dict': self.value_head.state_dict(),
+            'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
         }
         self.history_manager.save_snapshot(learnable_params, version_info)
 
     def load_state(self, version='latest'):
         """Loads the agent's core models from a version snapshot."""
         learnable_params = self.history_manager.load_snapshot(version)
-
         if learnable_params:
             self.world_model.load_state_dict(learnable_params['world_model_state_dict'])
             self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
-            # TODO: Load STAG state etc.
+            self.value_head.load_state_dict(learnable_params['value_head_state_dict'])
+            self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict')) # Use .get for backward compatibility
         else:
-            # This should only happen if there's no history
             print("Warning: No state to load.")
 
+    def perceive_and_update_state(self, cortex_id, raw_obs, damage_taken=0):
+        """
+        Processes observation, updates vitals, and updates the world model state.
+        """
+        # 1. Update vitals based on damage from the last step
+        self._update_vitals(damage_taken=damage_taken)
 
-    def perceive_and_update_state(self, cortex_id, raw_obs):
-        """
-        Processes a raw observation through a cortex, then updates the world
-        model's hidden state.
-        """
-        # 1. Process raw observation through the specified cortex
+        # 2. Process raw observation through the specified cortex
         obs_numpy = self.cortexes[cortex_id].process(raw_obs)
-        obs_tensor = torch.from_numpy(obs_numpy).float()
+        obs_tensor = torch.from_numpy(obs_numpy).float().unsqueeze(0)
 
-        # 2. Use the world model to update the hidden state
-        # The 'action' is the last action taken to get to this new observation.
+        # 3. Use the world model to update the agent's internal state (h_t, z_t)
         with torch.no_grad():
-            _, h_next, _, _, _ = self.world_model(obs_tensor, self.last_action, self.hidden_state)
+            # The world model's forward pass is now just for training. We need to call the rssm directly.
+            h_next, z_next, _ = self.world_model.rssm(obs_tensor, self.last_action, self.hidden_state, self.latent_state)
 
-        # 3. Update the agent's internal state
+        # 4. Update the agent's internal state
         self.hidden_state = h_next
+        self.latent_state = z_next
 
-        # The STAG framework now organizes the agent's internal, context-rich hidden states
+        # 5. The STAG framework organizes the agent's deterministic hidden state
         h_numpy = self.hidden_state.detach().numpy().flatten()
-
-        # Normalize the hidden state for GNG processing
         norm = np.linalg.norm(h_numpy)
-        if norm > 0:
-            h_normalized = h_numpy / norm
-        else:
-            h_normalized = h_numpy
+        h_normalized = h_numpy / norm if norm > 0 else h_numpy
 
-        # Find the correct terminal GNG and process the input using the normalized state
+        # Find the activation path and get the potential novelty signal (error)
+        terminal_node, winner_id, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+        novelty = 0
+        if terminal_node and winner_id is not None:
+            novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
+
+        # The GNG is now updated in a separate step after the reward is known.
+        return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty
+
+    def update_stag(self, h_normalized, r_env):
+        """
+        Updates the STAG/GNG with the given state and the environmental reward it produced.
+        This is called in the main training loop after a reward is received.
+        """
         terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_normalized)
         if terminal_node:
-            terminal_node['gng'].process_input(h_normalized)
+            # The GNG's utility update is driven by the environmental reward
+            terminal_node['gng'].process_input(h_normalized, reward=r_env)
 
-        return self.hidden_state
-
-    def select_action(self, actual_action_dim):
+    def select_action(self, actual_action_dim, activation_path):
         """
-        Selects an action based on the current internal state of the agent,
-        augmented with context from the STAG knowledge graph, and constrained
-        by the actual action space of the environment.
+        Selects an action using the policy π(a | h_t, C_t).
         """
-        internal_state = self.hidden_state
-        h_numpy = internal_state.detach().numpy().flatten()
+        # 1. Construct the context vector C_t from the STAG's activation path
+        path_weights = []
+        if activation_path:
+            for step in activation_path:
+                level_gng = self.stag.level_map[step['level_id']]
+                node_weight = level_gng.nodes[step['winner_id']]['weight']
+                path_weights.append(torch.from_numpy(node_weight).float())
 
-        # Normalize the hidden state for GNG processing
-        norm = np.linalg.norm(h_numpy)
-        if norm > 0:
-            h_normalized = h_numpy / norm
-        else:
-            h_normalized = h_numpy
+        # Pad the path to a fixed length
+        while len(path_weights) < self.max_stag_path_length:
+            path_weights.append(torch.zeros(self.hidden_dim))
 
-        # Find the current conceptual context from the STAG using the normalized state
-        terminal_level_node, winner_id, _ = self.stag.find_terminal_node_and_path(h_normalized)
+        # Process the path to get the context vector C_t
+        with torch.no_grad():
+            stag_context_vector = self.stag_context_processor(path_weights)
 
-        if winner_id is not None:
-            stag_context_vector = terminal_level_node['gng'].nodes[winner_id]['weight']
-            stag_context_vector = torch.from_numpy(stag_context_vector).float().unsqueeze(0)
-        else:
-            # If no specific node, use a zero vector as context
-            stag_context_vector = torch.zeros(1, self.hidden_dim)
-
-        # The ActionHead now receives both the transient hidden state and the stable STAG context
-        combined_input = torch.cat((internal_state, stag_context_vector), dim=1)
+        # 2. The ActionHead receives the deterministic state h_t and context C_t
+        combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
 
         with torch.no_grad():
-            action_logits = self.action_head(combined_input).squeeze(0)
+            action_dist = self.action_head(combined_input)
 
-        # Mask the logits to only consider valid actions for the current environment
-        valid_logits = action_logits[:actual_action_dim]
-        log_probs = torch.nn.functional.log_softmax(valid_logits, dim=-1)
-
-        # --- Epsilon-Greedy Exploration ---
-        epsilon_start = self.hyperparams.get('epsilon_start', 0.9)
-        epsilon_end = self.hyperparams.get('epsilon_end', 0.05)
-        epsilon_decay_steps = self.hyperparams.get('epsilon_decay_steps', 20000)
-
-        # Linear decay for epsilon
-        if self.steps_done < epsilon_decay_steps:
-            epsilon = epsilon_start - (epsilon_start - epsilon_end) * (self.steps_done / epsilon_decay_steps)
-        else:
-            epsilon = epsilon_end
+        # 3. Mask logits and select action
+        # Note: For simplicity, we sample from the full distribution. A more robust
+        # implementation would mask the logits before creating the distribution.
+        epsilon = self._get_epsilon()
         self.steps_done += 1
 
         if np.random.rand() < epsilon:
-            # Take a random action
             action = np.random.randint(0, actual_action_dim)
         else:
-            # Take action based on policy
-            action_probs_np = softmax(valid_logits.numpy())
-            action = np.random.choice(actual_action_dim, p=action_probs_np)
+            action = action_dist.sample().item()
 
-        # Get the log_prob for the action that was actually taken
         action_tensor = torch.tensor(action)
-        action_log_prob = log_probs[action]
-
-        # Store the chosen action for the next world model update
         self.last_action = action_tensor
 
-        return action, action_log_prob, stag_context_vector
+        return action, activation_path # Return path for replay buffer
 
-    def _update_vitals_and_get_internal_reward(self):
-        """
-        Updates agent's vitals and calculates an internal reward signal.
-        """
-        # --- Update Vitals ---
-        self.energy = max(0, self.energy - self.metabolic_cost)
+    def _get_epsilon(self):
+        epsilon_start = self.hyperparams.get('epsilon_start', 0.9)
+        epsilon_end = self.hyperparams.get('epsilon_end', 0.05)
+        epsilon_decay_steps = self.hyperparams.get('epsilon_decay_steps', 20000)
+        if self.steps_done < epsilon_decay_steps:
+            return epsilon_start - (epsilon_start - epsilon_end) * (self.steps_done / epsilon_decay_steps)
+        return epsilon_end
 
-        # --- Calculate Internal Reward ---
-        internal_reward = -self.metabolic_cost
+    def _update_vitals(self, damage_taken=0, energy_gain=0):
+        """Updates agent's vitals."""
+        # Update Integrity based on damage
+        self.integrity = max(0, self.integrity - damage_taken)
+        # Update Energy
+        self.energy = min(self.max_energy, self.energy - self.metabolic_cost + energy_gain)
 
-        # Get penalty parameters from hyperparams with defaults
-        low_energy_threshold = self.hyperparams.get('low_energy_threshold', 0.2)  # 20%
-        low_energy_penalty = self.hyperparams.get('low_energy_penalty', -10.0)
+    def get_internal_reward(self, damage_taken, novelty_signal):
+        """Calculates the total internal reward signal."""
+        internal_reward = -self.metabolic_cost # Base metabolic cost
 
-        # Apply penalty if energy is below the threshold
+        # Penalty for low energy
+        low_energy_threshold = self.hyperparams.get('low_energy_threshold', 0.2)
         if (self.energy / self.max_energy) < low_energy_threshold:
-            internal_reward += low_energy_penalty
+            internal_reward += self.hyperparams.get('low_energy_penalty', -10.0)
 
-        # TODO: Add reward/penalty for integrity changes
+        # Penalty for taking damage
+        damage_penalty_multiplier = self.hyperparams.get('damage_penalty_multiplier', -5.0)
+        internal_reward += damage_penalty_multiplier * damage_taken
+
+        # Reward for novelty (exploring new concepts in STAG)
+        novelty_reward_weight = self.hyperparams.get('novelty_reward_weight', 0.1)
+        internal_reward += novelty_reward_weight * novelty_signal
 
         return internal_reward
 
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer."""
+        # The experience tuple will need to be updated for the new training regime
         self.replay_buffer.push(*args)
 
-    def train(self, cortex_id="vector_input"):
+    def train_world_model(self, cortex_id="vector_input"):
         """
-        Samples a batch from the replay buffer and performs one step of training
-        for the World Model, the specified Cortex, and the Action Head.
+        Trains the World Model (RSSM, Obs/Reward Decoders) on a batch of real data.
+        This is the first part of the "Sleep" phase.
         """
         if cortex_id not in self.cortexes:
             logger.error(f"Invalid cortex_id '{cortex_id}' provided for training.")
-            return {"status": f"Invalid cortex_id '{cortex_id}'"}
+            return {}
 
         cortex = self.cortexes[cortex_id]
         if not isinstance(cortex, torch.nn.Module):
-            # This cortex is not trainable, so we can't proceed with joint training.
-            # We will train the world model on the pre-processed observations.
-            logger.warning(f"Cortex '{cortex_id}' is not a trainable torch.nn.Module. Only training WorldModel and ActionHead.")
-            # TODO: A separate training path could be implemented here if needed.
-            return {"status": f"Cortex '{cortex_id}' is not trainable."}
+            logger.warning(f"Cortex '{cortex_id}' is not trainable. Only training WorldModel.")
+            # For non-trainable cortexes, we can still proceed
+            pass
 
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < batch_size:
@@ -317,84 +352,157 @@ class ChimeraAgent:
         experiences = self.replay_buffer.sample(batch_size)
         batch = Experience(*zip(*experiences))
 
-        hidden_state_batch = torch.stack([h.detach() for h in batch.hidden_state]).squeeze(1)
-        stag_context_batch = torch.stack([s.detach() for s in batch.stag_context]).squeeze(1)
-
-        # The replay buffer stores raw numpy observations.
-        # We need to pad them and convert to a tensor for the cortex.
+        # The replay buffer stores raw numpy observations. Process them.
         def pad_observations(obs_list):
-            padded_obs = []
-            for o in obs_list:
-                padded = np.zeros(self.max_obs_dim)
-                padded[:o.shape[0]] = o
-                padded_obs.append(padded)
+            padded_obs = [np.zeros(self.max_obs_dim) for _ in range(len(obs_list))]
+            for i, o in enumerate(obs_list):
+                padded_obs[i][:o.shape[0]] = o
             return torch.from_numpy(np.array(padded_obs)).float()
 
-        obs_batch_raw = pad_observations(batch.obs)
+        # We need the *next* observation to calculate reconstruction loss
         next_obs_batch_raw = pad_observations(batch.next_obs)
 
+        # Process observations through the cortex
+        obs_batch_processed = cortex(next_obs_batch_raw) # Note: we are predicting the *next* observation
+
+        h_prev_batch = torch.stack(batch.h).squeeze(1)
+        z_prev_batch = torch.stack(batch.z).squeeze(1)
         action_batch = torch.tensor(batch.action)
         reward_batch = torch.tensor(batch.reward).float()
-        done_batch = torch.tensor(batch.done).float()
 
-        # --- Initialize Optimizers ---
-        # Combine parameters of all models for joint training
-        all_params = list(self.world_model.parameters()) + list(cortex.parameters()) + list(self.action_head.parameters())
-        optimizer = torch.optim.Adam(all_params, lr=self.learning_rate)
+        # --- Optimizers ---
+        wm_params = list(self.world_model.parameters())
+        if isinstance(cortex, torch.nn.Module):
+            wm_params += list(cortex.parameters())
+        wm_optimizer = torch.optim.Adam(wm_params, lr=self.hyperparams.get('world_model_lr', 0.001))
 
-        # --- World Model and Cortex Training ---
-        # Process raw observations through the cortex first
-        obs_batch_processed = cortex(obs_batch_raw)
-        with torch.no_grad(): # Don't need gradients for the target
-            next_obs_batch_processed = cortex(next_obs_batch_raw)
+        # --- Forward Pass ---
+        obs_recon, reward_pred, kl_loss, _, _ = self.world_model(
+            obs_batch_processed, action_batch, h_prev_batch, z_prev_batch
+        )
 
-        # The world model predicts the next processed state from the processed current state
-        _, _, obs_pred_batch, reward_pred_batch, value_pred_batch = self.world_model(obs_batch_processed, action_batch, hidden_state_batch)
-        with torch.no_grad():
-            _, _, _, _, next_value_pred_batch = self.world_model(next_obs_batch_processed, action_batch, hidden_state_batch) # Action here is not used for next_value
-
-        reconstruction_loss = torch.nn.functional.mse_loss(obs_pred_batch, next_obs_batch_processed)
-        reward_loss = torch.nn.functional.mse_loss(reward_pred_batch, reward_batch.unsqueeze(1))
+        # --- Loss Calculation (ℒ_WM) ---
+        recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_batch_processed)
+        reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_batch.unsqueeze(1))
         
-        # --- Critic (Value) Loss ---
-        target_values = reward_batch.unsqueeze(1) + self.gamma * next_value_pred_batch * (1 - done_batch.unsqueeze(1))
-        critic_loss = torch.nn.functional.mse_loss(value_pred_batch, target_values.detach())
+        w_recon = self.hyperparams.get('w_recon', 1.0)
+        w_reward = self.hyperparams.get('w_reward', 1.0)
+        w_kl = self.hyperparams.get('w_kl', 1.0)
 
-        # --- Action Head Training (Actor) ---
-        advantage = (target_values - value_pred_batch).detach()
+        world_model_loss = w_recon * recon_loss + w_reward * reward_loss + w_kl * kl_loss
 
-        combined_input_batch = torch.cat((hidden_state_batch, stag_context_batch), dim=1)
-        action_logits = self.action_head(combined_input_batch)
-        log_probs = torch.nn.functional.log_softmax(action_logits, dim=-1)
-        log_probs_for_actions = log_probs.gather(1, action_batch.unsqueeze(1))
-
-        policy_loss = (-log_probs_for_actions * advantage).mean()
-
-        # --- Entropy Regularization ---
-        entropy = -(torch.exp(log_probs) * log_probs).sum(dim=-1).mean()
-        entropy_bonus = self.hyperparams.get('entropy_bonus', 0.01) * entropy
-
-        # --- Total Loss ---
-        policy_loss_weight = self.hyperparams.get('policy_loss_weight', 1.0)
-        value_loss_weight = self.hyperparams.get('value_loss_weight', 0.5)
-        reconstruction_loss_weight = self.hyperparams.get('reconstruction_loss_weight', 1.0)
-        reward_loss_weight = self.hyperparams.get('reward_loss_weight', 1.0)
-
-        total_loss = (reconstruction_loss_weight * reconstruction_loss + 
-                      reward_loss_weight * reward_loss + 
-                      value_loss_weight * critic_loss + 
-                      policy_loss_weight * policy_loss - 
-                      entropy_bonus)
-
-        optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(all_params, max_norm=self.max_grad_norm)
-        optimizer.step()
+        # --- Backpropagation ---
+        wm_optimizer.zero_grad()
+        world_model_loss.backward()
+        torch.nn.utils.clip_grad_norm_(wm_params, self.max_grad_norm)
+        wm_optimizer.step()
 
         return {
-            "status": "Training step complete",
-            "total_loss": total_loss.item(),
-            "world_model_loss": (reconstruction_loss + reward_loss).item(),
+            "wm_loss": world_model_loss.item(),
+            "recon_loss": recon_loss.item(),
+            "reward_loss": reward_loss.item(),
+            "kl_loss": kl_loss.item()
+        }
+
+    def train_policy_in_imagination(self):
+        """
+        Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
+        This is the second part of the "Sleep" phase.
+        """
+        batch_size = self.hyperparams.get('batch_size', 32)
+        if len(self.replay_buffer) < batch_size:
+            return {}
+
+        horizon = self.hyperparams.get('imagine_horizon', 15)
+
+        # --- Sample starting states from real data ---
+        experiences = self.replay_buffer.sample(batch_size)
+        batch = Experience(*zip(*experiences))
+        h_start = torch.stack(batch.h).squeeze(1)
+        z_start = torch.stack(batch.z).squeeze(1)
+
+        # --- Imagine Trajectories ---
+        h_t, z_t = h_start, z_start
+        imagined_h = [h_t]
+        imagined_z = [z_t]
+        imagined_actions = []
+
+        # The STAG context is fixed for the duration of an imagined trajectory,
+        # based on the starting state.
+        # This is a simplification; a more complex version could update the context.
+        path_weights = []
+        for step in batch.activation_path[0]: # Using first path as representative
+            level_gng = self.stag.level_map[step['level_id']]
+            node_weight = level_gng.nodes[step['winner_id']]['weight']
+            path_weights.append(torch.from_numpy(node_weight).float())
+        while len(path_weights) < self.max_stag_path_length:
+            path_weights.append(torch.zeros(self.hidden_dim))
+        stag_context = self.stag_context_processor(path_weights)
+
+        with torch.no_grad():
+            for _ in range(horizon):
+                # Actor selects action based on h_t and C_t
+                action_input = torch.cat([h_t, stag_context.repeat(h_t.size(0), 1)], dim=1)
+                action_dist = self.action_head(action_input)
+                action = action_dist.sample()
+
+                # World model predicts next state
+                h_t, prior_mean, prior_std = self.world_model.rssm.transition_model(z_t, action, h_t)
+                z_t = Normal(prior_mean, prior_std).rsample()
+
+                imagined_h.append(h_t)
+                imagined_z.append(z_t)
+                imagined_actions.append(action)
+
+        imagined_h = torch.stack(imagined_h) # Shape: [horizon+1, batch, hidden_dim]
+        imagined_z = torch.stack(imagined_z) # Shape: [horizon+1, batch, latent_dim]
+        imagined_actions = torch.stack(imagined_actions) # Shape: [horizon, batch]
+
+        # --- Predict Rewards and Values for Imagined Trajectory ---
+        imagined_rewards = self.world_model.reward_model(imagined_z, imagined_h).squeeze(-1)
+        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z], dim=-1)).squeeze(-1)
+
+        # --- Calculate Value Targets (Lambda-Return) ---
+        lambda_ = self.hyperparams.get('lambda', 0.95)
+        returns = torch.zeros_like(imagined_values[-1])
+        lambda_returns = []
+        for t in reversed(range(horizon)):
+            # V_target = r_t + gamma * ( (1-lambda) * V(s_{t+1}) + lambda * V_target_{t+1} )
+            returns = imagined_rewards[t] + self.gamma * ((1 - lambda_) * imagined_values[t+1] + lambda_ * returns)
+            lambda_returns.append(returns)
+        lambda_returns = torch.stack(list(reversed(lambda_returns)))
+
+        # --- Actor-Critic Loss Calculation (ℒ_AC) ---
+        # Actor Loss
+        advantage = (lambda_returns - imagined_values[:-1]).detach()
+        action_input = torch.cat([imagined_h[:-1], stag_context.repeat(horizon, h_t.size(0), 1)], dim=-1)
+        log_probs = self.action_head.get_log_probs(action_input, imagined_actions)
+        policy_loss = -(log_probs * advantage).mean()
+
+        # Critic Loss
+        critic_loss = torch.nn.functional.mse_loss(imagined_values[:-1], lambda_returns.detach())
+
+        # Entropy Bonus
+        entropy = self.action_head.get_entropy(action_input).mean()
+
+        # --- Total AC Loss and Backpropagation ---
+        w_policy = self.hyperparams.get('w_policy', 1.0)
+        w_critic = self.hyperparams.get('w_critic', 0.5)
+        w_entropy = self.hyperparams.get('w_entropy', 0.001)
+
+        ac_loss = w_policy * policy_loss + w_critic * critic_loss - w_entropy * entropy
+
+        ac_optimizer = torch.optim.Adam(
+            list(self.action_head.parameters()) + list(self.value_head.parameters()),
+            lr=self.hyperparams.get('actor_critic_lr', 0.0003)
+        )
+        ac_optimizer.zero_grad()
+        ac_loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(self.action_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
+        ac_optimizer.step()
+
+        return {
+            "ac_loss": ac_loss.item(),
             "policy_loss": policy_loss.item(),
             "critic_loss": critic_loss.item(),
             "entropy": entropy.item()
