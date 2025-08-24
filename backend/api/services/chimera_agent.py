@@ -522,6 +522,8 @@ class ChimeraAgent:
         # --- Actor-Critic Loss Calculation (ℒ_AC) ---
         # Actor Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
+        # Normalize advantages to stabilize training
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
         log_probs = self.action_head.get_log_probs(action_input, imagined_actions)
         policy_loss = -(log_probs * advantage).mean()
