@@ -108,6 +108,8 @@ class ChimeraAgent:
         self.max_stag_path_length = self.hyperparams.get('max_stag_path_length', 10)
         self.stag_context_dim = self.hyperparams.get('stag_context_dim', 128)
         self.use_stag_in_ac_loss = self.hyperparams.get('use_stag_in_ac_loss', True)
+        self.world_model_pretrain_steps = self.hyperparams.get('world_model_pretrain_steps', 5000)
+        self.stag_update_frequency = self.hyperparams.get('stag_update_frequency', 10)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -226,16 +228,20 @@ class ChimeraAgent:
         self.hidden_state = h_next
         self.latent_state = z_next
 
-        # 5. The STAG framework organizes the agent's deterministic hidden state
-        h_numpy = self.hidden_state.detach().numpy().flatten()
-        norm = np.linalg.norm(h_numpy)
-        h_normalized = h_numpy / norm if norm > 0 else h_numpy
-
-        # Find the activation path and get the potential novelty signal (error)
-        terminal_node, winner_id, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+        # 5. Conditionally engage the STAG framework
+        h_normalized = None
+        activation_path = []
         novelty = 0
-        if terminal_node and winner_id is not None:
-            novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
+        # Only engage STAG if we are past the pre-training phase.
+        if self.steps_done > self.world_model_pretrain_steps:
+            h_numpy = self.hidden_state.detach().numpy().flatten()
+            norm = np.linalg.norm(h_numpy)
+            h_normalized = h_numpy / norm if norm > 0 else h_numpy
+
+            # Find the activation path and get the potential novelty signal (error)
+            terminal_node, winner_id, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+            if terminal_node and winner_id is not None:
+                novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
 
         # The GNG is now updated in a separate step after the reward is known.
         return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty
@@ -245,6 +251,14 @@ class ChimeraAgent:
         Updates the STAG/GNG with the given state and the environmental reward it produced.
         This is called in the main training loop after a reward is received.
         """
+        # Gate the update based on pre-training and update frequency.
+        if self.steps_done <= self.world_model_pretrain_steps or \
+           self.steps_done % self.stag_update_frequency != 0:
+            return
+
+        if h_normalized is None: # Should not happen if logic is correct, but as a safeguard.
+            return
+
         terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_normalized)
         if terminal_node:
             # The GNG's utility update is driven by the environmental reward
@@ -493,8 +507,9 @@ class ChimeraAgent:
 
             stag_context_batch = torch.cat(stag_contexts, dim=0)
 
-            # If STAG is disabled for training, use a zero vector for the context.
-            if not self.use_stag_in_ac_loss:
+            # If STAG is disabled for training OR we are in the pre-training phase,
+            # use a zero vector for the context.
+            if not self.use_stag_in_ac_loss or self.steps_done <= self.world_model_pretrain_steps:
                 stag_context_batch = torch.zeros_like(stag_context_batch)
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t

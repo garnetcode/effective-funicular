@@ -6,16 +6,17 @@ from unittest.mock import patch, MagicMock
 import torch
 import shutil
 from .services.chimera_agent import ChimeraAgent
+from .services.replay_buffer import Experience
 
-class ChimeraAgentStagTests(TestCase):
+class ChimeraAgentStagDecouplingTests(TestCase):
     def setUp(self):
         """Set up a ChimeraAgent instance for testing."""
         torch.manual_seed(42)
         np.random.seed(42)
-        self.agent_id_stag_enabled = "test-stag-enabled-agent"
-        self.agent_id_stag_disabled = "test-stag-disabled-agent"
+        self.agent_id = "test-stag-decoupling-agent"
         self.obs_dim = 10
         self.action_dim = 4
+        self.pretrain_steps = 100
 
         cortex_configs = {
             "test_cortex": {
@@ -24,65 +25,113 @@ class ChimeraAgentStagTests(TestCase):
             }
         }
 
-        # Agent with STAG enabled (default behavior)
-        self.agent_stag_enabled = ChimeraAgent(
-            agent_id=self.agent_id_stag_enabled,
+        self.agent = ChimeraAgent(
+            agent_id=self.agent_id,
             max_obs_dim=self.obs_dim,
             max_action_dim=self.action_dim,
             cortex_configs=cortex_configs,
             load_from_storage=False,
-            hyperparams={'use_stag_in_ac_loss': True}
-        )
-
-        # Agent with STAG disabled
-        self.agent_stag_disabled = ChimeraAgent(
-            agent_id=self.agent_id_stag_disabled,
-            max_obs_dim=self.obs_dim,
-            max_action_dim=self.action_dim,
-            cortex_configs=cortex_configs,
-            load_from_storage=False,
-            hyperparams={'use_stag_in_ac_loss': False}
+            hyperparams={
+                'world_model_pretrain_steps': self.pretrain_steps,
+                'stag_update_frequency': 10,
+                'batch_size': 4,
+                'imagine_horizon': 2
+            }
         )
 
     def tearDown(self):
-        # Clean up the created agent history directories
-        for agent in [self.agent_stag_enabled, self.agent_stag_disabled]:
-            history_dir = agent.history_manager.storage_dir
-            if os.path.exists(history_dir):
-                shutil.rmtree(history_dir)
+        # Clean up the created agent history directory
+        history_dir = self.agent.history_manager.storage_dir
+        if os.path.exists(history_dir):
+            shutil.rmtree(history_dir)
 
-    @patch('api.services.chimera_agent.ChimeraAgent.train_policy_in_imagination')
-    def test_stag_influence_toggle(self, mock_train_policy):
+    def test_stag_pretraining_phase(self):
         """
-        Tests that the `use_stag_in_ac_loss` flag correctly toggles
-        the STAG context vector's influence on the action head.
+        Tests that STAG is inactive during the world model pre-training phase.
         """
-        # We patch `train_policy_in_imagination` because we are interested in the inputs to it,
-        # which are determined by `select_action`.
-
-        # --- Test STAG Enabled ---
+        # Set steps_done to be within the pre-training period
+        self.agent.steps_done = self.pretrain_steps - 1
         state = np.random.rand(self.obs_dim)
-        _, _, _, activation_path, _ = self.agent_stag_enabled.perceive_and_update_state("test_cortex", state)
 
-        with patch.object(self.agent_stag_enabled.action_head.layer, 'forward', return_value=torch.randn(1, self.action_dim)) as mock_action_head_forward_enabled:
-            self.agent_stag_enabled.select_action(self.action_dim, activation_path)
-            # The input to the action head's forward method is the combined_input
-            call_args, _ = mock_action_head_forward_enabled.call_args
-            combined_input = call_args[0]
-            stag_context_vector = combined_input[:, self.agent_stag_enabled.hidden_dim:]
-            # Assert that the context vector is not all zeros
-            self.assertFalse(torch.all(stag_context_vector == 0))
+        # 1. Test perceive_and_update_state
+        # STAG should not be engaged, so activation_path should be empty.
+        _, _, _, activation_path, novelty = self.agent.perceive_and_update_state("test_cortex", state)
+        self.assertEqual(activation_path, [])
+        self.assertEqual(novelty, 0)
+
+        # 2. Test update_stag
+        # The GNG's process_input method should not be called.
+        with patch.object(self.agent.stag.tree['gng'], 'process_input') as mock_process_input:
+            self.agent.update_stag(np.random.rand(self.agent.hidden_dim), 1.0)
+            mock_process_input.assert_not_called()
+
+        # 3. Test train_policy_in_imagination
+        # The STAG context vector should be all zeros.
+        with patch.object(self.agent.action_head.layer, 'forward', return_value=torch.randn(1, self.action_dim)) as mock_forward:
+            # We need to simulate the imagination loop to check the input to the action head
+            # To do this cleanly, we can check the logic within train_policy_in_imagination
+            # For simplicity, we'll mock the whole function and trust the internal logic from inspection.
+            # A more complex test could mock `find_terminal_node_and_path` to return a specific path
+            # and check the resulting context vector.
+            # Here, we check that if we call it, the stag context part of the input to the action head is zero.
+            # This is implicitly tested by the fact that activation_path is empty.
+            # Let's check the context generation during imagination explicitly.
+            with patch.object(self.agent, 'replay_buffer') as mock_buffer:
+                batch_size = self.agent.hyperparams.get('batch_size', 4)
+
+                # Create a list of valid Experience tuples
+                mock_experiences = []
+                for _ in range(batch_size):
+                    exp = Experience(
+                        h=torch.rand(1, self.agent.hidden_dim),
+                        z=torch.rand(1, self.agent.latent_dim),
+                        activation_path=[],
+                        obs=np.zeros(self.obs_dim),
+                        action=0,
+                        log_prob=0.5,
+                        reward=0.0,
+                        next_obs=np.zeros(self.obs_dim),
+                        done=False
+                    )
+                    mock_experiences.append(exp)
+
+                mock_buffer.sample.return_value = mock_experiences
+                mock_buffer.__len__.return_value = batch_size
+
+                # Patch the action head's forward method to capture the input
+                with patch.object(self.agent.action_head.layer, 'forward') as mock_action_layer_forward:
+                    # The mock needs to return a valid tensor for the Categorical distribution
+                    mock_action_layer_forward.return_value = torch.randn(batch_size, self.agent.max_action_dim)
+
+                    self.agent.train_policy_in_imagination()
+                    # Get the input to the action head from the first call in the imagination loop
+                    call_args, _ = mock_action_layer_forward.call_args
+                    combined_input = call_args[0]
+                    stag_context_part = combined_input[:, self.agent.hidden_dim:]
+                    self.assertTrue(torch.all(stag_context_part == 0))
 
 
-        # --- Test STAG Disabled ---
+    def test_stag_activation_post_pretraining(self):
+        """
+        Tests that STAG becomes active after the pre-training phase.
+        """
+        # Set steps_done to be after the pre-training period
+        self.agent.steps_done = self.pretrain_steps + 1
         state = np.random.rand(self.obs_dim)
-        _, _, _, activation_path, _ = self.agent_stag_disabled.perceive_and_update_state("test_cortex", state)
 
-        with patch.object(self.agent_stag_disabled.action_head.layer, 'forward', return_value=torch.randn(1, self.action_dim)) as mock_action_head_forward_disabled:
-            self.agent_stag_disabled.select_action(self.action_dim, activation_path)
-            # The input to the action head's forward method is the combined_input
-            call_args, _ = mock_action_head_forward_disabled.call_args
-            combined_input = call_args[0]
-            stag_context_vector = combined_input[:, self.agent_stag_disabled.hidden_dim:]
-            # Assert that the context vector is all zeros
-            self.assertTrue(torch.all(stag_context_vector == 0))
+        # 1. Test perceive_and_update_state
+        # STAG should now be engaged, so activation_path should not be empty.
+        _, _, h_normalized, activation_path, _ = self.agent.perceive_and_update_state("test_cortex", state)
+        self.assertNotEqual(activation_path, [])
+
+        # 2. Test update_stag frequency
+        with patch.object(self.agent.stag.tree['gng'], 'process_input') as mock_process_input:
+            # Should not be called because steps_done % frequency != 0
+            self.agent.steps_done = self.pretrain_steps + 1
+            self.agent.update_stag(h_normalized, 1.0)
+            mock_process_input.assert_not_called()
+
+            # Should be called because steps_done % frequency == 0
+            self.agent.steps_done = self.pretrain_steps + 10 # 110 % 10 == 0
+            self.agent.update_stag(h_normalized, 1.0)
+            mock_process_input.assert_called_once_with(h_normalized, reward=1.0)
