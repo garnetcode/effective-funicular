@@ -1,7 +1,7 @@
 # Configuration for training the ChimeraAgent
 
 # Environment settings
-env_name: "LunarLander-v2"
+env_name: "MountainCar-v0"
 
 # Agent settings
 default_agent_id_prefix: "Kymera-"
@@ -45,3 +45,4 @@ agent_config:
     epsilon_decay_steps: 20000
     burnin_steps: 1000
     policy_train_frequency: 10
+    use_internal_reward: false
