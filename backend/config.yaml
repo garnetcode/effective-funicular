@@ -39,3 +39,7 @@ agent_config:
     # Vitals-based reward shaping
     low_energy_threshold: 0.2 # 20%
     low_energy_penalty: -10.0
+    # Epsilon-greedy exploration
+    epsilon_start: 0.9
+    epsilon_end: 0.05
+    epsilon_decay_steps: 20000
