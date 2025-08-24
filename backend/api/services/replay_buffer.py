@@ -7,7 +7,8 @@ from collections import namedtuple, deque
 # 'h' and 'z' are the world model states *before* the action was taken.
 # 'activation_path' is the STAG activation path corresponding to the state (h, z).
 Experience = namedtuple('Experience',
-                        ('h', 'z', 'activation_path', 'action', 'reward', 'next_obs', 'done'))
+                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done'))
+
 
 class ReplayBuffer:
     def __init__(self, capacity):
