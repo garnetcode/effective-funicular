@@ -452,6 +452,7 @@ class ChimeraAgent:
         imagined_h = [h_t]
         imagined_z = [z_t]
         imagined_actions = []
+        imagined_stag_contexts = []
 
         # --- Imagine Trajectories with Dynamic STAG Context ---
         with torch.no_grad():
@@ -494,10 +495,13 @@ class ChimeraAgent:
                 imagined_h.append(h_t)
                 imagined_z.append(z_t)
                 imagined_actions.append(action)
+                imagined_stag_contexts.append(stag_context_batch)
 
         imagined_h = torch.stack(imagined_h) # Shape: [horizon+1, batch, hidden_dim]
         imagined_z = torch.stack(imagined_z) # Shape: [horizon+1, batch, latent_dim]
         imagined_actions = torch.stack(imagined_actions) # Shape: [horizon, batch]
+        imagined_stag_contexts = torch.stack(imagined_stag_contexts) # Shape: [horizon, batch, context_dim]
+
 
         # --- Predict Rewards and Values for Imagined Trajectory ---
         imagined_rewards = self.world_model.reward_model(imagined_z, imagined_h).squeeze(-1)
@@ -516,7 +520,7 @@ class ChimeraAgent:
         # --- Actor-Critic Loss Calculation (ℒ_AC) ---
         # Actor Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
-        action_input = torch.cat([imagined_h[:-1], stag_context.repeat(horizon, h_t.size(0), 1)], dim=-1)
+        action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
         log_probs = self.action_head.get_log_probs(action_input, imagined_actions)
         policy_loss = -(log_probs * advantage).mean()
 
