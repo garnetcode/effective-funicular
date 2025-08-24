@@ -18,8 +18,13 @@ class GNG_Engine:
         self.dimensions = dimensions
 
         # Hyperparameters
+        # Tuning phase learning rates (using existing param names)
         self.winner_learning_rate = kwargs.get('gng_winner_learning_rate', 0.1)
         self.neighbor_learning_rate = kwargs.get('gng_neighbor_learning_rate', 0.01)
+        # Ordering phase params
+        self.ordering_phase_steps = kwargs.get('gng_ordering_phase_steps', 2000)
+        self.winner_learning_rate_initial = kwargs.get('gng_winner_learning_rate_initial', 0.8)
+        self.neighbor_learning_rate_initial = kwargs.get('gng_neighbor_learning_rate_initial', 0.1)
         self.max_edge_age = kwargs.get('gng_max_edge_age', 50)
         self.n_iter_before_neuron_added = kwargs.get('gng_n_iter_before_neuron_added', 100)
         self.after_split_error_decay_rate = kwargs.get('gng_after_split_error_decay_rate', 0.5)
@@ -93,8 +98,16 @@ class GNG_Engine:
         self.nodes[s1_id]['utility'] += self.utility_gain * (1 + reward_gain)
 
         # 3. Adaptation with Dynamic Learning Rates
+        # Select learning rates based on the current phase (ordering vs. tuning)
+        if self._iterations < self.ordering_phase_steps:
+            current_winner_lr = self.winner_learning_rate_initial
+            current_neighbor_lr = self.neighbor_learning_rate_initial
+        else:
+            current_winner_lr = self.winner_learning_rate
+            current_neighbor_lr = self.neighbor_learning_rate
+
         winner_utility = self.nodes[s1_id]['utility']
-        dynamic_winner_lr = self.winner_learning_rate / (1e-5 + np.log1p(winner_utility))
+        dynamic_winner_lr = current_winner_lr / (1e-5 + np.log1p(winner_utility))
         self.nodes[s1_id]['weight'] += dynamic_winner_lr * (input_vector - self.nodes[s1_id]['weight'])
 
         # Re-normalize the winner's weight vector
@@ -106,7 +119,7 @@ class GNG_Engine:
         neighbor_ids = self._get_neighbors(s1_id)
         for n_id in neighbor_ids:
             neighbor_utility = self.nodes[n_id]['utility']
-            dynamic_neighbor_lr = self.neighbor_learning_rate / (1e-5 + np.log1p(neighbor_utility))
+            dynamic_neighbor_lr = current_neighbor_lr / (1e-5 + np.log1p(neighbor_utility))
             self.nodes[n_id]['weight'] += dynamic_neighbor_lr * (input_vector - self.nodes[n_id]['weight'])
 
             # Re-normalize the neighbor's weight vector

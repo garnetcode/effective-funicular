@@ -122,6 +122,37 @@ class GNG_EngineTests(TestCase):
         # The only remaining nodes are 0, 2, 4, which are not connected in this test setup.
         self.assertEqual(len(self.gng.edges), 0)
 
+    def test_two_phase_learning_rate(self):
+        """Tests that the GNG correctly switches from ordering to tuning learning rates."""
+        gng_2phase = GNG_Engine(
+            dimensions=2,
+            gng_ordering_phase_steps=10,
+            gng_winner_learning_rate_initial=0.8,
+            gng_winner_learning_rate=0.1 # This is the tuning rate
+        )
+        input_vector = np.array([0.5, 0.5])
+
+        # --- Test Ordering Phase ---
+        gng_2phase._iterations = 5 # Well within the ordering phase
+        winner_id, _ = gng_2phase._find_winners(input_vector)
+        initial_weight = gng_2phase.nodes[winner_id]['weight'].copy()
+        gng_2phase.nodes[winner_id]['utility'] = 1.0 # Set utility to a known value
+
+        gng_2phase.process_input(input_vector)
+        ordering_weight_change = np.linalg.norm(gng_2phase.nodes[winner_id]['weight'] - initial_weight)
+
+        # --- Test Tuning Phase ---
+        gng_2phase._iterations = 15 # Past the ordering phase
+        # Reset the weight and utility to have a fair comparison
+        gng_2phase.nodes[winner_id]['weight'] = initial_weight
+        gng_2phase.nodes[winner_id]['utility'] = 1.0
+
+        gng_2phase.process_input(input_vector)
+        tuning_weight_change = np.linalg.norm(gng_2phase.nodes[winner_id]['weight'] - initial_weight)
+
+        # The weight change should be larger during the high-learning-rate ordering phase
+        self.assertGreater(ordering_weight_change, tuning_weight_change)
+
 
 class ChimeraAgentTests(TestCase):
     def setUp(self):
