@@ -27,7 +27,7 @@ class ChimeraAgentStagDecouplingTests(TestCase):
 
         self.agent = ChimeraAgent(
             agent_id=self.agent_id,
-            max_obs_dim=self.obs_dim,
+            embedding_dim=self.obs_dim,
             max_action_dim=self.action_dim,
             cortex_configs=cortex_configs,
             load_from_storage=False,

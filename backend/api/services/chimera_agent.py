@@ -31,6 +31,7 @@ from .stag_framework import STAG_Framework
 from .state_history_manager import StateHistoryManager
 from .replay_buffer import ReplayBuffer, Experience
 from . import cortex as cortex_modules
+from .cortex.vision_cortex import VisionCortex # Import the new cortex
 from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
 
@@ -69,6 +70,8 @@ def _initialize_cortexes(configs, output_dim):
             # Pass parameters based on cortex type
             if class_name == "DenseCortex":
                 cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
+            elif class_name == "VisionCortex":
+                cortexes[cortex_id] = VisionCortex(input_shape=params['input_shape'], output_dim=output_dim)
             elif class_name == "LanguageCortex":
                 cortexes[cortex_id] = CortexClass(
                     model_path_or_id=params['model_id'],
@@ -76,7 +79,7 @@ def _initialize_cortexes(configs, output_dim):
                     api_base=params.get('api_base'),
                     embedding_dim=params.get('embedding_dim')
                 )
-            else: # For TextCortex, VisionCortex etc.
+            else: # For TextCortex etc.
                 cortexes[cortex_id] = CortexClass(output_dim=output_dim)
         except (AttributeError, ImportError) as e:
             print(f"Warning: Could not initialize cortex '{cortex_id}' of type '{class_name}': {e}")
@@ -87,9 +90,9 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, max_obs_dim, max_action_dim, latent_dim=32, hidden_dim=200, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
+    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=32, hidden_dim=200, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
-        self.max_obs_dim = max_obs_dim
+        self.embedding_dim = embedding_dim
         self.max_action_dim = max_action_dim
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -110,6 +113,9 @@ class ChimeraAgent:
         self.use_stag_in_ac_loss = self.hyperparams.get('use_stag_in_ac_loss', True)
         self.world_model_pretrain_steps = self.hyperparams.get('world_model_pretrain_steps', 5000)
         self.stag_update_frequency = self.hyperparams.get('stag_update_frequency', 10)
+        self.gng_pruning_frequency = self.hyperparams.get('gng_pruning_frequency', 1000)
+        self.gng_min_utility_threshold = self.hyperparams.get('gng_min_utility_threshold', 0.1)
+        self.world_model_weight_decay = self.hyperparams.get('world_model_weight_decay', 1e-6)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -141,10 +147,10 @@ class ChimeraAgent:
                 self.cortex_configs['language_cortex'] = {"type": "LanguageCortex", "params": {"model_id": embedding_model_id, "api_base": api_base, "embedding_dim": embedding_dim}}
 
         # --- Initialize Architecture Components ---
-        self.cortexes = _initialize_cortexes(self.cortex_configs, self.max_obs_dim)
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim)
 
         # World Model (RSSM-based)
-        self.world_model = WorldModel(self.max_obs_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
+        self.world_model = WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
 
         # STAG Framework
         # The STAG still operates on the deterministic hidden state `h_t`
@@ -378,6 +384,10 @@ class ChimeraAgent:
         if self.train_steps % policy_train_frequency == 0:
             policy_stats = self.train_policy_in_imagination()
 
+        # Part 3: Prune the STAG graph periodically.
+        if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
+            self.stag.prune_graph(self.gng_min_utility_threshold)
+
         # Combine stats for logging
         combined_stats = {**world_model_stats, **policy_stats}
         return combined_stats
@@ -405,18 +415,20 @@ class ChimeraAgent:
         experiences = self.replay_buffer.sample(batch_size)
         batch = Experience(*zip(*experiences))
 
-        # The replay buffer stores raw numpy observations. Process them.
-        def pad_observations(obs_list):
-            padded_obs = [np.zeros(self.max_obs_dim) for _ in range(len(obs_list))]
-            for i, o in enumerate(obs_list):
-                padded_obs[i][:o.shape[0]] = o
-            return torch.from_numpy(np.array(padded_obs)).float()
-
-        # We need the *next* observation to calculate reconstruction loss
-        next_obs_batch_raw = pad_observations(batch.next_obs)
+        # The replay buffer stores raw numpy observations.
+        # We need to stack them into a batch and process them through the cortex.
+        # This requires that all observations in a batch are of the same shape.
+        try:
+            next_obs_batch_raw = torch.from_numpy(np.stack(batch.next_obs)).float()
+        except ValueError:
+            # Handle cases where observations might not be perfectly rectangular, e.g. due to episode ends.
+            # This is a simple fallback. A more robust solution might involve padding/resizing here.
+            logger.warning("Could not stack observations directly. Ensure all observations in a batch are the same shape.")
+            return {"status": "Observation stacking failed."}
 
         # Process observations through the cortex
-        obs_batch_processed = cortex(next_obs_batch_raw) # Note: we are predicting the *next* observation
+        # This assumes the cortex is a torch.nn.Module that can handle batches.
+        obs_batch_processed = cortex(next_obs_batch_raw)
 
         h_prev_batch = torch.stack(batch.h).squeeze(1)
         z_prev_batch = torch.stack(batch.z).squeeze(1)
@@ -427,7 +439,11 @@ class ChimeraAgent:
         wm_params = list(self.world_model.parameters())
         if isinstance(cortex, torch.nn.Module):
             wm_params += list(cortex.parameters())
-        wm_optimizer = torch.optim.Adam(wm_params, lr=self.hyperparams.get('world_model_lr', 0.001))
+        wm_optimizer = torch.optim.Adam(
+            wm_params,
+            lr=self.hyperparams.get('world_model_lr', 0.001),
+            weight_decay=self.world_model_weight_decay
+        )
 
         # --- Forward Pass ---
         obs_recon, reward_pred, kl_loss, _, _ = self.world_model(

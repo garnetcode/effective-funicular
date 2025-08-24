@@ -9,6 +9,8 @@ from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 from colosseum_connector import ColosseumConnector
 from api.services.replay_buffer import Experience
+from api.services.cortex.factory import create_cortex_configs_from_observation_space
+import gymnasium as gym # Needed for space deserialization
 
 logger = logging.getLogger(__name__)
 
@@ -57,25 +59,7 @@ class Command(BaseCommand):
         history_config = config.get('agent_history', {})
         num_episodes = config.get('episodes_per_env', 100)
 
-        # Load max dimensions from config
-        max_obs_dim = agent_config.get('max_obs_dim', 2048)
-        max_action_dim = agent_config.get('max_action_dim', 256)
-
-        # --- Create a single, persistent agent ---
-        agent = ChimeraAgent(
-            agent_id=agent_id,
-            max_obs_dim=max_obs_dim,
-            max_action_dim=max_action_dim,
-            latent_dim=agent_config.get('latent_dim', 64),
-            hidden_dim=agent_config.get('hidden_dim', 128),
-            cortex_configs={"vector_input": {"type": "DenseCortex", "params": {"input_dim": max_obs_dim}}},
-            load_from_storage=not config.get('force_new_agent', False),
-            hyperparams=agent_config.get('hyperparams', {}),
-            history_config=history_config
-        )
-        logger.debug(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
-
-        # --- Create a single session for the entire training run ---
+        # --- Connect to Colosseum and get environment specs ---
         connector = ColosseumConnector(env_name, agent_id)
         session_data = await connector.create_session()
         if not session_data:
@@ -92,24 +76,52 @@ class Command(BaseCommand):
             await connector.close()
             return
 
+        # --- Dynamically configure agent based on environment specs ---
+        try:
+            # Reconstruct the observation space from the server's response
+            obs_space_info = join_response['observation_space']
+            observation_space = gym.spaces.Box(
+                low=np.array(obs_space_info['low']),
+                high=np.array(obs_space_info['high']),
+                shape=obs_space_info['shape'],
+                dtype=np.dtype(obs_space_info['dtype'])
+            )
+            actual_action_dim = join_response['action_space_shape']
+
+            cortex_configs, cortex_id = create_cortex_configs_from_observation_space(observation_space)
+            logger.info(f"Dynamically configured cortex: '{cortex_id}' for observation space {observation_space}")
+
+        except (KeyError, TypeError) as e:
+            logger.error(f"Could not determine environment specs from server response: {e}. Exiting.")
+            await connector.close()
+            return
+
+        # Load agent architecture config
+        embedding_dim = agent_config.get('embedding_dim', 256)
+        max_action_dim = agent_config.get('max_action_dim', 256)
+
+        # --- Create a single, persistent agent ---
+        agent = ChimeraAgent(
+            agent_id=agent_id,
+            embedding_dim=embedding_dim,
+            max_action_dim=max_action_dim,
+            latent_dim=agent_config.get('latent_dim', 64),
+            hidden_dim=agent_config.get('hidden_dim', 128),
+            cortex_configs=cortex_configs,
+            load_from_storage=not config.get('force_new_agent', False),
+            hyperparams=agent_config.get('hyperparams', {}),
+            history_config=history_config
+        )
+        logger.debug(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
+
         # --- Training Loop ---
         total_rewards = []
         current_obs = np.array(join_response.get("observation"))
-
-        # Get the actual action space size from the environment info
-        try:
-            actual_action_dim = join_response['action_space_shape']
-            logger.debug(f"Environment action space size: {actual_action_dim}")
-        except (KeyError, TypeError):
-            logger.warning("Could not determine actual action space size from server. Defaulting to max.")
-            actual_action_dim = max_action_dim
-
-
         burnin_steps = agent_config.get('hyperparams', {}).get('burnin_steps', 1000)
         logger.info(f"Starting burn-in phase for {burnin_steps} steps...")
         for _ in tqdm(range(burnin_steps), desc="Burn-in"):
             # Perceive the environment to get the latest state for the replay buffer
-            _, _, _, activation_path, novelty = agent.perceive_and_update_state("vector_input", current_obs)
+            _, _, _, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
 
             # Take a random action
             action = np.random.randint(0, actual_action_dim)
@@ -157,7 +169,7 @@ class Command(BaseCommand):
                     # --- Gameplay Loop for one episode ---
                     while not done:
                         # Perceive the environment and get agent's internal state and novelty
-                        _, _, _, activation_path, novelty = agent.perceive_and_update_state("vector_input", current_obs)
+                        _, _, _, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
                         action, log_prob, stag_context, decision_maker, epsilon = agent.select_action(actual_action_dim, activation_path)
 
 
@@ -217,7 +229,7 @@ class Command(BaseCommand):
 
                     # --- Post-Episode: Train the agent ---
                     logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training...")
-                    train_stats = agent.train(cortex_id="vector_input")
+                    train_stats = agent.train(cortex_id=cortex_id)
                     if (episode + 1) % 1000 == 0:
                         agent.save_state(version_info=train_stats)
                     total_rewards.append(episode_reward)

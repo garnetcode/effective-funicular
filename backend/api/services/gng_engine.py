@@ -18,8 +18,13 @@ class GNG_Engine:
         self.dimensions = dimensions
 
         # Hyperparameters
+        # Tuning phase learning rates (using existing param names)
         self.winner_learning_rate = kwargs.get('gng_winner_learning_rate', 0.1)
         self.neighbor_learning_rate = kwargs.get('gng_neighbor_learning_rate', 0.01)
+        # Ordering phase params
+        self.ordering_phase_steps = kwargs.get('gng_ordering_phase_steps', 2000)
+        self.winner_learning_rate_initial = kwargs.get('gng_winner_learning_rate_initial', 0.8)
+        self.neighbor_learning_rate_initial = kwargs.get('gng_neighbor_learning_rate_initial', 0.1)
         self.max_edge_age = kwargs.get('gng_max_edge_age', 50)
         self.n_iter_before_neuron_added = kwargs.get('gng_n_iter_before_neuron_added', 100)
         self.after_split_error_decay_rate = kwargs.get('gng_after_split_error_decay_rate', 0.5)
@@ -93,8 +98,16 @@ class GNG_Engine:
         self.nodes[s1_id]['utility'] += self.utility_gain * (1 + reward_gain)
 
         # 3. Adaptation with Dynamic Learning Rates
+        # Select learning rates based on the current phase (ordering vs. tuning)
+        if self._iterations < self.ordering_phase_steps:
+            current_winner_lr = self.winner_learning_rate_initial
+            current_neighbor_lr = self.neighbor_learning_rate_initial
+        else:
+            current_winner_lr = self.winner_learning_rate
+            current_neighbor_lr = self.neighbor_learning_rate
+
         winner_utility = self.nodes[s1_id]['utility']
-        dynamic_winner_lr = self.winner_learning_rate / (1e-5 + np.log1p(winner_utility))
+        dynamic_winner_lr = current_winner_lr / (1e-5 + np.log1p(winner_utility))
         self.nodes[s1_id]['weight'] += dynamic_winner_lr * (input_vector - self.nodes[s1_id]['weight'])
 
         # Re-normalize the winner's weight vector
@@ -106,7 +119,7 @@ class GNG_Engine:
         neighbor_ids = self._get_neighbors(s1_id)
         for n_id in neighbor_ids:
             neighbor_utility = self.nodes[n_id]['utility']
-            dynamic_neighbor_lr = self.neighbor_learning_rate / (1e-5 + np.log1p(neighbor_utility))
+            dynamic_neighbor_lr = current_neighbor_lr / (1e-5 + np.log1p(neighbor_utility))
             self.nodes[n_id]['weight'] += dynamic_neighbor_lr * (input_vector - self.nodes[n_id]['weight'])
 
             # Re-normalize the neighbor's weight vector
@@ -251,3 +264,35 @@ class GNG_Engine:
         gng._next_node_id = state_dict['next_node_id']
         gng._iterations = state_dict['iterations']
         return gng
+
+    def prune_low_utility_nodes(self, min_utility):
+        """
+        Removes nodes with utility below a given threshold.
+        Also removes any edges connected to the pruned nodes.
+        """
+        # Ensure we don't prune the graph into a state with less than 2 nodes.
+        if len(self.nodes) <= 2:
+            return
+
+        # Identify nodes to prune without modifying the dict during iteration.
+        nodes_to_prune = [
+            nid for nid, node_data in self.nodes.items()
+            if node_data['utility'] < min_utility
+        ]
+
+        # Do nothing if it would leave the graph with less than 2 nodes.
+        if len(self.nodes) - len(nodes_to_prune) < 2:
+            return
+
+        for node_id in nodes_to_prune:
+            # Remove the node itself
+            if node_id in self.nodes:
+                del self.nodes[node_id]
+
+            # Remove all edges connected to this node
+            edges_to_remove = {e for e in self.edges if node_id in e[:2]}
+            self.edges -= edges_to_remove
+
+        # If any nodes were pruned, the FAISS index is now invalid.
+        if nodes_to_prune:
+            self.faiss_index = None
