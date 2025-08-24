@@ -172,6 +172,7 @@ class ColosseumConnector:
         while True: # Loop until a relevant message is received
             try:
                 message = await self.websocket.recv()
+                logger.debug(f"Raw message received: {message}")
                 data = json.loads(message)
 
                 # Check if the message is a reflection of our own action

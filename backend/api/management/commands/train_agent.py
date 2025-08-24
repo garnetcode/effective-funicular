@@ -4,6 +4,7 @@ import torch
 import yaml
 import logging
 import asyncio
+import pprint
 from tqdm import tqdm
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
@@ -66,34 +67,25 @@ class Command(BaseCommand):
             logger.error("Could not create Colosseum session. Exiting.")
             return
 
-        if not await connector.connect_websocket():
-            logger.error("WebSocket connection failed. Exiting.")
-            return
+        logger.info(f"Received session data: {pprint.pformat(session_data)}")
 
-        join_response = await connector.join_session()
-        if not join_response:
-            logger.error("Failed to join session. Exiting.")
-            await connector.close()
-            return
-
-        # --- Dynamically configure agent based on environment specs ---
+        # --- Dynamically configure agent based on environment specs from the session data ---
         try:
             # Reconstruct the observation space from the server's response
-            obs_space_info = join_response['environment']['observation_space']
+            obs_space_info = session_data['environment']['observation_space']
             observation_space = gym.spaces.Box(
                 low=np.array(obs_space_info['low']),
                 high=np.array(obs_space_info['high']),
                 shape=obs_space_info['shape'],
                 dtype=np.dtype(obs_space_info['dtype'])
             )
-            actual_action_dim = join_response['environment']['action_space']['n']
+            actual_action_dim = session_data['environment']['action_space']['n']
 
             cortex_configs, cortex_id = create_cortex_configs_from_observation_space(observation_space)
             logger.info(f"Dynamically configured cortex: '{cortex_id}' for observation space {observation_space}")
 
         except (KeyError, TypeError) as e:
             logger.error(f"Could not determine environment specs from server response: {e}. Exiting.")
-            await connector.close()
             return
 
         # Load agent architecture config
@@ -114,9 +106,20 @@ class Command(BaseCommand):
         )
         logger.debug(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
 
+        # --- Connect to WebSocket and start training ---
+        if not await connector.connect_websocket():
+            logger.error("WebSocket connection failed. Exiting.")
+            return
+
+        join_response = await connector.join_session()
+        if not join_response:
+            logger.error("Failed to join session. Exiting.")
+            await connector.close()
+            return
+
         # --- Training Loop ---
         total_rewards = []
-        current_obs = np.array(join_response.get("observation"))
+        current_obs = np.array(session_data.get("observation"))
         burnin_steps = agent_config.get('hyperparams', {}).get('burnin_steps', 1000)
         logger.info(f"Starting burn-in phase for {burnin_steps} steps...")
         for _ in tqdm(range(burnin_steps), desc="Burn-in"):
