@@ -251,3 +251,35 @@ class GNG_Engine:
         gng._next_node_id = state_dict['next_node_id']
         gng._iterations = state_dict['iterations']
         return gng
+
+    def prune_low_utility_nodes(self, min_utility):
+        """
+        Removes nodes with utility below a given threshold.
+        Also removes any edges connected to the pruned nodes.
+        """
+        # Ensure we don't prune the graph into a state with less than 2 nodes.
+        if len(self.nodes) <= 2:
+            return
+
+        # Identify nodes to prune without modifying the dict during iteration.
+        nodes_to_prune = [
+            nid for nid, node_data in self.nodes.items()
+            if node_data['utility'] < min_utility
+        ]
+
+        # Do nothing if it would leave the graph with less than 2 nodes.
+        if len(self.nodes) - len(nodes_to_prune) < 2:
+            return
+
+        for node_id in nodes_to_prune:
+            # Remove the node itself
+            if node_id in self.nodes:
+                del self.nodes[node_id]
+
+            # Remove all edges connected to this node
+            edges_to_remove = {e for e in self.edges if node_id in e[:2]}
+            self.edges -= edges_to_remove
+
+        # If any nodes were pruned, the FAISS index is now invalid.
+        if nodes_to_prune:
+            self.faiss_index = None

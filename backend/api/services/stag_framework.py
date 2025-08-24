@@ -206,3 +206,10 @@ class STAG_Framework:
         if node['level_id'] >= self._next_level_id:
             self._next_level_id = node['level_id'] + 1
         return node
+
+    def prune_graph(self, min_utility):
+        """
+        Prunes all GNGs in the hierarchy based on a utility threshold.
+        """
+        for level_id, gng_instance in self.level_map.items():
+            gng_instance.prune_low_utility_nodes(min_utility)

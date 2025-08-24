@@ -110,6 +110,8 @@ class ChimeraAgent:
         self.use_stag_in_ac_loss = self.hyperparams.get('use_stag_in_ac_loss', True)
         self.world_model_pretrain_steps = self.hyperparams.get('world_model_pretrain_steps', 5000)
         self.stag_update_frequency = self.hyperparams.get('stag_update_frequency', 10)
+        self.gng_pruning_frequency = self.hyperparams.get('gng_pruning_frequency', 1000)
+        self.gng_min_utility_threshold = self.hyperparams.get('gng_min_utility_threshold', 0.1)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -377,6 +379,10 @@ class ChimeraAgent:
         policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
         if self.train_steps % policy_train_frequency == 0:
             policy_stats = self.train_policy_in_imagination()
+
+        # Part 3: Prune the STAG graph periodically.
+        if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
+            self.stag.prune_graph(self.gng_min_utility_threshold)
 
         # Combine stats for logging
         combined_stats = {**world_model_stats, **policy_stats}
