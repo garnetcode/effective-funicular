@@ -1,19 +1,27 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from torchvision import transforms
 
 class VisionCortex(nn.Module):
     """
     A cortex for processing image-based observations using a Convolutional Neural Network (CNN).
     The architecture is inspired by the Nature DQN paper (Mnih et al., 2015).
     """
-    def __init__(self, input_shape, output_dim):
+    def __init__(self, input_shape, output_dim, use_data_augmentation=False):
         super().__init__()
         self.input_shape = input_shape
         self.output_dim = output_dim
+        self.use_data_augmentation = use_data_augmentation
 
         # Input shape is expected to be (H, W, C)
         h, w, c = input_shape
+
+        if self.use_data_augmentation:
+            self.augmentation = transforms.Compose([
+                transforms.RandomResizedCrop(size=(h, w)),
+                transforms.RandomHorizontalFlip(),
+            ])
 
         # The CNN architecture
         self.cnn = nn.Sequential(
@@ -52,6 +60,9 @@ class VisionCortex(nn.Module):
 
         # Normalize pixel values
         x = x / 255.0
+
+        if self.use_data_augmentation and self.training:
+            x = self.augmentation(x)
 
         x = self.cnn(x)
         x = self.fc(x)

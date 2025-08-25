@@ -44,7 +44,15 @@ agent_config:
     epsilon_end: 0.05
     epsilon_decay_steps: 200000
     burnin_steps: 1000
+    sequence_length: 50
     policy_train_frequency: 10
+    # Training Schedules
+    imagination_horizon_start: 5
+    imagination_horizon_end: 15
+    imagination_horizon_schedule_steps: 10000
+    entropy_coef_start: 0.01
+    entropy_coef_end: 0.001
+    entropy_coef_schedule_steps: 20000
     use_internal_reward: false
     use_stag_in_ac_loss: true # If true, the STAG context vector is used in the actor-critic loss.
     # Phased Training for STAG
@@ -53,9 +61,36 @@ agent_config:
     # STAG Graph Growth Management
     gng_pruning_frequency: 1000 # Prune low-utility nodes every N training steps.
     gng_min_utility_threshold: 0.1 # Prune nodes with utility below this threshold.
-    # Two-Phase STAG Learning
-    gng_ordering_phase_steps: 2000
+    gng_pruning_grace_period: 500 # Number of iterations before a new node is eligible for pruning.
+    gng_utility_floor: 0.1
+    gng_utility_clip: 10.0
+    gng_faiss_rebuild_interval: 100
+    # Adaptive GNG Learning Rate
+    gng_learning_rate_decay: 0.9999
     gng_winner_learning_rate_initial: 0.8
     gng_neighbor_learning_rate_initial: 0.1
     # World Model Regularization
     world_model_weight_decay: 1.0e-6 # L2 penalty for the world model optimizer
+    free_bits: 1.0 # KL balancing parameter
+    # Latent Planner (CEM)
+    cem_plan_horizon: 12
+    cem_num_samples: 1000
+    cem_top_k: 100
+    cem_iterations: 10
+    use_planner: true
+    high_level_replan_frequency: 100 # Replans every 100 steps
+    # Prioritized Experience Replay
+    per_alpha: 0.6
+    per_beta_start: 0.4
+    per_beta_frames: 100000
+    # World Model Ensemble
+    num_ensemble_models: 5
+    uncertainty_penalty_weight: 0.1
+    # Goal-Conditioning
+    goal_dim: 512 # Should match the hidden_dim for now
+    # Representation Learning
+    contrastive_loss_weight: 0.1
+    use_data_augmentation: true
+    # Hindsight Experience Replay
+    her_replay_strategy: 'future'
+    her_replay_k: 4

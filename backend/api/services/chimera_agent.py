@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal, Categorical
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,15 @@ class NumpyJSONEncoder(json.JSONEncoder):
 from .world_model_core import WorldModel
 from .skill_manager import SkillManager
 from .state_history_manager import StateHistoryManager
-from .replay_buffer import ReplayBuffer, Experience
+from .replay_buffer import Experience
+from .per_sequence_buffer import PERSequenceBuffer
 from . import cortex as cortex_modules
 from .cortex.vision_cortex import VisionCortex # Import the new cortex
 from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
+from .action.latent_planner import LatentPlanner
+from .action.graph_planner import GraphPlanner
+from .world_model.rep_learning import ContrastiveLoss
 
 class StagContextProcessor(nn.Module):
     """
@@ -54,7 +59,7 @@ class StagContextProcessor(nn.Module):
         return self.processor(concatenated_weights.unsqueeze(0))
 
 
-def _initialize_cortexes(configs, output_dim):
+def _initialize_cortexes(configs, output_dim, device):
     """
     Initializes all cortex modules based on the provided configurations.
     It dynamically loads the class from the cortex package.
@@ -66,21 +71,28 @@ def _initialize_cortexes(configs, output_dim):
         params = config.get('params', {})
         try:
             CortexClass = getattr(cortex_modules, class_name)
-
+            cortex_instance = None
             # Pass parameters based on cortex type
             if class_name == "DenseCortex":
-                cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
+                cortex_instance = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
             elif class_name == "VisionCortex":
-                cortexes[cortex_id] = VisionCortex(input_shape=params['input_shape'], output_dim=output_dim)
+                cortex_instance = VisionCortex(input_shape=params['input_shape'], output_dim=output_dim)
             elif class_name == "LanguageCortex":
-                cortexes[cortex_id] = CortexClass(
+                # LanguageCortex might not be a torch module, handle gracefully
+                cortex_instance = CortexClass(
                     model_path_or_id=params['model_id'],
                     output_dim=output_dim,
                     api_base=params.get('api_base'),
                     embedding_dim=params.get('embedding_dim')
                 )
             else: # For TextCortex etc.
-                cortexes[cortex_id] = CortexClass(output_dim=output_dim)
+                cortex_instance = CortexClass(output_dim=output_dim)
+
+            if cortex_instance:
+                if isinstance(cortex_instance, nn.Module):
+                    cortex_instance.to(device)
+                cortexes[cortex_id] = cortex_instance
+
         except (AttributeError, ImportError) as e:
             print(f"Warning: Could not initialize cortex '{cortex_id}' of type '{class_name}': {e}")
     return cortexes
@@ -96,6 +108,7 @@ class ChimeraAgent:
         self.max_action_dim = max_action_dim
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Consolidate hyperparameters from explicit arg and kwargs
         self.hyperparams = hyperparams or {}
@@ -116,6 +129,21 @@ class ChimeraAgent:
         self.gng_pruning_frequency = self.hyperparams.get('gng_pruning_frequency', 1000)
         self.gng_min_utility_threshold = self.hyperparams.get('gng_min_utility_threshold', 0.1)
         self.world_model_weight_decay = self.hyperparams.get('world_model_weight_decay', 1e-6)
+        self.num_ensemble_models = self.hyperparams.get('num_ensemble_models', 5)
+        self.uncertainty_penalty_weight = self.hyperparams.get('uncertainty_penalty_weight', 0.1)
+        # Schedules
+        self.imagination_horizon_start = self.hyperparams.get('imagination_horizon_start', 5)
+        self.imagination_horizon_end = self.hyperparams.get('imagination_horizon_end', 15)
+        self.imagination_horizon_schedule_steps = self.hyperparams.get('imagination_horizon_schedule_steps', 10000)
+        self.entropy_coef_start = self.hyperparams.get('entropy_coef_start', 0.01)
+        self.entropy_coef_end = self.hyperparams.get('entropy_coef_end', 0.001)
+        self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
+        self.use_planner = self.hyperparams.get('use_planner', False)
+        self.high_level_replan_frequency = self.hyperparams.get('high_level_replan_frequency', 100)
+        self.goal_dim = self.hyperparams.get('goal_dim', 512)
+        self.contrastive_loss_weight = self.hyperparams.get('contrastive_loss_weight', 0.1)
+        self.her_replay_strategy = self.hyperparams.get('her_replay_strategy', 'future')
+        self.her_replay_k = self.hyperparams.get('her_replay_k', 4)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -127,10 +155,16 @@ class ChimeraAgent:
         # --- Initialize Agent State and Components ---
         self.steps_done = 0
         self.train_steps = 0
+        self.last_stag_node_id = None
+        self.subgoal_reward = 0
+        self.subgoal_duration = 0
         # h_t and z_t for the RSSM
-        self.hidden_state = torch.zeros(1, self.hidden_dim)
-        self.latent_state = torch.zeros(1, self.latent_dim)
-        self.last_action = torch.tensor([0])
+        self.hidden_state = torch.zeros(1, self.hidden_dim, device=self.device)
+        self.latent_state = torch.zeros(1, self.latent_dim, device=self.device)
+        self.last_action = torch.tensor([0], device=self.device)
+        self.high_level_plan = None
+        self.current_subgoal = None
+        self.current_goal = None
         self.cortex_configs = cortex_configs or {}
 
         # Language Model setup (remains the same)
@@ -147,10 +181,21 @@ class ChimeraAgent:
                 self.cortex_configs['language_cortex'] = {"type": "LanguageCortex", "params": {"model_id": embedding_model_id, "api_base": api_base, "embedding_dim": embedding_dim}}
 
         # --- Initialize Architecture Components ---
-        self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim)
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim, self.device)
 
-        # World Model (RSSM-based)
-        self.world_model = WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
+        # World Model Ensemble
+        self.world_models = nn.ModuleList([
+            WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, self.goal_dim, hyperparams=self.hyperparams)
+            for _ in range(self.num_ensemble_models)
+        ]).to(self.device)
+        self.world_model_optimizers = [
+            torch.optim.Adam(
+                wm.parameters(),
+                lr=self.hyperparams.get('world_model_lr', 1e-4),
+                weight_decay=self.world_model_weight_decay
+            ) for wm in self.world_models
+        ]
+        self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
 
         # Skill Manager (manages multiple STAGs)
         self.skill_manager = SkillManager(self.hidden_dim, **self.hyperparams)
@@ -161,21 +206,34 @@ class ChimeraAgent:
         self.stag_context_processor = StagContextProcessor(
             input_dim=self.max_stag_path_length * self.hidden_dim,
             output_dim=self.stag_context_dim
-        )
+        ).to(self.device)
 
         # Actor-Critic Planner
         # Actor (Policy Head)
         self.action_head = ActionHead(
-            input_dim=self.hidden_dim + self.stag_context_dim,  # Takes h_t and C_t
+            input_dim=self.hidden_dim + self.stag_context_dim,
             n_actions=self.max_action_dim,
+            goal_dim=self.goal_dim,
             learning_rate=self.learning_rate
-        )
+        ).to(self.device)
         # Critic (Value Head)
         self.value_head = nn.Sequential(
-            nn.Linear(self.hidden_dim + self.latent_dim, 400), # Takes h_t and z_t
+            nn.Linear(self.hidden_dim + self.latent_dim + self.goal_dim, 400),
             nn.ReLU(),
             nn.Linear(400, 1)
-        )
+        ).to(self.device)
+
+        self.planner = LatentPlanner(
+            world_models=self.world_models,
+            action_dim=self.max_action_dim,
+            plan_horizon=self.hyperparams.get('cem_plan_horizon', 12),
+            num_samples=self.hyperparams.get('cem_num_samples', 1000),
+            top_k=self.hyperparams.get('cem_top_k', 100),
+            iterations=self.hyperparams.get('cem_iterations', 10),
+            uncertainty_penalty_weight=self.uncertainty_penalty_weight
+        ).to(self.device)
+
+        self.graph_planner = GraphPlanner()
 
         self.text_generation_head = None
         if self.language_model_enabled and generation_model_id:
@@ -184,6 +242,8 @@ class ChimeraAgent:
                 input_dim=self.hidden_dim,
                 api_base=api_base
             )
+            if isinstance(self.text_generation_head, nn.Module):
+                self.text_generation_head.to(self.device)
 
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
@@ -191,12 +251,21 @@ class ChimeraAgent:
             self.save_state(version_info={"message": "Initial state."})
 
         buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
-        self.replay_buffer = ReplayBuffer(buffer_capacity)
+        sequence_length = self.hyperparams.get('sequence_length', 50)
+        self.replay_buffer = PERSequenceBuffer(
+            capacity=buffer_capacity,
+            sequence_length=sequence_length,
+            alpha=self.hyperparams.get('per_alpha', 0.6),
+            beta_start=self.hyperparams.get('per_beta_start', 0.4),
+            beta_frames=self.hyperparams.get('per_beta_frames', 100000),
+            her_replay_strategy=self.her_replay_strategy,
+            her_replay_k=self.her_replay_k
+        )
 
     def save_state(self, version_info={}):
         """Saves the agent's core models to a new version snapshot."""
         learnable_params = {
-            'world_model_state_dict': self.world_model.state_dict(),
+            'world_model_state_dicts': [wm.state_dict() for wm in self.world_models],
             'action_head_state_dict': self.action_head.state_dict(),
             'value_head_state_dict': self.value_head.state_dict(),
             'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
@@ -208,7 +277,14 @@ class ChimeraAgent:
         """Loads the agent's core models from a version snapshot."""
         learnable_params = self.history_manager.load_snapshot(version)
         if learnable_params:
-            self.world_model.load_state_dict(learnable_params['world_model_state_dict'])
+            if 'world_model_state_dicts' in learnable_params:
+                for i, state_dict in enumerate(learnable_params['world_model_state_dicts']):
+                    if i < len(self.world_models):
+                        self.world_models[i].load_state_dict(state_dict)
+            elif 'world_model_state_dict' in learnable_params:
+                # Handle old single-model checkpoints
+                self.world_models[0].load_state_dict(learnable_params['world_model_state_dict'])
+
             self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
             self.value_head.load_state_dict(learnable_params['value_head_state_dict'])
             self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict'))
@@ -225,6 +301,10 @@ class ChimeraAgent:
         logger.info(f"Agent active skill set to: {skill_id}")
         self.active_skill_id = skill_id
 
+    def set_goal(self, goal):
+        """Sets the current goal for the agent."""
+        self.current_goal = goal
+
     def perceive_and_update_state(self, cortex_id, raw_obs, damage_taken=0):
         """
         Processes observation, updates vitals, and updates the world model state.
@@ -234,12 +314,11 @@ class ChimeraAgent:
 
         # 2. Process raw observation through the specified cortex
         obs_numpy = self.cortexes[cortex_id].process(raw_obs)
-        obs_tensor = torch.from_numpy(obs_numpy).float().unsqueeze(0)
+        obs_tensor = torch.from_numpy(obs_numpy).float().unsqueeze(0).to(self.device)
 
-        # 3. Use the world model to update the agent's internal state (h_t, z_t)
+        # 3. Use the first world model in the ensemble to update the agent's internal state
         with torch.no_grad():
-            # The world model's forward pass is now just for training. We need to call the rssm directly.
-            h_next, z_next, _ = self.world_model.rssm(obs_tensor, self.last_action, self.hidden_state, self.latent_state)
+            h_next, z_next, _ = self.world_models[0].rssm(obs_tensor, self.last_action, self.hidden_state, self.latent_state)
 
         # 4. Update the agent's internal state
         self.hidden_state = h_next
@@ -251,14 +330,37 @@ class ChimeraAgent:
         novelty = 0
         # Only engage STAG if we are past the pre-training phase.
         if self.steps_done > self.world_model_pretrain_steps:
-            h_numpy = self.hidden_state.detach().numpy().flatten()
-            norm = np.linalg.norm(h_numpy)
-            h_normalized = h_numpy / norm if norm > 0 else h_numpy
+            h_normalized = self.h_norm(self.hidden_state).detach().cpu().numpy().flatten()
+            # The vector is now normalized by LayerNorm and will be normalized again
+            # by _safe_unit in the GNG engine for double safety.
 
             # Find the activation path and get the potential novelty signal (error)
             terminal_node, winner_id, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
             if terminal_node and winner_id is not None:
                 novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
+
+                # Check for STAG node transition
+                if self.last_stag_node_id is not None and self.last_stag_node_id != winner_id:
+                    self.skill_manager.update_option_model(
+                        self.active_skill_id,
+                        self.last_stag_node_id,
+                        winner_id,
+                        self.subgoal_reward,
+                        self.subgoal_duration
+                    )
+                    # Reset subgoal counters
+                    self.subgoal_reward = 0
+                    self.subgoal_duration = 0
+
+                self.last_stag_node_id = winner_id
+
+                # Check if subgoal has been reached
+                if self.current_subgoal is not None and winner_id == self.current_subgoal:
+                    print(f"Subgoal {self.current_subgoal} reached!")
+                    self.current_subgoal = None
+                    if self.high_level_plan and len(self.high_level_plan) > 0:
+                        self.current_subgoal = self.high_level_plan.pop(0)
+
 
         # The GNG is now updated in a separate step after the reward is known.
         return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty
@@ -294,11 +396,11 @@ class ChimeraAgent:
             for step in activation_path:
                 level_gng = active_stag.level_map[step['level_id']]
                 node_weight = level_gng.nodes[step['winner_id']]['weight']
-                path_weights.append(torch.from_numpy(node_weight).float())
+                path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
 
         # Pad the path to a fixed length
         while len(path_weights) < self.max_stag_path_length:
-            path_weights.append(torch.zeros(self.hidden_dim))
+            path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
 
         # Process the path to get the context vector C_t
         with torch.no_grad():
@@ -312,33 +414,77 @@ class ChimeraAgent:
         # 2. The ActionHead receives the deterministic state h_t and context C_t
         combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
 
-        # 3. Get action distribution, mask it, and select action
-        with torch.no_grad():
-            # Get the raw logits from the action head's linear layer
-            logits = self.action_head.layer(combined_input)
+        # 3. Select action using either the planner or the policy
+        epsilon = 0.0 # Default value
+        if self.use_planner:
+            # Hierarchical planning logic
+            if self.current_subgoal is None or self.train_steps % self.high_level_replan_frequency == 0:
+                # Generate a new high-level plan
+                stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
+                if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
+                    # For simplicity, goal is a random node that is not the start node
+                    possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
+                    if possible_goals:
+                        goal_node_id = random.choice(possible_goals)
+                        self.high_level_plan = self.graph_planner.plan(
+                            stag_graph,
+                            self.skill_manager.option_models.get(self.active_skill_id, {}),
+                            self.last_stag_node_id,
+                            goal_node_id
+                        )
 
-            # Create a mask to disable logits for actions outside the valid range
-            mask = torch.full(logits.shape, -float('inf'))
-            mask[0, :actual_action_dim] = 0
+                if self.high_level_plan:
+                    # Pop the first subgoal (which is the start node)
+                    self.high_level_plan.pop(0)
+                    if self.high_level_plan:
+                        self.current_subgoal = self.high_level_plan.pop(0)
 
-            # Apply the mask to the logits
-            masked_logits = logits + mask
+            # Execute low-level planner to reach the current subgoal
+            subgoal_weight = None
+            if self.current_subgoal:
+                stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+                # This assumes the subgoal is in the terminal GNG of the STAG
+                terminal_gng = stag.level_map[max(stag.level_map.keys())]
+                if self.current_subgoal in terminal_gng.nodes:
+                    subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
 
-            # Create the distribution from the masked logits
-            action_dist = Categorical(logits=masked_logits)
+            with torch.no_grad():
+                action_continuous = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight)
+                action_tensor = torch.argmax(action_continuous, dim=-1)
 
-        epsilon = self._get_epsilon()
-        self.steps_done += 1
-
-        if np.random.rand() < epsilon:
-            action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)])
-            decision_maker = "random"
+            decision_maker = "planner"
+            log_prob = torch.tensor(0.0) # Not well-defined for planner
         else:
-            action_tensor = action_dist.sample()
-            decision_maker = "policy"
+            with torch.no_grad():
+                # Get the action distribution from the policy head
+                goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
+                # Expand goal tensor to match the batch size of the combined_input
+                goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
+                action_dist = self.action_head(combined_input, goal_tensor_expanded)
+
+                # Create a mask to disable logits for actions outside the valid range
+                mask = torch.full(action_dist.logits.shape, -float('inf'))
+                mask[0, :actual_action_dim] = 0
+
+                # Apply the mask to the logits
+                masked_logits = action_dist.logits + mask
+
+                # Create the distribution from the masked logits
+                action_dist = Categorical(logits=masked_logits)
+
+            epsilon = self._get_epsilon()
+            self.steps_done += 1
+
+            if np.random.rand() < epsilon:
+                action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
+                decision_maker = "random"
+            else:
+                action_tensor = action_dist.sample()
+                decision_maker = "policy"
+
+            log_prob = action_dist.log_prob(action_tensor)
 
         action = action_tensor.item()
-        log_prob = action_dist.log_prob(action_tensor)
 
         self.last_action = action_tensor
 
@@ -379,9 +525,13 @@ class ChimeraAgent:
         return internal_reward
 
     def record_experience(self, *args):
-        """Pushes an experience to the replay buffer."""
-        # The experience tuple will need to be updated for the new training regime
-        self.replay_buffer.push(*args)
+        """Pushes an experience to the replay buffer and updates subgoal counters."""
+        experience = list(args)
+        experience.append(self.current_goal)
+        self.replay_buffer.push(*experience)
+        # Assumes the reward is the 6th argument in *args
+        self.subgoal_reward += args[6]
+        self.subgoal_duration += 1
 
     def train(self, cortex_id="vector_input"):
         """
@@ -390,7 +540,10 @@ class ChimeraAgent:
         """
         self.train_steps += 1
         # Part 1: Train the World Model on real, recently collected data.
-        world_model_stats = self.train_world_model(cortex_id)
+        world_model_stats, indices, priorities = self.train_world_model(cortex_id)
+        if indices is not None:
+            self.update_priorities(indices, priorities)
+
         policy_stats = {}
 
         # Part 2: Train the Actor-Critic policy in imagined trajectories, but less frequently.
@@ -407,103 +560,120 @@ class ChimeraAgent:
         combined_stats = {**world_model_stats, **policy_stats}
         return combined_stats
 
+    def update_priorities(self, indices, priorities):
+        """Updates the priorities of experiences in the replay buffer."""
+        self.replay_buffer.update_priorities(indices, priorities)
+
     def train_world_model(self, cortex_id="vector_input"):
         """
-        Trains the World Model (RSSM, Obs/Reward Decoders) on a batch of real data.
-        This is the first part of the "Sleep" phase.
+        Trains the World Model ensemble on batches of sequences.
         """
-        if cortex_id not in self.cortexes:
-            logger.error(f"Invalid cortex_id '{cortex_id}' provided for training.")
-            return {}
-
-        cortex = self.cortexes[cortex_id]
-        if not isinstance(cortex, torch.nn.Module):
-            logger.warning(f"Cortex '{cortex_id}' is not trainable. Only training WorldModel.")
-            # For non-trainable cortexes, we can still proceed
-            pass
-
         batch_size = self.hyperparams.get('batch_size', 32)
-        if len(self.replay_buffer) < batch_size:
-            return {"status": "Not enough experiences in buffer to train."}
+        if len(self.replay_buffer) < self.replay_buffer.sequence_length:
+            return {}, None, None
 
-        # --- Sample a batch and prepare tensors ---
-        experiences = self.replay_buffer.sample(batch_size)
-        batch = Experience(*zip(*experiences))
+        # --- Sample a batch of sequences for each model in the ensemble ---
+        # For PER, we sample a single batch and use it for all models
+        batch, indices, weights = self.replay_buffer.sample(batch_size)
+        weights = torch.from_numpy(weights).float().to(self.device)
 
-        # The replay buffer stores raw numpy observations.
-        # We need to stack them into a batch and process them through the cortex.
-        # This requires that all observations in a batch are of the same shape.
-        try:
-            next_obs_batch_raw = torch.from_numpy(np.stack(batch.next_obs)).float()
-        except ValueError:
-            # Handle cases where observations might not be perfectly rectangular, e.g. due to episode ends.
-            # This is a simple fallback. A more robust solution might involve padding/resizing here.
-            logger.warning("Could not stack observations directly. Ensure all observations in a batch are the same shape.")
-            return {"status": "Observation stacking failed."}
+        total_wm_loss = 0
+        sequence_priorities = torch.zeros(batch_size, device=self.device)
 
-        # Process observations through the cortex
-        # This assumes the cortex is a torch.nn.Module that can handle batches.
-        obs_batch_processed = cortex(next_obs_batch_raw)
+        for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
+            # --- Prepare tensors ---
+            obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
+            action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
+            reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
+            goal_sequence = torch.from_numpy(batch['goal']).float().to(self.device)
 
-        h_prev_batch = torch.stack(batch.h).squeeze(1)
-        z_prev_batch = torch.stack(batch.z).squeeze(1)
-        action_batch = torch.tensor(batch.action)
-        reward_batch = torch.tensor(batch.reward).float()
+            # Process observations through the appropriate cortex
+            if obs_sequence.dim() == 5: # Image-based observations
+                batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
+                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
+                obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+            else: # Vector-based observations
+                batch_size, seq_len, obs_dim = obs_sequence.shape
+                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_dim))
+                obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
 
-        # --- Optimizers ---
-        wm_params = list(self.world_model.parameters())
-        if isinstance(cortex, torch.nn.Module):
-            wm_params += list(cortex.parameters())
-        wm_optimizer = torch.optim.Adam(
-            wm_params,
-            lr=self.hyperparams.get('world_model_lr', 0.001),
-            weight_decay=self.world_model_weight_decay
-        )
+            # --- Sequence-based Forward Pass and Loss Calculation ---
+            h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+            z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
 
-        # --- Forward Pass ---
-        obs_recon, reward_pred, kl_loss, _, _ = self.world_model(
-            obs_batch_processed, action_batch, h_prev_batch, z_prev_batch
-        )
+            total_recon_loss = 0
+            total_reward_loss = 0
+            total_kl_loss = 0
 
-        # --- Loss Calculation (ℒ_WM) ---
-        recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_batch_processed)
-        reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_batch.unsqueeze(1))
-        
-        w_recon = self.hyperparams.get('w_recon', 1.0)
-        w_reward = self.hyperparams.get('w_reward', 1.0)
-        w_kl = self.hyperparams.get('w_kl', 1.0)
+            for t in range(self.replay_buffer.sequence_length):
+                obs_t = obs_sequence_processed[:, t]
+                action_t = action_sequence[:, t]
+                reward_t = reward_sequence[:, t]
 
-        world_model_loss = w_recon * recon_loss + w_reward * reward_loss + w_kl * kl_loss
+                h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
 
-        # --- Backpropagation ---
-        wm_optimizer.zero_grad()
-        world_model_loss.backward()
-        torch.nn.utils.clip_grad_norm_(wm_params, self.max_grad_norm)
-        wm_optimizer.step()
+                obs_recon = world_model.obs_decoder(z_t, h_t)
+                reward_pred = world_model.reward_model(z_t, h_t, goal_sequence[:, t])
 
-        return {
-            "wm_loss": world_model_loss.item(),
-            "recon_loss": recon_loss.item(),
-            "reward_loss": reward_loss.item(),
-            "kl_loss": kl_loss.item()
-        }
+                recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
+                reward_loss = torch.mean((reward_pred - reward_t.unsqueeze(-1))**2, dim=-1)
+
+                free_bits = self.hyperparams.get('free_bits', 1.0)
+                kl_loss = torch.clamp(kl_loss, min=free_bits)
+
+                total_recon_loss += recon_loss
+                total_reward_loss += reward_loss
+                total_kl_loss += kl_loss
+
+            # Average losses over sequence length
+            total_recon_loss /= self.replay_buffer.sequence_length
+            total_reward_loss /= self.replay_buffer.sequence_length
+            total_kl_loss /= self.replay_buffer.sequence_length
+
+            # The priority is based on the reconstruction error
+            sequence_priorities += total_recon_loss.detach()
+
+            # Weight the loss by the importance sampling weights
+            world_model_loss = (weights * (total_recon_loss + total_reward_loss + total_kl_loss)).mean()
+            total_wm_loss += world_model_loss.item()
+
+            # --- Backpropagation ---
+            wm_optimizer.zero_grad()
+            world_model_loss.backward()
+            torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
+            wm_optimizer.step()
+
+        # Average the priorities over the ensemble
+        final_priorities = (sequence_priorities / self.num_ensemble_models).cpu().numpy()
+
+        return {"wm_loss": total_wm_loss / self.num_ensemble_models}, indices, final_priorities
 
     def train_policy_in_imagination(self):
         """
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
         This is the second part of the "Sleep" phase.
         """
-        batch_size = self.hyperparams.get('batch_size', 32)
-        if len(self.replay_buffer) < batch_size:
+        if self.train_steps < self.world_model_pretrain_steps:
             return {}
 
-        horizon = self.hyperparams.get('imagine_horizon', 15)
+        batch_size = self.hyperparams.get('batch_size', 32)
+        if len(self.replay_buffer) < self.replay_buffer.sequence_length:
+            return {}
+
+        # --- Calculate scheduled parameters ---
+        # Imagination Horizon
+        progress = min(1.0, self.train_steps / self.imagination_horizon_schedule_steps)
+        horizon = int(self.imagination_horizon_start + progress * (self.imagination_horizon_end - self.imagination_horizon_start))
+
+        # Entropy Coefficient
+        progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
+        entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
+
 
         # --- Sample starting states from real data ---
-        experiences = self.replay_buffer.sample(batch_size)
-        batch = Experience(*zip(*experiences))
-        h_start = torch.stack(batch.h).squeeze(1)
-        z_start = torch.stack(batch.z).squeeze(1)
+        batch = self.replay_buffer.sample(batch_size)
+        h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device)
+        z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device)
 
         # --- Imagine Trajectories ---
         h_t, z_t = h_start, z_start
@@ -530,10 +700,10 @@ class ChimeraAgent:
                     for step in activation_path:
                         level_gng = active_stag.level_map[step['level_id']]
                         node_weight = level_gng.nodes[step['winner_id']]['weight']
-                        path_weights.append(torch.from_numpy(node_weight).float())
+                        path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
 
                 while len(path_weights) < self.max_stag_path_length:
-                    path_weights.append(torch.zeros(self.hidden_dim))
+                    path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
 
                 stag_contexts.append(self.stag_context_processor(path_weights))
 
@@ -545,8 +715,8 @@ class ChimeraAgent:
                 stag_context_batch = torch.zeros_like(stag_context_batch)
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t
-            action_input = torch.cat([h_t, stag_context_batch], dim=1)
-            action_dist = self.action_head(action_input)
+            action_input = torch.cat([h_t, stag_context_batch], dim=-1)
+            action_dist = self.action_head(action_input, goal_sequence)
             action = action_dist.sample()
 
             # 3. World model predicts next state (do this without tracking gradients)
@@ -566,8 +736,13 @@ class ChimeraAgent:
 
 
         # --- Predict Rewards and Values for Imagined Trajectory ---
-        imagined_rewards = self.world_model.reward_model(imagined_z, imagined_h).squeeze(-1)
-        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z], dim=-1)).squeeze(-1)
+        # For simplicity, we assume the goal is constant for the whole trajectory
+        goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
+        imagined_rewards = self.world_models[0].reward_model(imagined_z, imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)).squeeze(-1)
+
+        # Expand goal for value prediction
+        goal_sequence_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
+        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z, goal_sequence_expanded], dim=-1)).squeeze(-1)
 
         # --- Calculate Value Targets (Lambda-Return) ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
@@ -585,21 +760,20 @@ class ChimeraAgent:
         # Normalize advantages to stabilize training
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
-        log_probs = self.action_head.get_log_probs(action_input, imagined_actions)
+        log_probs = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).log_prob(imagined_actions)
         policy_loss = -(log_probs * advantage).mean()
 
         # Critic Loss
         critic_loss = torch.nn.functional.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
         # Entropy Bonus
-        entropy = self.action_head.get_entropy(action_input).mean()
+        entropy = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).entropy().mean()
 
         # --- Total AC Loss and Backpropagation ---
         w_policy = self.hyperparams.get('w_policy', 1.0)
         w_critic = self.hyperparams.get('w_critic', 0.5)
-        w_entropy = self.hyperparams.get('w_entropy', 0.001)
 
-        ac_loss = w_policy * policy_loss + w_critic * critic_loss - w_entropy * entropy
+        ac_loss = w_policy * policy_loss + w_critic * critic_loss - entropy_coef * entropy
 
         ac_optimizer = torch.optim.Adam(
             list(self.action_head.parameters()) + list(self.value_head.parameters()),
@@ -614,7 +788,9 @@ class ChimeraAgent:
             "ac_loss": ac_loss.item(),
             "policy_loss": policy_loss.item(),
             "critic_loss": critic_loss.item(),
-            "entropy": entropy.item()
+            "entropy": entropy.item(),
+            "horizon": horizon,
+            "entropy_coef": entropy_coef
         }
 
     def generate_response(self, max_new_tokens=50):
