@@ -10,6 +10,7 @@ from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 from colosseum_connector import ColosseumConnector
 from api.services.replay_buffer import Experience
+from api.signals import agent_data_signal
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 import gymnasium as gym # Needed for space deserialization
 
@@ -234,6 +235,22 @@ class Command(BaseCommand):
                     # --- Post-Episode: Train the agent ---
                     logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training...")
                     train_stats = agent.train(cortex_id=cortex_id)
+
+                    # --- Send data for visualization ---
+                    agent_data = {
+                        'episode': episode + 1,
+                        'reward': episode_reward,
+                        'avg_reward': np.mean(total_rewards[-100:]),
+                        'epsilon': epsilon,
+                        'energy': agent.energy,
+                        'integrity': agent.integrity,
+                        'decision_maker': decision_maker,
+                        'action_prob': torch.exp(log_prob).item(),
+                        'policy_loss': train_stats.get('policy_loss', 0)
+                    }
+                    agent_data_signal.send(sender=self.__class__, data=agent_data)
+
+
                     if (episode + 1) % 1000 == 0:
                         agent.save_state(version_info=train_stats)
                     total_rewards.append(episode_reward)
