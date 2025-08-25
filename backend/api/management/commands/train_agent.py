@@ -89,6 +89,16 @@ class Command(BaseCommand):
             logger.error(f"Could not determine environment specs from server response: {e}. Exiting.")
             return
 
+        # AGENT_FIX: Dynamically set goal_dim to match the observation space dimension.
+        # This is the core of the fix for HER, ensuring that goals and observations
+        # have compatible shapes.
+        obs_dim = np.prod(observation_space.shape)
+        if 'hyperparams' not in agent_config:
+            agent_config['hyperparams'] = {}
+        agent_config['hyperparams']['goal_dim'] = obs_dim
+        logger.info(f"Dynamically setting goal_dim to observation space dimension: {obs_dim}")
+
+
         # Load agent architecture config
         embedding_dim = agent_config.get('embedding_dim', 256)
         max_action_dim = agent_config.get('max_action_dim', 256)
