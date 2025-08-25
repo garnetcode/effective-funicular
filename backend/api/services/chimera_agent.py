@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal, Categorical
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ from .cortex.vision_cortex import VisionCortex # Import the new cortex
 from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
 from .action.latent_planner import LatentPlanner
+from .action.graph_planner import GraphPlanner
 
 class StagContextProcessor(nn.Module):
     """
@@ -133,6 +135,7 @@ class ChimeraAgent:
         self.entropy_coef_end = self.hyperparams.get('entropy_coef_end', 0.001)
         self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
         self.use_planner = self.hyperparams.get('use_planner', False)
+        self.high_level_replan_frequency = self.hyperparams.get('high_level_replan_frequency', 100)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -144,10 +147,15 @@ class ChimeraAgent:
         # --- Initialize Agent State and Components ---
         self.steps_done = 0
         self.train_steps = 0
+        self.last_stag_node_id = None
+        self.subgoal_reward = 0
+        self.subgoal_duration = 0
         # h_t and z_t for the RSSM
         self.hidden_state = torch.zeros(1, self.hidden_dim, device=self.device)
         self.latent_state = torch.zeros(1, self.latent_dim, device=self.device)
         self.last_action = torch.tensor([0], device=self.device)
+        self.high_level_plan = None
+        self.current_subgoal = None
         self.cortex_configs = cortex_configs or {}
 
         # Language Model setup (remains the same)
@@ -203,6 +211,8 @@ class ChimeraAgent:
             top_k=self.hyperparams.get('cem_top_k', 100),
             iterations=self.hyperparams.get('cem_iterations', 10)
         ).to(self.device)
+
+        self.graph_planner = GraphPlanner()
 
         self.text_generation_head = None
         if self.language_model_enabled and generation_model_id:
@@ -290,6 +300,29 @@ class ChimeraAgent:
             if terminal_node and winner_id is not None:
                 novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
 
+                # Check for STAG node transition
+                if self.last_stag_node_id is not None and self.last_stag_node_id != winner_id:
+                    self.skill_manager.update_option_model(
+                        self.active_skill_id,
+                        self.last_stag_node_id,
+                        winner_id,
+                        self.subgoal_reward,
+                        self.subgoal_duration
+                    )
+                    # Reset subgoal counters
+                    self.subgoal_reward = 0
+                    self.subgoal_duration = 0
+
+                self.last_stag_node_id = winner_id
+
+                # Check if subgoal has been reached
+                if self.current_subgoal is not None and winner_id == self.current_subgoal:
+                    print(f"Subgoal {self.current_subgoal} reached!")
+                    self.current_subgoal = None
+                    if self.high_level_plan and len(self.high_level_plan) > 0:
+                        self.current_subgoal = self.high_level_plan.pop(0)
+
+
         # The GNG is now updated in a separate step after the reward is known.
         return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty
 
@@ -344,10 +377,41 @@ class ChimeraAgent:
 
         # 3. Select action using either the planner or the policy
         if self.use_planner:
+            # Hierarchical planning logic
+            if self.current_subgoal is None or self.train_steps % self.high_level_replan_frequency == 0:
+                # Generate a new high-level plan
+                stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
+                if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
+                    # For simplicity, goal is a random node that is not the start node
+                    possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
+                    if possible_goals:
+                        goal_node_id = random.choice(possible_goals)
+                        self.high_level_plan = self.graph_planner.plan(
+                            stag_graph,
+                            self.skill_manager.option_models.get(self.active_skill_id, {}),
+                            self.last_stag_node_id,
+                            goal_node_id
+                        )
+
+                if self.high_level_plan:
+                    # Pop the first subgoal (which is the start node)
+                    self.high_level_plan.pop(0)
+                    if self.high_level_plan:
+                        self.current_subgoal = self.high_level_plan.pop(0)
+
+            # Execute low-level planner to reach the current subgoal
+            subgoal_weight = None
+            if self.current_subgoal:
+                stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+                # This assumes the subgoal is in the terminal GNG of the STAG
+                terminal_gng = stag.level_map[max(stag.level_map.keys())]
+                if self.current_subgoal in terminal_gng.nodes:
+                    subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
+
             with torch.no_grad():
-                action_continuous = self.planner.plan(self.hidden_state, self.latent_state)
-                # Convert continuous action to discrete by taking the argmax
+                action_continuous = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight)
                 action_tensor = torch.argmax(action_continuous, dim=-1)
+
             decision_maker = "planner"
             log_prob = torch.tensor(0.0) # Not well-defined for planner
         else:
@@ -418,8 +482,11 @@ class ChimeraAgent:
         return internal_reward
 
     def record_experience(self, *args):
-        """Pushes an experience to the replay buffer."""
+        """Pushes an experience to the replay buffer and updates subgoal counters."""
         self.replay_buffer.push(*args)
+        # Assumes the reward is the 6th argument in *args
+        self.subgoal_reward += args[6]
+        self.subgoal_duration += 1
 
     def train(self, cortex_id="vector_input"):
         """
@@ -500,7 +567,7 @@ class ChimeraAgent:
             reward_pred = self.world_model.reward_model(z_t, h_t)
 
             recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_t)
-            reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_t)
+            reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_t.unsqueeze(-1))
 
             free_bits = self.hyperparams.get('free_bits', 1.0)
             kl_loss = torch.clamp(kl_loss, min=free_bits)
