@@ -20,6 +20,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+async def get_env_specs(env_id):
+    """Connects to the server to get environment specs and then disconnects."""
+    logger.info(f"Inspecting environment: {env_id}")
+    connector = ColosseumConnector(env_id, "spec-inspector")
+    session_data = await connector.create_session()
+    if not session_data:
+        logger.error(f"Could not get specs for {env_id}")
+        return None
+    # We don't need to maintain the connection, just get the specs
+    return session_data['environment']
+
 async def run_training_curriculum():
     # --- Load Configuration ---
     config_path = "config.yaml"
@@ -42,21 +53,36 @@ async def run_training_curriculum():
     agent_config = config.get('agent_config', {})
     history_config = config.get('agent_history', {})
 
-    # --- Inspect all environments to build a complete cortex configuration ---
+    # --- Pre-inspect all environments by connecting to the server ---
     master_cortex_configs = {}
     max_action_dim = 0
+    valid_env_list = []
     for name in env_list:
-        try:
-            temp_env = gym.make(name)
-            env_cortex_configs, _ = create_cortex_configs_from_observation_space(temp_env.observation_space)
-            master_cortex_configs.update(env_cortex_configs)
-            if isinstance(temp_env.action_space, gym.spaces.Discrete):
-                max_action_dim = max(max_action_dim, temp_env.action_space.n)
-            temp_env.close()
-        except Exception as e:
-            logger.error(f"Could not inspect environment {name}: {e}. Skipping.")
-            env_list.remove(name)
+        specs = await get_env_specs(name)
+        if specs:
+            try:
+                # Reconstruct the observation space from the server's response
+                obs_space_info = specs['observation_space']
+                observation_space = gym.spaces.Box(
+                    low=np.array(obs_space_info['low']),
+                    high=np.array(obs_space_info['high']),
+                    shape=obs_space_info['shape'],
+                    dtype=np.dtype(obs_space_info['dtype'])
+                )
 
+                env_cortex_configs, _ = create_cortex_configs_from_observation_space(observation_space)
+                master_cortex_configs.update(env_cortex_configs)
+
+                # Reconstruct the action space
+                action_space_info = specs['action_space']
+                if action_space_info['type'] == 'Discrete':
+                    max_action_dim = max(max_action_dim, action_space_info['n'])
+
+                valid_env_list.append(name)
+            except (KeyError, TypeError) as e:
+                logger.error(f"Could not parse specs for environment {name}: {e}. Skipping.")
+
+    env_list = valid_env_list
     logger.info(f"Master cortex configuration will include: {list(master_cortex_configs.keys())}")
     logger.info(f"Max action dimension across all environments: {max_action_dim}")
 
@@ -92,10 +118,20 @@ async def run_training_curriculum():
             join_response = await connector.join_session()
             if not join_response: continue
 
-            # Get env-specific details
+            # Get env-specific details from the session data
             current_obs = np.array(session_data.get("observation"))
-            actual_action_dim = session_data['environment']['action_space']['n']
-            _, cortex_id = create_cortex_configs_from_observation_space(gym.make(env_id).observation_space)
+            env_specs = session_data['environment']
+            actual_action_dim = env_specs['action_space']['n']
+
+            # Reconstruct observation space to determine the correct cortex_id
+            obs_space_info = env_specs['observation_space']
+            observation_space = gym.spaces.Box(
+                low=np.array(obs_space_info['low']),
+                high=np.array(obs_space_info['high']),
+                shape=obs_space_info['shape'],
+                dtype=np.dtype(obs_space_info['dtype'])
+            )
+            _, cortex_id = create_cortex_configs_from_observation_space(observation_space)
 
             # Run episodes for this environment
             for episode in range(episodes_per_env):

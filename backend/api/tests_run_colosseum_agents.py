@@ -8,6 +8,7 @@ sys.path.append('backend')
 import run_colosseum_agents
 import gymnasium as gym
 import numpy as np
+import torch
 
 class RunColosseumAgentsTests(unittest.TestCase):
 
@@ -36,13 +37,28 @@ class RunColosseumAgentsTests(unittest.TestCase):
 
         # Mock the ChimeraAgent
         mock_agent_instance = MagicMock()
+        mock_agent_instance.perceive_and_update_state.return_value = (
+            torch.zeros(1, 512),
+            torch.zeros(1, 128),
+            np.zeros(512),
+            [],
+            0.0
+        )
+        mock_agent_instance.select_action.return_value = (
+            0,
+            torch.tensor(0.1),
+            torch.zeros(1, 128),
+            "policy",
+            0.1
+        )
+        mock_agent_instance.train.return_value = {'policy_loss': 0.1234}
         mock_chimera_agent.return_value = mock_agent_instance
 
         # Mock the ColosseumConnector
         mock_connector_instance = MagicMock()
         # The create_session response needs to be realistic enough for the factory
         mock_obs_space_info = {
-            'type': 'Box', 'shape': (4,), 'low': [-1.0], 'high': [1.0], 'dtype': 'float32'
+            'type': 'Box', 'shape': (4,), 'low': [-1.0] * 4, 'high': [1.0] * 4, 'dtype': 'float32'
         }
         mock_action_space_info = {'type': 'discrete', 'n': 2}
         session_data = {
@@ -57,6 +73,7 @@ class RunColosseumAgentsTests(unittest.TestCase):
         mock_connector_instance.connect_websocket = AsyncMock(return_value=True)
         mock_connector_instance.join_session = AsyncMock(return_value={'type': 'agent.joined'})
         mock_connector_instance.receive_message = AsyncMock(return_value={'type': 'game.over'}) # End episode immediately
+        mock_connector_instance.send_action = AsyncMock()
         mock_connector_instance.close = AsyncMock() # Make close awaitable
         mock_connector.return_value = mock_connector_instance
 
@@ -76,7 +93,8 @@ class RunColosseumAgentsTests(unittest.TestCase):
         self.assertEqual(call_args_list[1].args[0], "LunarLander-v2")
 
         # 3. Assert that a connector was created for each environment
-        self.assertEqual(mock_connector.call_count, 2)
+        # It's called once for spec inspection and once for training, for each of the 2 envs.
+        self.assertEqual(mock_connector.call_count, 4)
 
 if __name__ == '__main__':
     unittest.main()
