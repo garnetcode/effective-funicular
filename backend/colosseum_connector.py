@@ -133,7 +133,7 @@ class ColosseumConnector:
 
         # Wait for the 'environment.reset' confirmation, ignoring other messages.
         start_time = asyncio.get_event_loop().time()
-        timeout = 10.0
+        timeout = 30.0  # Increased timeout for slower environments
         while asyncio.get_event_loop().time() - start_time < timeout:
             try:
                 # Use a shorter timeout for each recv() call within the main loop
@@ -144,7 +144,7 @@ class ColosseumConnector:
                     return response
                 elif response:
                     # Log other messages received while waiting
-                    logger.debug(f"Ignoring buffered message while waiting for reset confirmation: {response.get('type')}")
+                    logger.debug(f"Ignoring buffered message of type '{response.get('type')}' while waiting for reset confirmation. Content: {response}")
                 # If response is None (due to connection closed), the loop will continue and eventually time out.
 
             except asyncio.TimeoutError:
