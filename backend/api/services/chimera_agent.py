@@ -168,7 +168,7 @@ class ChimeraAgent:
         self.last_action = torch.tensor([0], device=self.device)
         self.high_level_plan = None
         self.current_subgoal = None
-        self.current_goal = None
+        self.current_goal = np.zeros(self.goal_dim)
         self.action_plan = None
         self.cortex_configs = cortex_configs or {}
 
