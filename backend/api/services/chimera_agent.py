@@ -30,7 +30,8 @@ class NumpyJSONEncoder(json.JSONEncoder):
 from .world_model_core import WorldModel
 from .skill_manager import SkillManager
 from .state_history_manager import StateHistoryManager
-from .replay_buffer import ReplayBuffer, Experience
+from .replay_buffer import Experience
+from .per_sequence_buffer import PERSequenceBuffer
 from . import cortex as cortex_modules
 from .cortex.vision_cortex import VisionCortex # Import the new cortex
 from .action.modules import ActionHead
@@ -244,7 +245,13 @@ class ChimeraAgent:
 
         buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
         sequence_length = self.hyperparams.get('sequence_length', 50)
-        self.replay_buffer = ReplayBuffer(buffer_capacity, sequence_length)
+        self.replay_buffer = PERSequenceBuffer(
+            capacity=buffer_capacity,
+            sequence_length=sequence_length,
+            alpha=self.hyperparams.get('per_alpha', 0.6),
+            beta_start=self.hyperparams.get('per_beta_start', 0.4),
+            beta_frames=self.hyperparams.get('per_beta_frames', 100000)
+        )
 
     def save_state(self, version_info={}):
         """Saves the agent's core models to a new version snapshot."""
@@ -514,7 +521,10 @@ class ChimeraAgent:
         """
         self.train_steps += 1
         # Part 1: Train the World Model on real, recently collected data.
-        world_model_stats = self.train_world_model(cortex_id)
+        world_model_stats, indices, priorities = self.train_world_model(cortex_id)
+        if indices is not None:
+            self.update_priorities(indices, priorities)
+
         policy_stats = {}
 
         # Part 2: Train the Actor-Critic policy in imagined trajectories, but less frequently.
@@ -531,6 +541,10 @@ class ChimeraAgent:
         combined_stats = {**world_model_stats, **policy_stats}
         return combined_stats
 
+    def update_priorities(self, indices, priorities):
+        """Updates the priorities of experiences in the replay buffer."""
+        self.replay_buffer.update_priorities(indices, priorities)
+
     def train_world_model(self, cortex_id="vector_input"):
         """
         Trains the World Model ensemble on batches of sequences.
@@ -540,6 +554,7 @@ class ChimeraAgent:
             return {}
 
         # --- Sample a batch of sequences for each model in the ensemble ---
+        # Sample batches for the ensemble
         batches = self.replay_buffer.sample(batch_size, self.num_ensemble_models)
 
         total_wm_loss = 0
@@ -579,8 +594,8 @@ class ChimeraAgent:
                 obs_recon = world_model.obs_decoder(z_t, h_t)
                 reward_pred = world_model.reward_model(z_t, h_t)
 
-                recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_t)
-                reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_t.unsqueeze(-1))
+                recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
+                reward_loss = torch.mean((reward_pred - reward_t.unsqueeze(-1))**2, dim=-1)
 
                 free_bits = self.hyperparams.get('free_bits', 1.0)
                 kl_loss = torch.clamp(kl_loss, min=free_bits)
@@ -589,7 +604,12 @@ class ChimeraAgent:
                 total_reward_loss += reward_loss
                 total_kl_loss += kl_loss
 
-            world_model_loss = (total_recon_loss + total_reward_loss + total_kl_loss) / self.replay_buffer.sequence_length
+            # Average losses over sequence length
+            total_recon_loss /= self.replay_buffer.sequence_length
+            total_reward_loss /= self.replay_buffer.sequence_length
+            total_kl_loss /= self.replay_buffer.sequence_length
+
+            world_model_loss = (total_recon_loss + total_reward_loss + total_kl_loss).mean()
             total_wm_loss += world_model_loss.item()
 
             # --- Backpropagation ---
@@ -598,7 +618,7 @@ class ChimeraAgent:
             torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
             wm_optimizer.step()
 
-        return {"wm_loss": total_wm_loss / self.num_ensemble_models}
+        return {"wm_loss": total_wm_loss / self.num_ensemble_models}, None, None
 
     def train_policy_in_imagination(self):
         """

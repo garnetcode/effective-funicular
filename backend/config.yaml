@@ -79,6 +79,10 @@ agent_config:
     cem_iterations: 10
     use_planner: true
     high_level_replan_frequency: 100 # Replans every 100 steps
+    # Prioritized Experience Replay
+    per_alpha: 0.6
+    per_beta_start: 0.4
+    per_beta_frames: 100000
     # World Model Ensemble
     num_ensemble_models: 5
     uncertainty_penalty_weight: 0.1
