@@ -126,37 +126,40 @@ function App() {
     }
   };
 
+  // Connect to the general training websocket when the app loads
   useEffect(() => {
-    if (!selectedAgent) return;
-
     const ws_scheme = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws_path = `${ws_scheme}://${window.location.host.replace('3000', '8000')}/ws/training/${selectedAgent}/`;
+    const ws_path = `${ws_scheme}://${window.location.host.replace('3000', '8000')}/ws/brain/`;
 
     const socket = new WebSocket(ws_path);
 
     socket.onopen = () => {
-      console.log("WebSocket connected for agent:", selectedAgent);
+      console.log("WebSocket connected for general training metrics.");
+      setStatusMessage("Connected to real-time training metrics.");
     };
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      console.log("Received metric:", data.message);
-      setTrainingMetrics(prevMetrics => [...prevMetrics, data.message]);
+      console.log("Received metric:", data);
+      // The data from the backend is the metric itself
+      setTrainingMetrics(prevMetrics => [...prevMetrics.slice(-9), data]); // Keep last 10 metrics
     };
 
     socket.onclose = () => {
-      console.log("WebSocket disconnected for agent:", selectedAgent);
+      console.log("WebSocket disconnected.");
+      setStatusMessage("Disconnected from real-time training metrics.");
     };
 
     socket.onerror = (error) => {
       console.error("WebSocket error:", error);
+      setStatusMessage("Error connecting to real-time metrics.");
     };
 
-    // Cleanup on component unmount or when selectedAgent changes
+    // Cleanup on component unmount
     return () => {
       socket.close();
     };
-  }, [selectedAgent]);
+  }, []); // Empty dependency array ensures this runs only once
 
 
   return (
@@ -215,10 +218,10 @@ function App() {
         <NetworkVisualizer graphData={graphData} />
         <div className="metrics-container">
           <h3>Training Metrics</h3>
-          <ul>
+          <ul className="metrics-list">
             {trainingMetrics.map((metric, index) => (
               <li key={index}>
-                Episode {metric.episode}: Reward = {metric.total_reward.toFixed(2)}, Avg Reward = {metric.avg_reward.toFixed(2)}
+                Ep: {metric.episode} | R: {metric.reward?.toFixed(2)} | AvgR: {metric.avg_reward?.toFixed(2)} | ε: {metric.epsilon?.toFixed(2)} | Loss: {metric.policy_loss?.toFixed(4)}
               </li>
             ))}
           </ul>
