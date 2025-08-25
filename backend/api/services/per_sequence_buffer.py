@@ -39,12 +39,14 @@ class SegmentTree:
         return self.tree[0]
 
 class PERSequenceBuffer:
-    def __init__(self, capacity, sequence_length=50, alpha=0.6, beta_start=0.4, beta_frames=100000):
+    def __init__(self, capacity, sequence_length=50, alpha=0.6, beta_start=0.4, beta_frames=100000, her_replay_strategy='future', her_replay_k=4):
         self.capacity = capacity
         self.sequence_length = sequence_length
         self.alpha = alpha
         self.beta_start = beta_start
         self.beta_frames = beta_frames
+        self.her_replay_strategy = her_replay_strategy
+        self.her_replay_k = her_replay_k
         self.frame = 0
         self.memory = []
         self.priorities = SegmentTree(capacity)
@@ -68,13 +70,11 @@ class PERSequenceBuffer:
 
     def sample(self, batch_size, num_models=1):
         """
-        Samples a batch of sequences. If num_models > 1, it returns a list of
-        batches, one for each model, sampled with replacement.
+        Samples a batch of sequences with HER.
         """
-        if num_models == 1:
-            return self._sample_batch(batch_size)
-        else:
-            # For ensembles, we don't use PER for now, as it complicates things.
+        # For now, we don't support HER with ensembles.
+        if num_models > 1:
+             # For ensembles, we don't use PER for now, as it complicates things.
             # We just sample with replacement.
             batches = []
             for _ in range(num_models):
@@ -82,6 +82,70 @@ class PERSequenceBuffer:
                 batch = [self.memory[i : i + self.sequence_length] for i in indices]
                 batches.append(self._format_batch(batch, batch_size))
             return batches
+
+        indices, weights = self._sample_indices(batch_size)
+        if indices is None:
+            return None, None, None
+
+        batch = [self.memory[i : i + self.sequence_length] for i in indices]
+
+        num_relabeled = int(batch_size / (self.her_replay_k + 1))
+
+        relabeled_indices = np.random.choice(batch_size, num_relabeled, replace=False)
+
+        if num_relabeled > 0:
+            print(f"Relabeling {num_relabeled} sequences with HER.")
+
+        for i in relabeled_indices:
+            sequence = batch[i]
+            if self.her_replay_strategy == 'future':
+                # Sample a future state from the same sequence as the new goal
+                future_idx = np.random.randint(self.sequence_length)
+                new_goal = sequence[future_idx].next_obs
+            else: # 'final'
+                new_goal = sequence[-1].next_obs
+
+            # Relabel the sequence with the new goal and recalculate rewards
+            new_sequence = []
+            for exp in sequence:
+                # The new reward is the negative distance to the new goal
+                # We assume the goal is in the observation space for simplicity
+                new_reward = -np.linalg.norm(exp.obs - new_goal)
+                new_exp = exp._replace(goal=new_goal, reward=new_reward)
+                new_sequence.append(new_exp)
+            batch[i] = new_sequence
+
+        return self._format_batch(batch, batch_size), indices, weights
+
+    def _sample_indices(self, batch_size):
+        """Samples a single batch of indices using PER."""
+        beta = self.beta_by_frame(self.frame)
+        self.frame += 1
+
+        valid_indices = [i for i in range(len(self.memory) - self.sequence_length + 1)]
+        if not valid_indices:
+            return None, None
+
+        total_priority = self.priorities.total()
+        if total_priority == 0:
+            indices = np.random.choice(valid_indices, size=batch_size)
+        else:
+            indices = []
+            segment = total_priority / batch_size
+            for i in range(batch_size):
+                a = segment * i
+                b = segment * (i + 1)
+                value = random.uniform(a, b)
+                idx = self.priorities.find(value)
+                indices.append(idx)
+
+        priorities = np.array([self.priorities.tree[i + self.priorities.size] for i in indices])
+        sampling_probs = priorities / total_priority
+
+        weights = (len(valid_indices) * sampling_probs) ** -beta
+        weights /= weights.max()
+
+        return indices, np.array(weights, dtype=np.float32)
 
     def _format_batch(self, batch, batch_size):
         """Formats a batch of sequences into a dictionary of numpy arrays."""

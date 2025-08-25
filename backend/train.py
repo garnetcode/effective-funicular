@@ -167,7 +167,7 @@ def main(args):
 def parse_args_and_run():
     """Parses command-line arguments and runs the main training function."""
     parser = argparse.ArgumentParser(description="Train a ChimeraAgent using a local environment or a curriculum.")
-    parser.add_argument("--env-curriculum", type=str, default="Pong-v4", help="A single env name or a comma-separated list of env names for curriculum learning.")
+    parser.add_argument("--env-curriculum", type=str, default="CartPole-v1", help="A single env name or a comma-separated list of env names for curriculum learning.")
     parser.add_argument("--agent_id", type=str, default=None, help="A unique ID for the agent. Defaults to 'agent-<first_env_name>'.")
     parser.add_argument("--total_steps", type=int, default=50000, help="Total number of steps to train for across all environments.")
     parser.add_argument("--steps-per-env", type=int, default=50000, help="Number of steps to train on each environment in the curriculum.")

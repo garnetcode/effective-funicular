@@ -91,3 +91,6 @@ agent_config:
     # Representation Learning
     contrastive_loss_weight: 0.1
     use_data_augmentation: true
+    # Hindsight Experience Replay
+    her_replay_strategy: 'future'
+    her_replay_k: 4

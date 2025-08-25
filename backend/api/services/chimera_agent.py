@@ -142,6 +142,8 @@ class ChimeraAgent:
         self.high_level_replan_frequency = self.hyperparams.get('high_level_replan_frequency', 100)
         self.goal_dim = self.hyperparams.get('goal_dim', 512)
         self.contrastive_loss_weight = self.hyperparams.get('contrastive_loss_weight', 0.1)
+        self.her_replay_strategy = self.hyperparams.get('her_replay_strategy', 'future')
+        self.her_replay_k = self.hyperparams.get('her_replay_k', 4)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -255,7 +257,9 @@ class ChimeraAgent:
             sequence_length=sequence_length,
             alpha=self.hyperparams.get('per_alpha', 0.6),
             beta_start=self.hyperparams.get('per_beta_start', 0.4),
-            beta_frames=self.hyperparams.get('per_beta_frames', 100000)
+            beta_frames=self.hyperparams.get('per_beta_frames', 100000),
+            her_replay_strategy=self.her_replay_strategy,
+            her_replay_k=self.her_replay_k
         )
 
     def save_state(self, version_info={}):
