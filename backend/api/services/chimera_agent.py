@@ -498,7 +498,8 @@ class ChimeraAgent:
             log_prob = action_dist.log_prob(action_tensor)
 
         action = action_tensor.item()
-        self.last_action = action_tensor
+        # Ensure last_action is always a 1D tensor of shape (1,) for consistency.
+        self.last_action = action_tensor.reshape(1)
         print(f"Total select_action time: {time.time() - start_time:.4f}s, decision_maker: {decision_maker}")
         return action, log_prob, stag_context_vector, decision_maker, epsilon
 
