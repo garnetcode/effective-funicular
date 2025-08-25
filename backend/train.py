@@ -65,23 +65,34 @@ def main(args):
     # --- Agent Setup ---
     # The agent is initialized once with all possible cortexes it might need.
     agent_id = args.agent_id or f"agent-{env_names[0]}"
-    # TODO: The embedding_dim should come from a central config, not be hardcoded.
-    # For now, we assume a fixed embedding size for all cortex outputs.
-    embedding_dim = 256
-    hyperparams = {
-        'learning_rate': args.lr, 'gamma': args.gamma, 'batch_size': args.batch_size,
-        'imagine_horizon': 15, 'collect_interval': 100, 'train_steps': 10,
-        'world_model_lr': 1e-3, 'actor_critic_lr': 3e-4,
-        'w_recon': 1.0, 'w_reward': 1.0, 'w_kl': 1.0,
-        'w_policy': 1.0, 'w_critic': 0.5, 'w_entropy': 1e-4, 'lambda': 0.95,
-        'use_stag_in_ac_loss': not args.no_stag
-    }
+    # Load hyperparameters from config.yaml
+    import yaml
+    with open("backend/config.yaml", 'r') as stream:
+        try:
+            config = yaml.safe_load(stream)
+            agent_config = config.get('agent_config', {})
+            hyperparams = agent_config.get('hyperparams', {})
+            embedding_dim = agent_config.get('embedding_dim', 256)
+        except yaml.YAMLError as exc:
+            print(exc)
+            hyperparams = {}
+            embedding_dim = 256
+
+    # Override with command-line arguments if provided
+    hyperparams['learning_rate'] = args.lr if args.lr is not None else hyperparams.get('learning_rate')
+    hyperparams['gamma'] = args.gamma if args.gamma is not None else hyperparams.get('gamma')
+    hyperparams['batch_size'] = args.batch_size if args.batch_size is not None else hyperparams.get('batch_size')
+    hyperparams['use_stag_in_ac_loss'] = not args.no_stag
+
     agent = ChimeraAgent(
         agent_id=agent_id, embedding_dim=embedding_dim, max_action_dim=max_action_dim,
         cortex_configs=master_cortex_configs, load_from_storage=not args.force_new,
         hyperparams=hyperparams
     )
-    print(f"Agent '{agent_id}' configured for curriculum.")
+    # Set a placeholder goal
+    goal = np.random.randn(agent.goal_dim)
+    agent.set_goal(goal)
+    print(f"Agent '{agent_id}' configured for curriculum and goal.")
 
     # --- Main Training Loop (Curriculum) ---
     total_steps = 0

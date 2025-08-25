@@ -28,7 +28,6 @@ class LatentPlanner(nn.Module):
                 mean=action_mean.unsqueeze(2).expand(-1, -1, self.num_samples, -1),
                 std=action_std.unsqueeze(2).expand(-1, -1, self.num_samples, -1)
             )
-            actions = torch.clamp(actions, -1, 1)
 
             all_model_returns = torch.zeros(num_models, batch_size, self.num_samples, device=device)
 
@@ -42,7 +41,10 @@ class LatentPlanner(nn.Module):
 
                         h_sim_flat = h_sim.view(-1, h_sim.size(-1))
                         z_sim_flat = z_sim.view(-1, z_sim.size(-1))
-                        action_t_flat = action_t_samples.view(-1, action_t_samples.size(-1))
+
+                        # Convert continuous actions to discrete for the transition model
+                        action_t_discrete = torch.argmax(action_t_samples, dim=-1)
+                        action_t_flat = action_t_discrete.view(-1, 1)
 
                         h_sim_flat, prior_mean, prior_std = world_model.rssm.transition_model(z_sim_flat, action_t_flat, h_sim_flat)
                         z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
@@ -52,6 +54,9 @@ class LatentPlanner(nn.Module):
                             reward_pred = -dist_to_subgoal
                         else:
                             reward_pred = world_model.reward_model(z_sim_flat, h_sim_flat).squeeze(-1)
+
+                        print(f"reward_pred shape: {reward_pred.shape}")
+                        print(f"reward_pred size: {reward_pred.numel()}")
 
                         h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
                         z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)

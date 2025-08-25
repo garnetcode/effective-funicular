@@ -7,28 +7,32 @@ from torch.distributions import Categorical
 class ActionHead(nn.Module):
     """
     A feed-forward network to map an internal state representation to a
-    distribution over actions.
+    distribution over actions. Can be conditioned on a goal.
     """
-    def __init__(self, input_dim, n_actions=256, learning_rate=0.001):
+    def __init__(self, input_dim, n_actions=256, goal_dim=None, learning_rate=0.001):
         super(ActionHead, self).__init__()
         self.input_dim = input_dim
         self.n_actions = n_actions
+        self.goal_dim = goal_dim
 
-        self.layer = nn.Linear(input_dim, n_actions)
-        # Optimizer is no longer managed here. It's managed in the agent's training loop.
+        if self.goal_dim:
+            self.layer = nn.Linear(input_dim + goal_dim, n_actions)
+        else:
+            self.layer = nn.Linear(input_dim, n_actions)
 
-    def forward(self, state_vector: torch.Tensor):
+    def forward(self, state_vector: torch.Tensor, goal: torch.Tensor = None):
         """
         Performs a forward pass to get a distribution over actions.
 
         Args:
             state_vector (torch.Tensor): The internal state from the agent's brain.
+            goal (torch.Tensor, optional): The goal vector. Defaults to None.
 
         Returns:
             torch.distributions.Categorical: A distribution over actions.
         """
-        if state_vector.shape[-1] != self.input_dim:
-            raise ValueError(f"Input vector feature dimension {state_vector.shape[-1]} does not match expected {self.input_dim}")
+        if self.goal_dim and goal is not None:
+            state_vector = torch.cat([state_vector, goal], dim=-1)
 
         logits = self.layer(state_vector)
         return Categorical(logits=logits)

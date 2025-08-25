@@ -139,6 +139,7 @@ class ChimeraAgent:
         self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
         self.use_planner = self.hyperparams.get('use_planner', False)
         self.high_level_replan_frequency = self.hyperparams.get('high_level_replan_frequency', 100)
+        self.goal_dim = self.hyperparams.get('goal_dim', 128)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -159,6 +160,7 @@ class ChimeraAgent:
         self.last_action = torch.tensor([0], device=self.device)
         self.high_level_plan = None
         self.current_subgoal = None
+        self.current_goal = None
         self.cortex_configs = cortex_configs or {}
 
         # Language Model setup (remains the same)
@@ -179,7 +181,7 @@ class ChimeraAgent:
 
         # World Model Ensemble
         self.world_models = nn.ModuleList([
-            WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
+            WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, self.goal_dim, hyperparams=self.hyperparams)
             for _ in range(self.num_ensemble_models)
         ]).to(self.device)
         self.world_model_optimizers = [
@@ -205,13 +207,14 @@ class ChimeraAgent:
         # Actor-Critic Planner
         # Actor (Policy Head)
         self.action_head = ActionHead(
-            input_dim=self.hidden_dim + self.stag_context_dim,  # Takes h_t and C_t
+            input_dim=self.hidden_dim + self.stag_context_dim,
             n_actions=self.max_action_dim,
+            goal_dim=self.goal_dim,
             learning_rate=self.learning_rate
         ).to(self.device)
         # Critic (Value Head)
         self.value_head = nn.Sequential(
-            nn.Linear(self.hidden_dim + self.latent_dim, 400), # Takes h_t and z_t
+            nn.Linear(self.hidden_dim + self.latent_dim + self.goal_dim, 400),
             nn.ReLU(),
             nn.Linear(400, 1)
         ).to(self.device)
@@ -291,6 +294,10 @@ class ChimeraAgent:
         """Sets the currently active skill/environment for the agent."""
         logger.info(f"Agent active skill set to: {skill_id}")
         self.active_skill_id = skill_id
+
+    def set_goal(self, goal):
+        """Sets the current goal for the agent."""
+        self.current_goal = goal
 
     def perceive_and_update_state(self, cortex_id, raw_obs, damage_taken=0):
         """
@@ -402,6 +409,7 @@ class ChimeraAgent:
         combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
 
         # 3. Select action using either the planner or the policy
+        epsilon = 0.0 # Default value
         if self.use_planner:
             # Hierarchical planning logic
             if self.current_subgoal is None or self.train_steps % self.high_level_replan_frequency == 0:
@@ -442,15 +450,18 @@ class ChimeraAgent:
             log_prob = torch.tensor(0.0) # Not well-defined for planner
         else:
             with torch.no_grad():
-                # Get the raw logits from the action head's linear layer
-                logits = self.action_head.layer(combined_input)
+                # Get the action distribution from the policy head
+                goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
+                # Expand goal tensor to match the batch size of the combined_input
+                goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
+                action_dist = self.action_head(combined_input, goal_tensor_expanded)
 
                 # Create a mask to disable logits for actions outside the valid range
-                mask = torch.full(logits.shape, -float('inf'))
+                mask = torch.full(action_dist.logits.shape, -float('inf'))
                 mask[0, :actual_action_dim] = 0
 
                 # Apply the mask to the logits
-                masked_logits = logits + mask
+                masked_logits = action_dist.logits + mask
 
                 # Create the distribution from the masked logits
                 action_dist = Categorical(logits=masked_logits)
@@ -509,7 +520,9 @@ class ChimeraAgent:
 
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer and updates subgoal counters."""
-        self.replay_buffer.push(*args)
+        experience = list(args)
+        experience.append(self.current_goal)
+        self.replay_buffer.push(*experience)
         # Assumes the reward is the 6th argument in *args
         self.subgoal_reward += args[6]
         self.subgoal_duration += 1
@@ -565,6 +578,7 @@ class ChimeraAgent:
             obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
             action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
             reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
+            goal_sequence = torch.from_numpy(batch['goal']).float().to(self.device)
 
             # Process observations through the appropriate cortex
             if obs_sequence.dim() == 5: # Image-based observations
@@ -592,7 +606,7 @@ class ChimeraAgent:
                 h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
 
                 obs_recon = world_model.obs_decoder(z_t, h_t)
-                reward_pred = world_model.reward_model(z_t, h_t)
+                reward_pred = world_model.reward_model(z_t, h_t, goal_sequence[:, t])
 
                 recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
                 reward_loss = torch.mean((reward_pred - reward_t.unsqueeze(-1))**2, dim=-1)
@@ -688,7 +702,7 @@ class ChimeraAgent:
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t
             action_input = torch.cat([h_t, stag_context_batch], dim=1)
-            action_dist = self.action_head(action_input)
+            action_dist = self.action_head(action_input, goal_sequence)
             action = action_dist.sample()
 
             # 3. World model predicts next state (do this without tracking gradients)
@@ -708,8 +722,13 @@ class ChimeraAgent:
 
 
         # --- Predict Rewards and Values for Imagined Trajectory ---
-        imagined_rewards = self.world_model.reward_model(imagined_z, imagined_h).squeeze(-1)
-        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z], dim=-1)).squeeze(-1)
+        # For simplicity, we assume the goal is constant for the whole trajectory
+        goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
+        imagined_rewards = self.world_models[0].reward_model(imagined_z, imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)).squeeze(-1)
+
+        # Expand goal for value prediction
+        goal_sequence_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
+        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z, goal_sequence_expanded], dim=-1)).squeeze(-1)
 
         # --- Calculate Value Targets (Lambda-Return) ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
@@ -727,14 +746,14 @@ class ChimeraAgent:
         # Normalize advantages to stabilize training
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
-        log_probs = self.action_head.get_log_probs(action_input, imagined_actions)
+        log_probs = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).log_prob(imagined_actions)
         policy_loss = -(log_probs * advantage).mean()
 
         # Critic Loss
         critic_loss = torch.nn.functional.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
         # Entropy Bonus
-        entropy = self.action_head.get_entropy(action_input).mean()
+        entropy = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).entropy().mean()
 
         # --- Total AC Loss and Backpropagation ---
         w_policy = self.hyperparams.get('w_policy', 1.0)

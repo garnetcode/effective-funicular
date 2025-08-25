@@ -4,7 +4,7 @@ from collections import namedtuple, deque
 import torch
 
 Experience = namedtuple('Experience',
-                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done'))
+                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal'))
 
 class SegmentTree:
     """A Segment Tree data structure for efficient sum-based operations."""

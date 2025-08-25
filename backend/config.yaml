@@ -86,3 +86,5 @@ agent_config:
     # World Model Ensemble
     num_ensemble_models: 5
     uncertainty_penalty_weight: 0.1
+    # Goal-Conditioning
+    goal_dim: 512 # Should match the hidden_dim for now

@@ -37,6 +37,9 @@ class TransitionModel(nn.Module):
         """
         # One-hot encode the action
         a_one_hot = torch.nn.functional.one_hot(a_t.long(), num_classes=self.action_dim).float()
+        # The output of one_hot can have an extra dimension, so we squeeze it
+        if a_one_hot.dim() == 3:
+            a_one_hot = a_one_hot.squeeze(1)
 
         # Concatenate latent state and action
         rnn_input = torch.cat([z_t, a_one_hot], dim=-1)

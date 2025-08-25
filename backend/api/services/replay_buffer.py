@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 Experience = namedtuple('Experience',
-                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done'))
+                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal'))
 
 class ReplayBuffer:
     def __init__(self, capacity, sequence_length=50):
