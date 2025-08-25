@@ -38,6 +38,7 @@ from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
 from .action.latent_planner import LatentPlanner
 from .action.graph_planner import GraphPlanner
+from .world_model.rep_learning import ContrastiveLoss
 
 class StagContextProcessor(nn.Module):
     """
@@ -139,7 +140,8 @@ class ChimeraAgent:
         self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
         self.use_planner = self.hyperparams.get('use_planner', False)
         self.high_level_replan_frequency = self.hyperparams.get('high_level_replan_frequency', 100)
-        self.goal_dim = self.hyperparams.get('goal_dim', 128)
+        self.goal_dim = self.hyperparams.get('goal_dim', 512)
+        self.contrastive_loss_weight = self.hyperparams.get('contrastive_loss_weight', 0.1)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -564,16 +566,17 @@ class ChimeraAgent:
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
-            return {}
+            return {}, None, None
 
         # --- Sample a batch of sequences for each model in the ensemble ---
-        # Sample batches for the ensemble
-        batches = self.replay_buffer.sample(batch_size, self.num_ensemble_models)
+        # For PER, we sample a single batch and use it for all models
+        batch, indices, weights = self.replay_buffer.sample(batch_size)
+        weights = torch.from_numpy(weights).float().to(self.device)
 
         total_wm_loss = 0
+        sequence_priorities = torch.zeros(batch_size, device=self.device)
 
         for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
-            batch = batches[i]
             # --- Prepare tensors ---
             obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
             action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
@@ -623,7 +626,11 @@ class ChimeraAgent:
             total_reward_loss /= self.replay_buffer.sequence_length
             total_kl_loss /= self.replay_buffer.sequence_length
 
-            world_model_loss = (total_recon_loss + total_reward_loss + total_kl_loss).mean()
+            # The priority is based on the reconstruction error
+            sequence_priorities += total_recon_loss.detach()
+
+            # Weight the loss by the importance sampling weights
+            world_model_loss = (weights * (total_recon_loss + total_reward_loss + total_kl_loss)).mean()
             total_wm_loss += world_model_loss.item()
 
             # --- Backpropagation ---
@@ -632,7 +639,10 @@ class ChimeraAgent:
             torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
             wm_optimizer.step()
 
-        return {"wm_loss": total_wm_loss / self.num_ensemble_models}, None, None
+        # Average the priorities over the ensemble
+        final_priorities = (sequence_priorities / self.num_ensemble_models).cpu().numpy()
+
+        return {"wm_loss": total_wm_loss / self.num_ensemble_models}, indices, final_priorities
 
     def train_policy_in_imagination(self):
         """
@@ -701,7 +711,7 @@ class ChimeraAgent:
                 stag_context_batch = torch.zeros_like(stag_context_batch)
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t
-            action_input = torch.cat([h_t, stag_context_batch], dim=1)
+            action_input = torch.cat([h_t, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
             action = action_dist.sample()
 
