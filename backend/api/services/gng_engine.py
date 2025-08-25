@@ -4,7 +4,17 @@
 # dynamic learning rates and FAISS-based search for performance.
 
 import numpy as np
-import faiss
+try:
+    import faiss
+except ImportError:
+    faiss = None
+
+def _safe_unit(x, eps=1e-8):
+    """Safely normalizes a vector to unit length."""
+    n = np.linalg.norm(x)
+    if n > 0:
+        return x / (n + eps)
+    return x
 
 class GNG_Engine:
     def __init__(self, dimensions, **kwargs):
@@ -21,8 +31,8 @@ class GNG_Engine:
         # Tuning phase learning rates (using existing param names)
         self.winner_learning_rate = kwargs.get('gng_winner_learning_rate', 0.1)
         self.neighbor_learning_rate = kwargs.get('gng_neighbor_learning_rate', 0.01)
-        # Ordering phase params
-        self.ordering_phase_steps = kwargs.get('gng_ordering_phase_steps', 2000)
+        # Adaptive learning rate params
+        self.learning_rate_decay = kwargs.get('gng_learning_rate_decay', 0.9995)
         self.winner_learning_rate_initial = kwargs.get('gng_winner_learning_rate_initial', 0.8)
         self.neighbor_learning_rate_initial = kwargs.get('gng_neighbor_learning_rate_initial', 0.1)
         self.max_edge_age = kwargs.get('gng_max_edge_age', 50)
@@ -31,7 +41,10 @@ class GNG_Engine:
         self.error_decay_rate = kwargs.get('gng_error_decay_rate', 0.001)
         self.utility_decay_rate = kwargs.get('gng_utility_decay_rate', 0.0005)
         self.utility_gain = kwargs.get('gng_utility_gain', 1.0)
-        self.faiss_rebuild_threshold = kwargs.get('gng_faiss_rebuild_threshold', 100)
+        self.faiss_rebuild_interval = kwargs.get('gng_faiss_rebuild_interval', 100)
+        self.pruning_grace_period = kwargs.get('gng_pruning_grace_period', 500)
+        self.utility_floor = kwargs.get('gng_utility_floor', 0.1)
+        self.utility_clip = kwargs.get('gng_utility_clip', 10.0)
 
         # State representation
         self.nodes = {} # { node_id: {'weight': np.array, 'error': float, 'utility': float} }
@@ -66,14 +79,13 @@ class GNG_Engine:
         node_id = self._next_node_id
 
         # Normalize the weight vector to have a length of 1
-        norm = np.linalg.norm(weight_vector)
-        if norm > 0:
-            weight_vector = weight_vector / norm
+        weight_vector = _safe_unit(weight_vector)
 
         self.nodes[node_id] = {
             'weight': weight_vector.astype('float32'),
             'error': error,
-            'utility': utility
+            'utility': utility,
+            'creation_iteration': self._iterations
         }
         self._next_node_id += 1
         self.faiss_index = None # Invalidate index
@@ -87,6 +99,8 @@ class GNG_Engine:
         if len(self.nodes) < 2:
             return
 
+        input_vector = _safe_unit(input_vector)
+
         # 1. Find Winners
         s1_id, s2_id = self._find_winners(input_vector)
         if s1_id is None: return # Not enough nodes to find winners
@@ -98,23 +112,17 @@ class GNG_Engine:
         self.nodes[s1_id]['utility'] += self.utility_gain * (1 + reward_gain)
 
         # 3. Adaptation with Dynamic Learning Rates
-        # Select learning rates based on the current phase (ordering vs. tuning)
-        if self._iterations < self.ordering_phase_steps:
-            current_winner_lr = self.winner_learning_rate_initial
-            current_neighbor_lr = self.neighbor_learning_rate_initial
-        else:
-            current_winner_lr = self.winner_learning_rate
-            current_neighbor_lr = self.neighbor_learning_rate
+        # Calculate decayed learning rates
+        decay_factor = self.learning_rate_decay ** self._iterations
+        current_winner_lr = self.winner_learning_rate_initial * decay_factor
+        current_neighbor_lr = self.neighbor_learning_rate_initial * decay_factor
 
         winner_utility = self.nodes[s1_id]['utility']
         dynamic_winner_lr = current_winner_lr / (1e-5 + np.log1p(winner_utility))
         self.nodes[s1_id]['weight'] += dynamic_winner_lr * (input_vector - self.nodes[s1_id]['weight'])
 
         # Re-normalize the winner's weight vector
-        winner_weight = self.nodes[s1_id]['weight']
-        norm = np.linalg.norm(winner_weight)
-        if norm > 0:
-            self.nodes[s1_id]['weight'] = winner_weight / norm
+        self.nodes[s1_id]['weight'] = _safe_unit(self.nodes[s1_id]['weight'])
 
         neighbor_ids = self._get_neighbors(s1_id)
         for n_id in neighbor_ids:
@@ -123,10 +131,7 @@ class GNG_Engine:
             self.nodes[n_id]['weight'] += dynamic_neighbor_lr * (input_vector - self.nodes[n_id]['weight'])
 
             # Re-normalize the neighbor's weight vector
-            neighbor_weight = self.nodes[n_id]['weight']
-            norm = np.linalg.norm(neighbor_weight)
-            if norm > 0:
-                self.nodes[n_id]['weight'] = neighbor_weight / norm
+            self.nodes[n_id]['weight'] = _safe_unit(self.nodes[n_id]['weight'])
 
         self.faiss_index = None # Invalidate index due to weight changes
 
@@ -142,6 +147,9 @@ class GNG_Engine:
         for node_id in self.nodes:
             self.nodes[node_id]['error'] *= (1 - self.error_decay_rate)
             self.nodes[node_id]['utility'] *= (1 - self.utility_decay_rate)
+            # Clip and floor utility
+            self.nodes[node_id]['utility'] = np.clip(self.nodes[node_id]['utility'], self.utility_floor, self.utility_clip)
+
 
     def _find_winners(self, input_vector):
         """Finds the two nodes closest to the input vector using FAISS or numpy."""
@@ -149,15 +157,30 @@ class GNG_Engine:
             return None, None
 
         # Rebuild index if it's invalidated or periodically
-        if self.faiss_index is None or (self._iterations % self.faiss_rebuild_threshold == 0):
+        if faiss and (self.faiss_index is None or (self._iterations % self.faiss_rebuild_interval == 0)):
             self._build_faiss_index()
 
-        input_vector = np.array([input_vector]).astype('float32')
+        if self.faiss_index:
+            input_vector_faiss = np.array([input_vector]).astype('float32')
+            _, indices = self.faiss_index.search(input_vector_faiss, 2)
+            s1_gng_id = self.faiss_id_map[indices[0][0]]
+            s2_gng_id = self.faiss_id_map[indices[0][1]]
+            return s1_gng_id, s2_gng_id
+        else:
+            # NumPy fallback
+            node_ids = list(self.nodes.keys())
+            weights = np.array([self.nodes[nid]['weight'] for nid in node_ids])
+            distances_sq = np.sum((weights - input_vector) ** 2, axis=1)
 
-        _, indices = self.faiss_index.search(input_vector, 2)
-        s1_gng_id = self.faiss_id_map[indices[0][0]]
-        s2_gng_id = self.faiss_id_map[indices[0][1]]
-        return s1_gng_id, s2_gng_id
+            # Get the indices of the two smallest distances
+            # Using argpartition is more efficient than argsort for finding k smallest items
+            if len(distances_sq) > 2:
+                two_smallest_indices = np.argpartition(distances_sq, 2)[:2]
+            else:
+                two_smallest_indices = np.argsort(distances_sq)[:2]
+
+            s1_idx, s2_idx = two_smallest_indices
+            return node_ids[s1_idx], node_ids[s2_idx]
 
     def _get_neighbors(self, node_id):
         """Returns the set of node IDs connected to the given node."""
@@ -275,10 +298,14 @@ class GNG_Engine:
             return
 
         # Identify nodes to prune without modifying the dict during iteration.
-        nodes_to_prune = [
-            nid for nid, node_data in self.nodes.items()
-            if node_data['utility'] < min_utility
-        ]
+        nodes_to_prune = []
+        for nid, node_data in self.nodes.items():
+            # Check for low utility
+            if node_data['utility'] < min_utility:
+                # Check if the node is outside its grace period
+                node_age = self._iterations - node_data.get('creation_iteration', 0)
+                if node_age > self.pruning_grace_period:
+                    nodes_to_prune.append(nid)
 
         # Do nothing if it would leave the graph with less than 2 nodes.
         if len(self.nodes) - len(nodes_to_prune) < 2:

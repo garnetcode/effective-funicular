@@ -54,7 +54,7 @@ class StagContextProcessor(nn.Module):
         return self.processor(concatenated_weights.unsqueeze(0))
 
 
-def _initialize_cortexes(configs, output_dim):
+def _initialize_cortexes(configs, output_dim, device):
     """
     Initializes all cortex modules based on the provided configurations.
     It dynamically loads the class from the cortex package.
@@ -66,21 +66,28 @@ def _initialize_cortexes(configs, output_dim):
         params = config.get('params', {})
         try:
             CortexClass = getattr(cortex_modules, class_name)
-
+            cortex_instance = None
             # Pass parameters based on cortex type
             if class_name == "DenseCortex":
-                cortexes[cortex_id] = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
+                cortex_instance = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
             elif class_name == "VisionCortex":
-                cortexes[cortex_id] = VisionCortex(input_shape=params['input_shape'], output_dim=output_dim)
+                cortex_instance = VisionCortex(input_shape=params['input_shape'], output_dim=output_dim)
             elif class_name == "LanguageCortex":
-                cortexes[cortex_id] = CortexClass(
+                # LanguageCortex might not be a torch module, handle gracefully
+                cortex_instance = CortexClass(
                     model_path_or_id=params['model_id'],
                     output_dim=output_dim,
                     api_base=params.get('api_base'),
                     embedding_dim=params.get('embedding_dim')
                 )
             else: # For TextCortex etc.
-                cortexes[cortex_id] = CortexClass(output_dim=output_dim)
+                cortex_instance = CortexClass(output_dim=output_dim)
+
+            if cortex_instance:
+                if isinstance(cortex_instance, nn.Module):
+                    cortex_instance.to(device)
+                cortexes[cortex_id] = cortex_instance
+
         except (AttributeError, ImportError) as e:
             print(f"Warning: Could not initialize cortex '{cortex_id}' of type '{class_name}': {e}")
     return cortexes
@@ -96,6 +103,7 @@ class ChimeraAgent:
         self.max_action_dim = max_action_dim
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Consolidate hyperparameters from explicit arg and kwargs
         self.hyperparams = hyperparams or {}
@@ -116,6 +124,13 @@ class ChimeraAgent:
         self.gng_pruning_frequency = self.hyperparams.get('gng_pruning_frequency', 1000)
         self.gng_min_utility_threshold = self.hyperparams.get('gng_min_utility_threshold', 0.1)
         self.world_model_weight_decay = self.hyperparams.get('world_model_weight_decay', 1e-6)
+        # Schedules
+        self.imagination_horizon_start = self.hyperparams.get('imagination_horizon_start', 5)
+        self.imagination_horizon_end = self.hyperparams.get('imagination_horizon_end', 15)
+        self.imagination_horizon_schedule_steps = self.hyperparams.get('imagination_horizon_schedule_steps', 10000)
+        self.entropy_coef_start = self.hyperparams.get('entropy_coef_start', 0.01)
+        self.entropy_coef_end = self.hyperparams.get('entropy_coef_end', 0.001)
+        self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -128,9 +143,9 @@ class ChimeraAgent:
         self.steps_done = 0
         self.train_steps = 0
         # h_t and z_t for the RSSM
-        self.hidden_state = torch.zeros(1, self.hidden_dim)
-        self.latent_state = torch.zeros(1, self.latent_dim)
-        self.last_action = torch.tensor([0])
+        self.hidden_state = torch.zeros(1, self.hidden_dim, device=self.device)
+        self.latent_state = torch.zeros(1, self.latent_dim, device=self.device)
+        self.last_action = torch.tensor([0], device=self.device)
         self.cortex_configs = cortex_configs or {}
 
         # Language Model setup (remains the same)
@@ -147,10 +162,11 @@ class ChimeraAgent:
                 self.cortex_configs['language_cortex'] = {"type": "LanguageCortex", "params": {"model_id": embedding_model_id, "api_base": api_base, "embedding_dim": embedding_dim}}
 
         # --- Initialize Architecture Components ---
-        self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim)
+        self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim, self.device)
 
         # World Model (RSSM-based)
-        self.world_model = WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
+        self.world_model = WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams).to(self.device)
+        self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
 
         # Skill Manager (manages multiple STAGs)
         self.skill_manager = SkillManager(self.hidden_dim, **self.hyperparams)
@@ -161,7 +177,7 @@ class ChimeraAgent:
         self.stag_context_processor = StagContextProcessor(
             input_dim=self.max_stag_path_length * self.hidden_dim,
             output_dim=self.stag_context_dim
-        )
+        ).to(self.device)
 
         # Actor-Critic Planner
         # Actor (Policy Head)
@@ -169,13 +185,13 @@ class ChimeraAgent:
             input_dim=self.hidden_dim + self.stag_context_dim,  # Takes h_t and C_t
             n_actions=self.max_action_dim,
             learning_rate=self.learning_rate
-        )
+        ).to(self.device)
         # Critic (Value Head)
         self.value_head = nn.Sequential(
             nn.Linear(self.hidden_dim + self.latent_dim, 400), # Takes h_t and z_t
             nn.ReLU(),
             nn.Linear(400, 1)
-        )
+        ).to(self.device)
 
         self.text_generation_head = None
         if self.language_model_enabled and generation_model_id:
@@ -184,6 +200,8 @@ class ChimeraAgent:
                 input_dim=self.hidden_dim,
                 api_base=api_base
             )
+            if isinstance(self.text_generation_head, nn.Module):
+                self.text_generation_head.to(self.device)
 
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
@@ -191,7 +209,8 @@ class ChimeraAgent:
             self.save_state(version_info={"message": "Initial state."})
 
         buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
-        self.replay_buffer = ReplayBuffer(buffer_capacity)
+        sequence_length = self.hyperparams.get('sequence_length', 50)
+        self.replay_buffer = ReplayBuffer(buffer_capacity, sequence_length)
 
     def save_state(self, version_info={}):
         """Saves the agent's core models to a new version snapshot."""
@@ -234,7 +253,7 @@ class ChimeraAgent:
 
         # 2. Process raw observation through the specified cortex
         obs_numpy = self.cortexes[cortex_id].process(raw_obs)
-        obs_tensor = torch.from_numpy(obs_numpy).float().unsqueeze(0)
+        obs_tensor = torch.from_numpy(obs_numpy).float().unsqueeze(0).to(self.device)
 
         # 3. Use the world model to update the agent's internal state (h_t, z_t)
         with torch.no_grad():
@@ -251,9 +270,9 @@ class ChimeraAgent:
         novelty = 0
         # Only engage STAG if we are past the pre-training phase.
         if self.steps_done > self.world_model_pretrain_steps:
-            h_numpy = self.hidden_state.detach().numpy().flatten()
-            norm = np.linalg.norm(h_numpy)
-            h_normalized = h_numpy / norm if norm > 0 else h_numpy
+            h_normalized = self.h_norm(self.hidden_state).detach().cpu().numpy().flatten()
+            # The vector is now normalized by LayerNorm and will be normalized again
+            # by _safe_unit in the GNG engine for double safety.
 
             # Find the activation path and get the potential novelty signal (error)
             terminal_node, winner_id, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
@@ -294,11 +313,11 @@ class ChimeraAgent:
             for step in activation_path:
                 level_gng = active_stag.level_map[step['level_id']]
                 node_weight = level_gng.nodes[step['winner_id']]['weight']
-                path_weights.append(torch.from_numpy(node_weight).float())
+                path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
 
         # Pad the path to a fixed length
         while len(path_weights) < self.max_stag_path_length:
-            path_weights.append(torch.zeros(self.hidden_dim))
+            path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
 
         # Process the path to get the context vector C_t
         with torch.no_grad():
@@ -331,7 +350,7 @@ class ChimeraAgent:
         self.steps_done += 1
 
         if np.random.rand() < epsilon:
-            action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)])
+            action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
             decision_maker = "random"
         else:
             action_tensor = action_dist.sample()
@@ -380,7 +399,6 @@ class ChimeraAgent:
 
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer."""
-        # The experience tuple will need to be updated for the new training regime
         self.replay_buffer.push(*args)
 
     def train(self, cortex_id="vector_input"):
@@ -409,71 +427,64 @@ class ChimeraAgent:
 
     def train_world_model(self, cortex_id="vector_input"):
         """
-        Trains the World Model (RSSM, Obs/Reward Decoders) on a batch of real data.
-        This is the first part of the "Sleep" phase.
+        Trains the World Model (RSSM, Obs/Reward Decoders) on a batch of sequences.
         """
-        if cortex_id not in self.cortexes:
-            logger.error(f"Invalid cortex_id '{cortex_id}' provided for training.")
+        batch_size = self.hyperparams.get('batch_size', 32)
+        if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
 
-        cortex = self.cortexes[cortex_id]
-        if not isinstance(cortex, torch.nn.Module):
-            logger.warning(f"Cortex '{cortex_id}' is not trainable. Only training WorldModel.")
-            # For non-trainable cortexes, we can still proceed
-            pass
+        # --- Sample a batch of sequences ---
+        batch = self.replay_buffer.sample(batch_size)
 
-        batch_size = self.hyperparams.get('batch_size', 32)
-        if len(self.replay_buffer) < batch_size:
-            return {"status": "Not enough experiences in buffer to train."}
+        # --- Prepare tensors ---
+        obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
+        action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
+        reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
 
-        # --- Sample a batch and prepare tensors ---
-        experiences = self.replay_buffer.sample(batch_size)
-        batch = Experience(*zip(*experiences))
-
-        # The replay buffer stores raw numpy observations.
-        # We need to stack them into a batch and process them through the cortex.
-        # This requires that all observations in a batch are of the same shape.
-        try:
-            next_obs_batch_raw = torch.from_numpy(np.stack(batch.next_obs)).float()
-        except ValueError:
-            # Handle cases where observations might not be perfectly rectangular, e.g. due to episode ends.
-            # This is a simple fallback. A more robust solution might involve padding/resizing here.
-            logger.warning("Could not stack observations directly. Ensure all observations in a batch are the same shape.")
-            return {"status": "Observation stacking failed."}
-
-        # Process observations through the cortex
-        # This assumes the cortex is a torch.nn.Module that can handle batches.
-        obs_batch_processed = cortex(next_obs_batch_raw)
-
-        h_prev_batch = torch.stack(batch.h).squeeze(1)
-        z_prev_batch = torch.stack(batch.z).squeeze(1)
-        action_batch = torch.tensor(batch.action)
-        reward_batch = torch.tensor(batch.reward).float()
+        # Process observations through the appropriate cortex
+        batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
+        obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
+        obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
 
         # --- Optimizers ---
         wm_params = list(self.world_model.parameters())
-        if isinstance(cortex, torch.nn.Module):
-            wm_params += list(cortex.parameters())
+        if isinstance(self.cortexes[cortex_id], nn.Module):
+            wm_params += list(self.cortexes[cortex_id].parameters())
         wm_optimizer = torch.optim.Adam(
             wm_params,
-            lr=self.hyperparams.get('world_model_lr', 0.001),
+            lr=self.hyperparams.get('world_model_lr', 1e-4),
             weight_decay=self.world_model_weight_decay
         )
 
-        # --- Forward Pass ---
-        obs_recon, reward_pred, kl_loss, _, _ = self.world_model(
-            obs_batch_processed, action_batch, h_prev_batch, z_prev_batch
-        )
-
-        # --- Loss Calculation (ℒ_WM) ---
-        recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_batch_processed)
-        reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_batch.unsqueeze(1))
+        # --- Sequence-based Forward Pass and Loss Calculation ---
+        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
         
-        w_recon = self.hyperparams.get('w_recon', 1.0)
-        w_reward = self.hyperparams.get('w_reward', 1.0)
-        w_kl = self.hyperparams.get('w_kl', 1.0)
+        total_recon_loss = 0
+        total_reward_loss = 0
+        total_kl_loss = 0
 
-        world_model_loss = w_recon * recon_loss + w_reward * reward_loss + w_kl * kl_loss
+        for t in range(self.replay_buffer.sequence_length):
+            obs_t = obs_sequence_processed[:, t]
+            action_t = action_sequence[:, t]
+            reward_t = reward_sequence[:, t]
+
+            h_t, z_t, kl_loss = self.world_model.rssm(obs_t, action_t, h_t, z_t)
+
+            obs_recon = self.world_model.obs_decoder(z_t, h_t)
+            reward_pred = self.world_model.reward_model(z_t, h_t)
+
+            recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_t)
+            reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_t)
+
+            free_bits = self.hyperparams.get('free_bits', 1.0)
+            kl_loss = torch.clamp(kl_loss, min=free_bits)
+
+            total_recon_loss += recon_loss
+            total_reward_loss += reward_loss
+            total_kl_loss += kl_loss
+
+        world_model_loss = (total_recon_loss + total_reward_loss + total_kl_loss) / self.replay_buffer.sequence_length
 
         # --- Backpropagation ---
         wm_optimizer.zero_grad()
@@ -483,9 +494,9 @@ class ChimeraAgent:
 
         return {
             "wm_loss": world_model_loss.item(),
-            "recon_loss": recon_loss.item(),
-            "reward_loss": reward_loss.item(),
-            "kl_loss": kl_loss.item()
+            "recon_loss": (total_recon_loss / self.replay_buffer.sequence_length).item(),
+            "reward_loss": (total_reward_loss / self.replay_buffer.sequence_length).item(),
+            "kl_loss": (total_kl_loss / self.replay_buffer.sequence_length).item()
         }
 
     def train_policy_in_imagination(self):
@@ -493,17 +504,27 @@ class ChimeraAgent:
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
         This is the second part of the "Sleep" phase.
         """
-        batch_size = self.hyperparams.get('batch_size', 32)
-        if len(self.replay_buffer) < batch_size:
+        if self.train_steps < self.world_model_pretrain_steps:
             return {}
 
-        horizon = self.hyperparams.get('imagine_horizon', 15)
+        batch_size = self.hyperparams.get('batch_size', 32)
+        if len(self.replay_buffer) < self.replay_buffer.sequence_length:
+            return {}
+
+        # --- Calculate scheduled parameters ---
+        # Imagination Horizon
+        progress = min(1.0, self.train_steps / self.imagination_horizon_schedule_steps)
+        horizon = int(self.imagination_horizon_start + progress * (self.imagination_horizon_end - self.imagination_horizon_start))
+
+        # Entropy Coefficient
+        progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
+        entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
+
 
         # --- Sample starting states from real data ---
-        experiences = self.replay_buffer.sample(batch_size)
-        batch = Experience(*zip(*experiences))
-        h_start = torch.stack(batch.h).squeeze(1)
-        z_start = torch.stack(batch.z).squeeze(1)
+        batch = self.replay_buffer.sample(batch_size)
+        h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device)
+        z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device)
 
         # --- Imagine Trajectories ---
         h_t, z_t = h_start, z_start
@@ -530,10 +551,10 @@ class ChimeraAgent:
                     for step in activation_path:
                         level_gng = active_stag.level_map[step['level_id']]
                         node_weight = level_gng.nodes[step['winner_id']]['weight']
-                        path_weights.append(torch.from_numpy(node_weight).float())
+                        path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
 
                 while len(path_weights) < self.max_stag_path_length:
-                    path_weights.append(torch.zeros(self.hidden_dim))
+                    path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
 
                 stag_contexts.append(self.stag_context_processor(path_weights))
 
@@ -597,9 +618,8 @@ class ChimeraAgent:
         # --- Total AC Loss and Backpropagation ---
         w_policy = self.hyperparams.get('w_policy', 1.0)
         w_critic = self.hyperparams.get('w_critic', 0.5)
-        w_entropy = self.hyperparams.get('w_entropy', 0.001)
 
-        ac_loss = w_policy * policy_loss + w_critic * critic_loss - w_entropy * entropy
+        ac_loss = w_policy * policy_loss + w_critic * critic_loss - entropy_coef * entropy
 
         ac_optimizer = torch.optim.Adam(
             list(self.action_head.parameters()) + list(self.value_head.parameters()),
@@ -614,7 +634,9 @@ class ChimeraAgent:
             "ac_loss": ac_loss.item(),
             "policy_loss": policy_loss.item(),
             "critic_loss": critic_loss.item(),
-            "entropy": entropy.item()
+            "entropy": entropy.item(),
+            "horizon": horizon,
+            "entropy_coef": entropy_coef
         }
 
     def generate_response(self, max_new_tokens=50):

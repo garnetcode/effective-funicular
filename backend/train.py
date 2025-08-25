@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import uuid
 import torch
+import random
 from api.services.chimera_agent import ChimeraAgent
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 
@@ -18,11 +19,25 @@ except ImportError:
     exit(1)
 
 
+def seed_all(s):
+    """Sets the seed for all random number generators."""
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(s)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def main(args):
     """
     Main function to run the RL training loop with a local environment,
     implementing the Wake-Sleep cycle and curriculum learning.
     """
+    if args.seed is not None:
+        print(f"Setting seed to {args.seed}")
+        seed_all(args.seed)
+
     env_names = [env.strip() for env in args.env_curriculum.split(',')]
     print(f"Starting training with curriculum: {env_names}")
 
@@ -116,10 +131,14 @@ def main(args):
                 if len(agent.replay_buffer) > args.batch_size:
                     print(f"\n--- Sleep Phase: Training ---")
                     for _ in range(10):
-                        # Pass the correct cortex_id for training
-                        wm_stats = agent.train_world_model(cortex_id)
-                        ac_stats = agent.train_policy_in_imagination()
-                        print(f"  Train Step | WM Loss: {wm_stats.get('wm_loss', -1):.4f} | AC Loss: {ac_stats.get('ac_loss', -1):.4f}")
+                        # The train method now encapsulates both WM and AC training
+                        stats = agent.train(cortex_id)
+                        if stats:
+                            wm_loss = stats.get('wm_loss', -1)
+                            ac_loss = stats.get('ac_loss', -1)
+                            horizon = stats.get('horizon', -1)
+                            entropy_coef = stats.get('entropy_coef', -1)
+                            print(f"  Train Step {agent.train_steps} | WM Loss: {wm_loss:.4f} | AC Loss: {ac_loss:.4f} | Horizon: {horizon} | Entropy Coef: {entropy_coef:.4f}")
                 else:
                     print("Not enough data to enter sleep phase, continuing collection.")
 
@@ -145,6 +164,7 @@ def parse_args_and_run():
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for rewards.")
     parser.add_argument("--force_new", action="store_true", help="Force creation of a new agent, ignoring saved state.")
     parser.add_argument("--no-stag", action="store_true", help="If set, STAG context will not be used in the actor-critic loss.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility.")
 
     args = parser.parse_args()
     main(args)
