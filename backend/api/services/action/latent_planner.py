@@ -55,9 +55,6 @@ class LatentPlanner(nn.Module):
                         else:
                             reward_pred = world_model.reward_model(z_sim_flat, h_sim_flat).squeeze(-1)
 
-                        print(f"reward_pred shape: {reward_pred.shape}")
-                        print(f"reward_pred size: {reward_pred.numel()}")
-
                         h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
                         z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)
                         all_model_returns[i] += reward_pred.view(batch_size, self.num_samples)

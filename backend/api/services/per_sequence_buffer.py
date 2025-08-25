@@ -93,9 +93,6 @@ class PERSequenceBuffer:
 
         relabeled_indices = np.random.choice(batch_size, num_relabeled, replace=False)
 
-        if num_relabeled > 0:
-            print(f"Relabeling {num_relabeled} sequences with HER.")
-
         for i in relabeled_indices:
             sequence = batch[i]
             if self.her_replay_strategy == 'future':
@@ -165,42 +162,6 @@ class PERSequenceBuffer:
                 batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
-
-
-    def _sample_batch(self, batch_size):
-        """Samples a single batch of sequences using PER."""
-        beta = self.beta_by_frame(self.frame)
-        self.frame += 1
-
-        valid_indices = [i for i in range(len(self.memory) - self.sequence_length + 1)]
-        if not valid_indices:
-            return None, None, None
-
-        total_priority = self.priorities.total()
-        if total_priority == 0:
-            indices = np.random.choice(valid_indices, size=batch_size)
-        else:
-            indices = []
-            segment = total_priority / batch_size
-            for i in range(batch_size):
-                a = segment * i
-                b = segment * (i + 1)
-                value = random.uniform(a, b)
-                idx = self.priorities.find(value)
-                indices.append(idx)
-
-        priorities = np.array([self.priorities.tree[i + self.priorities.size] for i in indices])
-        sampling_probs = priorities / total_priority
-
-        weights = (len(valid_indices) * sampling_probs) ** -beta
-        weights /= weights.max()
-
-        batch = [self.memory[i : i + self.sequence_length] for i in indices]
-
-        batch_dict = self._format_batch(batch, batch_size)
-
-        return batch_dict, indices, np.array(weights, dtype=np.float32)
-
 
     def update_priorities(self, batch_indices, batch_priorities):
         """Update priorities of sampled sequences."""

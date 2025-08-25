@@ -466,7 +466,8 @@ class ChimeraAgent:
 
             with torch.no_grad():
                 action_continuous = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight)
-                action_tensor = torch.argmax(action_continuous, dim=-1)
+                # Slice the output to the actual action dimension of the environment
+                action_tensor = torch.argmax(action_continuous[:, :actual_action_dim], dim=-1)
 
             decision_maker = "planner"
             log_prob = torch.tensor(0.0) # Not well-defined for planner
