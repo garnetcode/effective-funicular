@@ -150,6 +150,12 @@ class PERSequenceBuffer:
         for key in Experience._fields:
             if key in ['obs', 'next_obs']:
                 batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
+            elif key == 'activation_path':
+                # This field contains variable-length lists of dictionaries.
+                # It's not converted to a numpy array because it's not used in a context
+                # that requires a batched tensor representation (e.g., world model training).
+                # We just collect the raw data.
+                batch_dict[key] = [getattr(exp, key) for seq in batch for exp in seq]
             else:
                 data = [getattr(exp, key) for seq in batch for exp in seq]
                 if data and any(isinstance(d, torch.Tensor) for d in data):
@@ -165,7 +171,9 @@ class PERSequenceBuffer:
                     batch_dict[key] = np.array(data)
 
         for key, value in batch_dict.items():
-            if value.size > 0:
+            # The 'activation_path' is a list of lists and doesn't have a 'size' attribute
+            # or a uniform shape, so we skip it in the reshaping process.
+            if hasattr(value, 'size') and value.size > 0:
                 batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
