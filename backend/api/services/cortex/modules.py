@@ -60,8 +60,16 @@ class DenseCortex(BaseCortex, torch.nn.Module):
     def forward(self, batch_tensor: torch.Tensor) -> torch.Tensor:
         """
         Processes a batch of tensors through the layers.
-        Used during training.
+        Used during training. This now includes padding.
         """
+        batch_size, current_dim = batch_tensor.shape
+        if current_dim < self.input_dim:
+            # Create a new tensor with the target dimensions and fill it with zeros
+            padded_batch = torch.zeros(batch_size, self.input_dim, device=batch_tensor.device)
+            # Copy the original data into the padded tensor
+            padded_batch[:, :current_dim] = batch_tensor
+            batch_tensor = padded_batch
+
         # Normalize the input batch
         normalized_batch = self.norm(batch_tensor)
         return self.activation(self.linear(normalized_batch))
