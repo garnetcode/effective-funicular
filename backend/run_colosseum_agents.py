@@ -1,20 +1,26 @@
 import asyncio
 import logging
 import yaml
-from multi_session_manager import MultiSessionManager
+import numpy as np
+import torch
+
+from api.services.chimera_agent import ChimeraAgent
+from colosseum_connector import ColosseumConnector
+from api.services.cortex.factory import create_cortex_configs_from_observation_space
+import gymnasium as gym
 
 # --- Set up logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("colosseum_training.log"),
+        logging.FileHandler("colosseum_curriculum.log"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-def main():
+async def run_training_curriculum():
     # --- Load Configuration ---
     config_path = "config.yaml"
     try:
@@ -26,34 +32,129 @@ def main():
 
     logger.info(f"Loaded configuration from {config_path}")
 
-    # Environments to run in parallel
-    # This could also be moved into the config file
+    # --- Curriculum and Agent Setup ---
+    # Environments to run sequentially as a curriculum
     env_list = [
         "CartPole-v1",
-        "LunarLander-v3" # Note: The spec mentioned v3, but v2 is also common
+        "LunarLander-v2"
     ]
-
-    # Agent configuration (hyperparameters, etc.)
+    episodes_per_env = config.get('episodes_per_env', 10)
     agent_config = config.get('agent_config', {})
-    agent_config['load_from_storage'] = not config.get('force_new_agent', False)
     history_config = config.get('agent_history', {})
-    num_episodes = config.get('episodes_per_env', 10)
 
-    # --- Start the Manager ---
-    manager = MultiSessionManager(
-        agent_config=agent_config,
-        history_config=history_config,
-        env_list=env_list,
-        num_episodes=num_episodes
+    # --- Inspect all environments to build a complete cortex configuration ---
+    master_cortex_configs = {}
+    max_action_dim = 0
+    for name in env_list:
+        try:
+            temp_env = gym.make(name)
+            env_cortex_configs, _ = create_cortex_configs_from_observation_space(temp_env.observation_space)
+            master_cortex_configs.update(env_cortex_configs)
+            if isinstance(temp_env.action_space, gym.spaces.Discrete):
+                max_action_dim = max(max_action_dim, temp_env.action_space.n)
+            temp_env.close()
+        except Exception as e:
+            logger.error(f"Could not inspect environment {name}: {e}. Skipping.")
+            env_list.remove(name)
+
+    logger.info(f"Master cortex configuration will include: {list(master_cortex_configs.keys())}")
+    logger.info(f"Max action dimension across all environments: {max_action_dim}")
+
+    # --- Initialize a single, generalist agent ---
+    agent_id = agent_config.get('default_agent_id_prefix', 'Kymera-Generalist') + "v1"
+    embedding_dim = agent_config.get('embedding_dim', 512)
+
+    agent = ChimeraAgent(
+        agent_id=agent_id,
+        embedding_dim=embedding_dim,
+        max_action_dim=max_action_dim,
+        cortex_configs=master_cortex_configs,
+        load_from_storage=not config.get('force_new_agent', False),
+        hyperparams=agent_config.get('hyperparams', {}),
+        history_config=history_config
     )
+    logger.info(f"Initialized Generalist Agent '{agent_id}'")
 
-    logger.info(f"Starting Multi-Session Manager for {num_episodes} episodes in environments: {env_list}")
+    # --- Run the Curriculum ---
+    for env_id in env_list:
+        logger.info(f"--- Starting Curriculum Stage: {env_id} for {episodes_per_env} episodes ---")
+        agent.set_active_skill(env_id)
+
+        connector = ColosseumConnector(env_id, agent.agent_id)
+
+        try:
+            # Create session and connect
+            session_data = await connector.create_session()
+            if not session_data: continue
+
+            if not await connector.connect_websocket(): continue
+
+            join_response = await connector.join_session()
+            if not join_response: continue
+
+            # Get env-specific details
+            current_obs = np.array(session_data.get("observation"))
+            actual_action_dim = session_data['environment']['action_space']['n']
+            _, cortex_id = create_cortex_configs_from_observation_space(gym.make(env_id).observation_space)
+
+            # Run episodes for this environment
+            for episode in range(episodes_per_env):
+                done = False
+                episode_reward = 0
+
+                while not done:
+                    # Perceive, act, and learn
+                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                    action, log_prob, _, _, _ = agent.select_action(actual_action_dim, activation_path)
+
+                    await connector.send_action(action)
+                    msg = await connector.receive_message()
+
+                    if not msg:
+                        logger.warning(f"[{agent.agent_id}] Disconnection detected. Ending episode.")
+                        done = True
+                        continue
+
+                    if msg.get("type") == "action.taken":
+                        next_obs = np.array(msg.get("observation"))
+                        reward = msg.get("reward")
+                        done = msg.get("done")
+
+                        agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+                        current_obs = next_obs
+                        episode_reward += reward
+
+                    elif msg.get("type") == "game.over":
+                        done = True
+                    else:
+                        logger.warning(f"Unexpected message type: {msg.get('type')}")
+
+                # Post-episode training
+                train_stats = agent.train(cortex_id=cortex_id)
+                logger.info(f"[{agent.agent_id}][{env_id}] Ep {episode+1}/{episodes_per_env} | Reward: {episode_reward:.2f} | Policy Loss: {train_stats.get('policy_loss', 'N/A'):.4f}")
+
+                # Reset for next episode
+                if episode < episodes_per_env - 1:
+                    reset_response = await connector.reset_environment()
+                    if reset_response:
+                        current_obs = np.array(reset_response.get("observation"))
+                    else:
+                        logger.error(f"[{agent.agent_id}] Failed to reset env. Moving to next curriculum stage.")
+                        break
+
+        except Exception as e:
+            logger.error(f"An error occurred during training on {env_id}: {e}", exc_info=True)
+        finally:
+            await connector.close()
+            logger.info(f"--- Finished Curriculum Stage: {env_id} ---")
+
+    agent.save_state(version_info={"message": "Curriculum training complete."})
+    logger.info("Full curriculum training finished.")
+
+if __name__ == "__main__":
     try:
-        asyncio.run(manager.start())
+        asyncio.run(run_training_curriculum())
     except KeyboardInterrupt:
         logger.info("Training interrupted by user.")
     finally:
-        logger.info("Training finished.")
-
-if __name__ == "__main__":
-    main()
+        logger.info("Script finished.")
