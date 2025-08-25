@@ -72,3 +72,9 @@ agent_config:
     # World Model Regularization
     world_model_weight_decay: 1.0e-6 # L2 penalty for the world model optimizer
     free_bits: 1.0 # KL balancing parameter
+    # Latent Planner (CEM)
+    cem_plan_horizon: 12
+    cem_num_samples: 1000
+    cem_top_k: 100
+    cem_iterations: 10
+    use_planner: true

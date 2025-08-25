@@ -34,6 +34,7 @@ from . import cortex as cortex_modules
 from .cortex.vision_cortex import VisionCortex # Import the new cortex
 from .action.modules import ActionHead
 from .action.generation_head import TextGenerationHead
+from .action.latent_planner import LatentPlanner
 
 class StagContextProcessor(nn.Module):
     """
@@ -131,6 +132,7 @@ class ChimeraAgent:
         self.entropy_coef_start = self.hyperparams.get('entropy_coef_start', 0.01)
         self.entropy_coef_end = self.hyperparams.get('entropy_coef_end', 0.001)
         self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
+        self.use_planner = self.hyperparams.get('use_planner', False)
 
         # --- Add Homeostatic Vitals ---
         self.max_energy = 100.0
@@ -191,6 +193,15 @@ class ChimeraAgent:
             nn.Linear(self.hidden_dim + self.latent_dim, 400), # Takes h_t and z_t
             nn.ReLU(),
             nn.Linear(400, 1)
+        ).to(self.device)
+
+        self.planner = LatentPlanner(
+            world_model=self.world_model,
+            action_dim=self.max_action_dim,
+            plan_horizon=self.hyperparams.get('cem_plan_horizon', 12),
+            num_samples=self.hyperparams.get('cem_num_samples', 1000),
+            top_k=self.hyperparams.get('cem_top_k', 100),
+            iterations=self.hyperparams.get('cem_iterations', 10)
         ).to(self.device)
 
         self.text_generation_head = None
@@ -331,33 +342,42 @@ class ChimeraAgent:
         # 2. The ActionHead receives the deterministic state h_t and context C_t
         combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
 
-        # 3. Get action distribution, mask it, and select action
-        with torch.no_grad():
-            # Get the raw logits from the action head's linear layer
-            logits = self.action_head.layer(combined_input)
-
-            # Create a mask to disable logits for actions outside the valid range
-            mask = torch.full(logits.shape, -float('inf'))
-            mask[0, :actual_action_dim] = 0
-
-            # Apply the mask to the logits
-            masked_logits = logits + mask
-
-            # Create the distribution from the masked logits
-            action_dist = Categorical(logits=masked_logits)
-
-        epsilon = self._get_epsilon()
-        self.steps_done += 1
-
-        if np.random.rand() < epsilon:
-            action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
-            decision_maker = "random"
+        # 3. Select action using either the planner or the policy
+        if self.use_planner:
+            with torch.no_grad():
+                action_continuous = self.planner.plan(self.hidden_state, self.latent_state)
+                # Convert continuous action to discrete by taking the argmax
+                action_tensor = torch.argmax(action_continuous, dim=-1)
+            decision_maker = "planner"
+            log_prob = torch.tensor(0.0) # Not well-defined for planner
         else:
-            action_tensor = action_dist.sample()
-            decision_maker = "policy"
+            with torch.no_grad():
+                # Get the raw logits from the action head's linear layer
+                logits = self.action_head.layer(combined_input)
+
+                # Create a mask to disable logits for actions outside the valid range
+                mask = torch.full(logits.shape, -float('inf'))
+                mask[0, :actual_action_dim] = 0
+
+                # Apply the mask to the logits
+                masked_logits = logits + mask
+
+                # Create the distribution from the masked logits
+                action_dist = Categorical(logits=masked_logits)
+
+            epsilon = self._get_epsilon()
+            self.steps_done += 1
+
+            if np.random.rand() < epsilon:
+                action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
+                decision_maker = "random"
+            else:
+                action_tensor = action_dist.sample()
+                decision_maker = "policy"
+
+            log_prob = action_dist.log_prob(action_tensor)
 
         action = action_tensor.item()
-        log_prob = action_dist.log_prob(action_tensor)
 
         self.last_action = action_tensor
 
@@ -442,9 +462,14 @@ class ChimeraAgent:
         reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
 
         # Process observations through the appropriate cortex
-        batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
-        obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
-        obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+        if obs_sequence.dim() == 5: # Image-based observations
+            batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
+            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
+            obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+        else: # Vector-based observations
+            batch_size, seq_len, obs_dim = obs_sequence.shape
+            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_dim))
+            obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
 
         # --- Optimizers ---
         wm_params = list(self.world_model.parameters())
