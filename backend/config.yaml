@@ -42,7 +42,7 @@ agent_config:
     # Epsilon-greedy exploration
     epsilon_start: 0.9
     epsilon_end: 0.05
-    epsilon_decay_steps: 20000
+    epsilon_decay_steps: 200000
     burnin_steps: 1000
     policy_train_frequency: 10
     use_internal_reward: false
