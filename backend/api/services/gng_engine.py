@@ -45,6 +45,7 @@ class GNG_Engine:
         self.pruning_grace_period = kwargs.get('gng_pruning_grace_period', 500)
         self.utility_floor = kwargs.get('gng_utility_floor', 0.1)
         self.utility_clip = kwargs.get('gng_utility_clip', 10.0)
+        self.sf_dimension = kwargs.get('sf_dimension', 64)
 
         # State representation
         self.nodes = {} # { node_id: {'weight': np.array, 'error': float, 'utility': float} }
@@ -85,7 +86,8 @@ class GNG_Engine:
             'weight': weight_vector.astype('float32'),
             'error': error,
             'utility': utility,
-            'creation_iteration': self._iterations
+            'creation_iteration': self._iterations,
+            'psi': np.zeros(self.sf_dimension)
         }
         self._next_node_id += 1
         self.faiss_index = None # Invalidate index

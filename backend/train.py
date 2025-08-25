@@ -150,7 +150,9 @@ def main(args):
                             ac_loss = stats.get('ac_loss', -1)
                             horizon = stats.get('horizon', -1)
                             entropy_coef = stats.get('entropy_coef', -1)
-                            print(f"  Train Step {agent.train_steps} | WM Loss: {wm_loss:.4f} | AC Loss: {ac_loss:.4f} | Horizon: {horizon} | Entropy Coef: {entropy_coef:.4f}")
+                            contrastive_loss = stats.get('contrastive_loss', -1)
+                            reward_weights_norm = torch.norm(agent.reward_weights).item()
+                            print(f"  Train Step {agent.train_steps} | WM Loss: {wm_loss:.4f} | AC Loss: {ac_loss:.4f} | Horizon: {horizon} | Entropy Coef: {entropy_coef:.4f} | Contrastive Loss: {contrastive_loss:.4f} | RW Norm: {reward_weights_norm:.4f}")
                 else:
                     print("Not enough data to enter sleep phase, continuing collection.")
 
