@@ -477,6 +477,9 @@ class ChimeraAgent:
 
         else: # Use the policy
             with torch.no_grad():
+                if self.current_goal is None:
+                    logger.warning("self.current_goal was None in select_action. Defaulting to a zero vector.")
+                    self.current_goal = np.zeros(self.goal_dim)
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
                 goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
                 action_dist = self.action_head(combined_input, goal_tensor_expanded)
