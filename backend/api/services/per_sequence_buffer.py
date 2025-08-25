@@ -147,25 +147,41 @@ class PERSequenceBuffer:
     def _format_batch(self, batch, batch_size):
         """Formats a batch of sequences into a dictionary of numpy arrays."""
         batch_dict = {}
-        for key in Experience._fields:
-            if key in ['obs', 'next_obs']:
-                batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
+        # Extract all data first
+        data_by_key = {key: [getattr(exp, key) for seq in batch for exp in seq] for key in Experience._fields}
+
+        for key, data in data_by_key.items():
+            if key in ['obs', 'next_obs', 'goal']:
+                # These are expected to be numpy arrays and can be stacked.
+                # Goal is included here because it's a numpy array by design now.
+                batch_dict[key] = np.stack(data)
+            elif key in ['h', 'z', 'log_prob']:
+                # These are tensors.
+                processed_data = []
+                for d in data:
+                    t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
+                    if t.dim() == 0:
+                        t = t.reshape(1)  # Reshape scalar tensors
+                    processed_data.append(t)
+                batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
+            elif key == 'activation_path':
+                # This is a list of lists/dicts and is not used in a numeric context.
+                # Store it as a raw list.
+                batch_dict[key] = data
             else:
-                data = [getattr(exp, key) for seq in batch for exp in seq]
-                if data and any(isinstance(d, torch.Tensor) for d in data):
-                    # Ensure all items are tensors and handle shape inconsistencies
-                    processed_data = []
-                    for d in data:
-                        t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
-                        if t.dim() == 0:
-                            t = t.reshape(1) # Reshape scalar tensors
-                        processed_data.append(t)
-                    batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
-                else:
+                # This handles 'action', 'reward', 'done'.
+                # These should be simple numeric types.
+                try:
                     batch_dict[key] = np.array(data)
+                except ValueError as e:
+                    print(f"ERROR formatting key '{key}': {e}")
+                    # Provide more context on the data that failed
+                    print(f"Data sample for '{key}': {[type(d) for d in data[:5]]}")
+                    raise
 
         for key, value in batch_dict.items():
-            if value.size > 0:
+            # Skip reshaping for keys that are not numpy arrays or are empty.
+            if isinstance(value, np.ndarray) and value.size > 0:
                 batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
