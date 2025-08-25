@@ -90,7 +90,7 @@ def softmax(x):
     return e_x / e_x.sum(axis=0)
 
 class ChimeraAgent:
-    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=32, hidden_dim=200, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
+    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=128, hidden_dim=512, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
         self.embedding_dim = embedding_dim
         self.max_action_dim = max_action_dim
