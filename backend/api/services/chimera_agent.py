@@ -27,7 +27,7 @@ class NumpyJSONEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 from .world_model_core import WorldModel
-from .stag_framework import STAG_Framework
+from .skill_manager import SkillManager
 from .state_history_manager import StateHistoryManager
 from .replay_buffer import ReplayBuffer, Experience
 from . import cortex as cortex_modules
@@ -152,9 +152,9 @@ class ChimeraAgent:
         # World Model (RSSM-based)
         self.world_model = WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
 
-        # STAG Framework
-        # The STAG still operates on the deterministic hidden state `h_t`
-        self.stag = STAG_Framework(self.hidden_dim, **self.hyperparams)
+        # Skill Manager (manages multiple STAGs)
+        self.skill_manager = SkillManager(self.hidden_dim, **self.hyperparams)
+        self.active_skill_id = None # The currently active skill/environment
 
         # STAG Context Processor
         # Input dimension is the max path length * the dimension of a node's weight vector (hidden_dim)
@@ -200,6 +200,7 @@ class ChimeraAgent:
             'action_head_state_dict': self.action_head.state_dict(),
             'value_head_state_dict': self.value_head.state_dict(),
             'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
+            'skill_manager_state': self.skill_manager.get_serializable_structure()
         }
         self.history_manager.save_snapshot(learnable_params, version_info)
 
@@ -210,9 +211,19 @@ class ChimeraAgent:
             self.world_model.load_state_dict(learnable_params['world_model_state_dict'])
             self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
             self.value_head.load_state_dict(learnable_params['value_head_state_dict'])
-            self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict')) # Use .get for backward compatibility
+            self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict'))
+
+            if 'skill_manager_state' in learnable_params:
+                self.skill_manager = SkillManager.from_serializable_structure(
+                    learnable_params['skill_manager_state'], **self.hyperparams
+                )
         else:
             print("Warning: No state to load.")
+
+    def set_active_skill(self, skill_id):
+        """Sets the currently active skill/environment for the agent."""
+        logger.info(f"Agent active skill set to: {skill_id}")
+        self.active_skill_id = skill_id
 
     def perceive_and_update_state(self, cortex_id, raw_obs, damage_taken=0):
         """
@@ -245,7 +256,7 @@ class ChimeraAgent:
             h_normalized = h_numpy / norm if norm > 0 else h_numpy
 
             # Find the activation path and get the potential novelty signal (error)
-            terminal_node, winner_id, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+            terminal_node, winner_id, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
             if terminal_node and winner_id is not None:
                 novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
 
@@ -265,7 +276,8 @@ class ChimeraAgent:
         if h_normalized is None: # Should not happen if logic is correct, but as a safeguard.
             return
 
-        terminal_node, _, _ = self.stag.find_terminal_node_and_path(h_normalized)
+        # We need to get the terminal node for the currently active skill
+        terminal_node, _, _ = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
         if terminal_node:
             # The GNG's utility update is driven by the environmental reward
             terminal_node['gng'].process_input(h_normalized, reward=r_env)
@@ -277,8 +289,10 @@ class ChimeraAgent:
         # 1. Construct the context vector C_t from the STAG's activation path
         path_weights = []
         if activation_path:
+            # Get the correct STAG instance for the active skill
+            active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
             for step in activation_path:
-                level_gng = self.stag.level_map[step['level_id']]
+                level_gng = active_stag.level_map[step['level_id']]
                 node_weight = level_gng.nodes[step['winner_id']]['weight']
                 path_weights.append(torch.from_numpy(node_weight).float())
 
@@ -384,9 +398,10 @@ class ChimeraAgent:
         if self.train_steps % policy_train_frequency == 0:
             policy_stats = self.train_policy_in_imagination()
 
-        # Part 3: Prune the STAG graph periodically.
+        # Part 3: Prune the STAG graph periodically for the active skill.
         if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
-            self.stag.prune_graph(self.gng_min_utility_threshold)
+            if self.active_skill_id:
+                self.skill_manager.prune_graph(self.active_skill_id, self.gng_min_utility_threshold)
 
         # Combine stats for logging
         combined_stats = {**world_model_stats, **policy_stats}
@@ -507,12 +522,13 @@ class ChimeraAgent:
                 norm = np.linalg.norm(h_numpy)
                 h_normalized = h_numpy / norm if norm > 0 else h_numpy
 
-                _, _, activation_path = self.stag.find_terminal_node_and_path(h_normalized)
+                _, _, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
 
                 path_weights = []
                 if activation_path:
+                    active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
                     for step in activation_path:
-                        level_gng = self.stag.level_map[step['level_id']]
+                        level_gng = active_stag.level_map[step['level_id']]
                         node_weight = level_gng.nodes[step['winner_id']]['weight']
                         path_weights.append(torch.from_numpy(node_weight).float())
 
@@ -627,5 +643,12 @@ class ChimeraAgent:
             max_new_tokens=max_new_tokens
         )
 
-    def get_graph_structure(self):
-        return self.stag.get_flattened_structure()
+    def get_graph_structure(self, skill_id=None):
+        """
+        Gets the graph structure for the active skill, or a specified skill.
+        If no skill_id is provided, it defaults to the currently active one.
+        """
+        skill_to_get = skill_id or self.active_skill_id
+        if not skill_to_get:
+            return {} # Return an empty graph if no skill is active/specified
+        return self.skill_manager.get_flattened_structure(skill_to_get)

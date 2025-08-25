@@ -74,6 +74,7 @@ def main(args):
     try:
         for i, env_name in enumerate(env_names):
             print(f"\n--- Starting Curriculum Stage {i+1}/{len(env_names)}: {env_name} ---")
+            agent.set_active_skill(env_name) # Set the active skill for the agent
             env = gym.make(env_name)
             actual_action_dim = env.action_space.n
             # Determine the correct cortex_id for this environment

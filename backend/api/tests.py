@@ -180,6 +180,7 @@ class ChimeraAgentTests(TestCase):
         )
         # Ensure a clean state for each test
         self.agent.episode_memory = []
+        self.agent.set_active_skill("test_skill")
 
     def tearDown(self):
         # Clean up the created agent history directory
@@ -254,6 +255,7 @@ class ChimeraAgentTests(TestCase):
             load_from_storage=False,
             hyperparams={'world_model_weight_decay': decay_value, 'batch_size': 1}
         )
+        agent.set_active_skill("test_cortex")
 
         # Populate the buffer with enough data to pass the size check
         for _ in range(2):
@@ -379,6 +381,7 @@ class LanguageComponentsIntegrationTests(TestCase):
             "test-hub-agent", embedding_dim=64, max_action_dim=4,
             hyperparams=hub_hyperparams, load_from_storage=False
         )
+        agent_hub.set_active_skill("language_cortex")
 
         # Assert that constructors were called with the hub ID
         self.assertIn('language_cortex', agent_hub.cortexes)
@@ -406,6 +409,7 @@ class LanguageComponentsIntegrationTests(TestCase):
             "test-local-agent", embedding_dim=64, max_action_dim=4,
             hyperparams=local_hyperparams, load_from_storage=False
         )
+        agent_local.set_active_skill("language_cortex")
 
         # Assert that constructors were called with the hub id, as local_model_path is not used to override
         mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-local-id", output_dim=64, api_base=None, embedding_dim=None)
@@ -419,5 +423,6 @@ class LanguageComponentsIntegrationTests(TestCase):
             "test-disabled-agent", embedding_dim=64, max_action_dim=4,
             hyperparams=disabled_hyperparams, load_from_storage=False
         )
+        disabled_agent.set_active_skill("default")
         self.assertFalse(disabled_agent.language_model_enabled)
         self.assertIsNone(disabled_agent.text_generation_head)
