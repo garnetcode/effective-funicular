@@ -148,21 +148,30 @@ class PERSequenceBuffer:
         """Formats a batch of sequences into a dictionary of numpy arrays."""
         batch_dict = {}
         for key in Experience._fields:
+            # The activation path is a list of dicts with variable length, cannot be stacked.
+            # It's also not used by the world model, so we can safely skip it.
+            if key == 'activation_path':
+                continue
+
             if key in ['obs', 'next_obs']:
                 batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
             else:
                 data = [getattr(exp, key) for seq in batch for exp in seq]
+                # Check if the data contains Tensors. If so, stack them.
                 if data and any(isinstance(d, torch.Tensor) for d in data):
-                    # Ensure all items are tensors and handle shape inconsistencies
                     processed_data = []
                     for d in data:
+                        # Ensure all data points are tensors before stacking
                         t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
+                        # Reshape scalar tensors to be 1D for stacking consistency
                         if t.dim() == 0:
-                            t = t.reshape(1) # Reshape scalar tensors
+                            t = t.reshape(1)
                         processed_data.append(t)
                     batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
                 else:
-                    batch_dict[key] = np.array(data)
+                    # The data is not tensor-like (e.g., rewards, dones, or goals which can be None)
+                    # Using dtype=object allows for arrays of heterogeneous types like None and np.array
+                    batch_dict[key] = np.array(data, dtype=object)
 
         for key, value in batch_dict.items():
             if value.size > 0:
