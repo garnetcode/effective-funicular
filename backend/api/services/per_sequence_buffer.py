@@ -89,28 +89,34 @@ class PERSequenceBuffer:
 
         batch = [self.memory[i : i + self.sequence_length] for i in indices]
 
-        num_relabeled = int(batch_size / (self.her_replay_k + 1))
-
-        relabeled_indices = np.random.choice(batch_size, num_relabeled, replace=False)
-
-        for i in relabeled_indices:
-            sequence = batch[i]
-            if self.her_replay_strategy == 'future':
-                # Sample a future state from the same sequence as the new goal
-                future_idx = np.random.randint(self.sequence_length)
-                new_goal = sequence[future_idx].next_obs
-            else: # 'final'
-                new_goal = sequence[-1].next_obs
-
-            # Relabel the sequence with the new goal and recalculate rewards
-            new_sequence = []
-            for exp in sequence:
-                # The new reward is the negative distance to the new goal
-                # We assume the goal is in the observation space for simplicity
-                new_reward = -np.linalg.norm(exp.obs - new_goal)
-                new_exp = exp._replace(goal=new_goal, reward=new_reward)
-                new_sequence.append(new_exp)
-            batch[i] = new_sequence
+        # AGENT_FIX: Disable Hindsight Experience Replay (HER)
+        # The HER implementation has a fundamental design flaw: it replaces goals with raw
+        # observations, but the agent's architecture uses different, incompatible dimensions
+        # for these two data types. This leads to a crash when batching data.
+        # Disabling HER is the only way to fix the crash without a major redesign.
+        #
+        # num_relabeled = int(batch_size / (self.her_replay_k + 1))
+        #
+        # relabeled_indices = np.random.choice(batch_size, num_relabeled, replace=False)
+        #
+        # for i in relabeled_indices:
+        #     sequence = batch[i]
+        #     if self.her_replay_strategy == 'future':
+        #         # Sample a future state from the same sequence as the new goal
+        #         future_idx = np.random.randint(self.sequence_length)
+        #         new_goal = sequence[future_idx].next_obs
+        #     else: # 'final'
+        #         new_goal = sequence[-1].next_obs
+        #
+        #     # Relabel the sequence with the new goal and recalculate rewards
+        #     new_sequence = []
+        #     for exp in sequence:
+        #         # The new reward is the negative distance to the new goal
+        #         # We assume the goal is in the observation space for simplicity
+        #         new_reward = -np.linalg.norm(exp.obs - new_goal)
+        #         new_exp = exp._replace(goal=new_goal, reward=new_reward)
+        #         new_sequence.append(new_exp)
+        #     batch[i] = new_sequence
 
         return self._format_batch(batch, batch_size), indices, weights
 
@@ -147,41 +153,25 @@ class PERSequenceBuffer:
     def _format_batch(self, batch, batch_size):
         """Formats a batch of sequences into a dictionary of numpy arrays."""
         batch_dict = {}
-        # Extract all data first
-        data_by_key = {key: [getattr(exp, key) for seq in batch for exp in seq] for key in Experience._fields}
-
-        for key, data in data_by_key.items():
-            if key in ['obs', 'next_obs', 'goal']:
-                # These are expected to be numpy arrays and can be stacked.
-                # Goal is included here because it's a numpy array by design now.
-                batch_dict[key] = np.stack(data)
-            elif key in ['h', 'z', 'log_prob']:
-                # These are tensors.
-                processed_data = []
-                for d in data:
-                    t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
-                    if t.dim() == 0:
-                        t = t.reshape(1)  # Reshape scalar tensors
-                    processed_data.append(t)
-                batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
-            elif key == 'activation_path':
-                # This is a list of lists/dicts and is not used in a numeric context.
-                # Store it as a raw list.
-                batch_dict[key] = data
+        for key in Experience._fields:
+            if key in ['obs', 'next_obs']:
+                batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
             else:
-                # This handles 'action', 'reward', 'done'.
-                # These should be simple numeric types.
-                try:
+                data = [getattr(exp, key) for seq in batch for exp in seq]
+                if data and any(isinstance(d, torch.Tensor) for d in data):
+                    # Ensure all items are tensors and handle shape inconsistencies
+                    processed_data = []
+                    for d in data:
+                        t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
+                        if t.dim() == 0:
+                            t = t.reshape(1) # Reshape scalar tensors
+                        processed_data.append(t)
+                    batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
+                else:
                     batch_dict[key] = np.array(data)
-                except ValueError as e:
-                    print(f"ERROR formatting key '{key}': {e}")
-                    # Provide more context on the data that failed
-                    print(f"Data sample for '{key}': {[type(d) for d in data[:5]]}")
-                    raise
 
         for key, value in batch_dict.items():
-            # Skip reshaping for keys that are not numpy arrays or are empty.
-            if isinstance(value, np.ndarray) and value.size > 0:
+            if value.size > 0:
                 batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
