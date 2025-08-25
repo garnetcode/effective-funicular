@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal, Categorical
 import random
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ class ChimeraAgent:
         self.entropy_coef_schedule_steps = self.hyperparams.get('entropy_coef_schedule_steps', 20000)
         self.use_planner = self.hyperparams.get('use_planner', False)
         self.high_level_replan_frequency = self.hyperparams.get('high_level_replan_frequency', 100)
+        self.low_level_plan_frequency = self.hyperparams.get('low_level_plan_frequency', 10)
         self.goal_dim = self.hyperparams.get('goal_dim', 512)
         self.contrastive_loss_weight = self.hyperparams.get('contrastive_loss_weight', 0.1)
         self.sf_dimension = self.hyperparams.get('sf_dimension', 64)
@@ -167,6 +169,7 @@ class ChimeraAgent:
         self.high_level_plan = None
         self.current_subgoal = None
         self.current_goal = None
+        self.action_plan = None
         self.cortex_configs = cortex_configs or {}
 
         # Language Model setup (remains the same)
@@ -402,95 +405,85 @@ class ChimeraAgent:
 
     def select_action(self, actual_action_dim, activation_path):
         """
-        Selects an action using the policy π(a | h_t, C_t), with masking for the action space.
+        Selects an action using the policy or a planner.
         """
+        start_time = time.time()
         # 1. Construct the context vector C_t from the STAG's activation path
         path_weights = []
         if activation_path:
-            # Get the correct STAG instance for the active skill
             active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
             for step in activation_path:
                 level_gng = active_stag.level_map[step['level_id']]
                 node_weight = level_gng.nodes[step['winner_id']]['weight']
                 path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
 
-        # Pad the path to a fixed length
         while len(path_weights) < self.max_stag_path_length:
             path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
 
-        # Process the path to get the context vector C_t
         with torch.no_grad():
             stag_context_vector = self.stag_context_processor(path_weights)
-
-        # If STAG is disabled for training, use a zero vector for the context.
-        # This effectively removes its influence on action selection during policy updates.
         if not self.use_stag_in_ac_loss:
             stag_context_vector = torch.zeros_like(stag_context_vector)
 
-        # 2. The ActionHead receives the deterministic state h_t and context C_t
         combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
 
-        # 3. Select action using either the planner or the policy
-        epsilon = 0.0 # Default value
-        if self.use_planner:
+        # 3. Select action
+        epsilon = self._get_epsilon()
+        self.steps_done += 1
+
+        # Decide whether to use the planner or the learned policy
+        use_planner_this_step = self.use_planner and (self.action_plan is None or len(self.action_plan) == 0) and (self.steps_done % self.low_level_plan_frequency == 0)
+
+        if use_planner_this_step:
             # Hierarchical planning logic
             if self.current_subgoal is None or self.train_steps % self.high_level_replan_frequency == 0:
-                # Generate a new high-level plan
                 stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
                 if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
-                    # For simplicity, goal is a random node that is not the start node
                     possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
                     if possible_goals:
                         goal_node_id = random.choice(possible_goals)
-                        self.high_level_plan = self.graph_planner.plan(
-                            stag_graph,
-                            self.skill_manager.option_models.get(self.active_skill_id, {}),
-                            self.last_stag_node_id,
-                            goal_node_id
-                        )
+                        self.high_level_plan = self.graph_planner.plan(stag_graph, self.skill_manager.option_models.get(self.active_skill_id, {}), self.last_stag_node_id, goal_node_id)
 
                 if self.high_level_plan:
-                    # Pop the first subgoal (which is the start node)
                     self.high_level_plan.pop(0)
                     if self.high_level_plan:
                         self.current_subgoal = self.high_level_plan.pop(0)
 
-            # Execute low-level planner to reach the current subgoal
             subgoal_weight = None
             if self.current_subgoal:
                 stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                # This assumes the subgoal is in the terminal GNG of the STAG
                 terminal_gng = stag.level_map[max(stag.level_map.keys())]
                 if self.current_subgoal in terminal_gng.nodes:
                     subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
 
             with torch.no_grad():
-                action_continuous = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight)
-                # Slice the output to the actual action dimension of the environment
-                action_tensor = torch.argmax(action_continuous[:, :actual_action_dim], dim=-1)
+                # The planner returns the full sequence of actions
+                self.action_plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight)
 
+            # Take the first action from the new plan
+            action_continuous = self.action_plan[0]
+            action_tensor = torch.argmax(action_continuous[:actual_action_dim], dim=-1)
+            self.action_plan = self.action_plan[1:] # Consume the first action
             decision_maker = "planner"
-            log_prob = torch.tensor(0.0) # Not well-defined for planner
-        else:
+            log_prob = torch.tensor(0.0)
+
+        elif self.action_plan is not None and len(self.action_plan) > 0:
+            # Execute the existing plan
+            action_continuous = self.action_plan[0]
+            action_tensor = torch.argmax(action_continuous[:actual_action_dim], dim=-1)
+            self.action_plan = self.action_plan[1:] # Consume the action
+            decision_maker = "plan_follower"
+            log_prob = torch.tensor(0.0)
+
+        else: # Use the policy
             with torch.no_grad():
-                # Get the action distribution from the policy head
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
-                # Expand goal tensor to match the batch size of the combined_input
                 goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
                 action_dist = self.action_head(combined_input, goal_tensor_expanded)
-
-                # Create a mask to disable logits for actions outside the valid range
-                mask = torch.full(action_dist.logits.shape, -float('inf'))
+                mask = torch.full(action_dist.logits.shape, -float('inf'), device=self.device)
                 mask[0, :actual_action_dim] = 0
-
-                # Apply the mask to the logits
                 masked_logits = action_dist.logits + mask
-
-                # Create the distribution from the masked logits
                 action_dist = Categorical(logits=masked_logits)
-
-            epsilon = self._get_epsilon()
-            self.steps_done += 1
 
             if np.random.rand() < epsilon:
                 action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
@@ -502,9 +495,8 @@ class ChimeraAgent:
             log_prob = action_dist.log_prob(action_tensor)
 
         action = action_tensor.item()
-
         self.last_action = action_tensor
-
+        print(f"Total select_action time: {time.time() - start_time:.4f}s, decision_maker: {decision_maker}")
         return action, log_prob, stag_context_vector, decision_maker, epsilon
 
     def _get_epsilon(self):
