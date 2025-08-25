@@ -19,6 +19,8 @@ class SkillManager:
         self.gng_params = kwargs
         self.skill_graphs = {}  # A dictionary to hold STAG instances, keyed by skill_id
         self.option_models = {} # A dictionary to hold option models for each skill
+        self.sf_learning_rate = kwargs.get('sf_learning_rate', 0.01)
+        self.gamma = kwargs.get('gamma', 0.99)
 
     def _get_or_create_stag(self, skill_id):
         """
@@ -70,10 +72,24 @@ class SkillManager:
 
         self.option_models[skill_id][option_key].update(reward, duration)
 
+    def update_successor_features(self, skill_id, from_node_id, to_node_id, state_features):
+        """Updates the successor features for a transition between two nodes."""
+        stag = self._get_or_create_stag(skill_id)
+        # This assumes the nodes are in the terminal GNG of the STAG
+        terminal_gng = stag.level_map[max(stag.level_map.keys())]
+
+        if from_node_id in terminal_gng.nodes and to_node_id in terminal_gng.nodes:
+            from_node = terminal_gng.nodes[from_node_id]
+            to_node = terminal_gng.nodes[to_node_id]
+
+            # TD update for successor features
+            target_psi = state_features + self.gamma * to_node['psi']
+            from_node['psi'] += self.sf_learning_rate * (target_psi - from_node['psi'])
+
     def get_serializable_structure(self):
         """
         Returns a serializable representation of all skill graphs.
-        NOTE: Option models are not currently serialized.
+        NOTE: Option models and successor features are not currently serialized.
         """
         all_skill_data = {}
         for skill_id, stag_instance in self.skill_graphs.items():
