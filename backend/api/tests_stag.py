@@ -38,6 +38,7 @@ class ChimeraAgentStagDecouplingTests(TestCase):
                 'imagine_horizon': 2
             }
         )
+        self.agent.set_active_skill("test_skill")
 
     def tearDown(self):
         # Clean up the created agent history directory
@@ -61,7 +62,8 @@ class ChimeraAgentStagDecouplingTests(TestCase):
 
         # 2. Test update_stag
         # The GNG's process_input method should not be called.
-        with patch.object(self.agent.stag.tree['gng'], 'process_input') as mock_process_input:
+        active_stag = self.agent.skill_manager._get_or_create_stag(self.agent.active_skill_id)
+        with patch.object(active_stag.tree['gng'], 'process_input') as mock_process_input:
             self.agent.update_stag(np.random.rand(self.agent.hidden_dim), 1.0)
             mock_process_input.assert_not_called()
 
@@ -125,7 +127,8 @@ class ChimeraAgentStagDecouplingTests(TestCase):
         self.assertNotEqual(activation_path, [])
 
         # 2. Test update_stag frequency
-        with patch.object(self.agent.stag.tree['gng'], 'process_input') as mock_process_input:
+        active_stag = self.agent.skill_manager._get_or_create_stag(self.agent.active_skill_id)
+        with patch.object(active_stag.tree['gng'], 'process_input') as mock_process_input:
             # Should not be called because steps_done % frequency != 0
             self.agent.steps_done = self.pretrain_steps + 1
             self.agent.update_stag(h_normalized, 1.0)

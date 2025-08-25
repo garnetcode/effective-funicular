@@ -104,6 +104,7 @@ class Command(BaseCommand):
             hyperparams=agent_config.get('hyperparams', {}),
             history_config=history_config
         )
+        agent.set_active_skill(env_name) # Set the active skill for the agent
         logger.debug(f"Agent '{agent.agent_id}' created. Starting Colosseum training for {num_episodes} episodes in '{env_name}'...")
 
         # --- Connect to WebSocket and start training ---

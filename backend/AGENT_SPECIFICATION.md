@@ -4,54 +4,85 @@ This document provides a detailed technical specification of the Chimera cogniti
 
 ## 1. High-Level Architecture
 
-The Chimera agent is a modular, biologically-inspired cognitive architecture based on a **Recurrent Latent World Model**. This architecture allows the agent to build an internal, predictive model of its environment, enabling it to plan and learn from "imagined" futures.
+The Chimera agent is a modular, biologically-inspired cognitive architecture designed for **continual, multi-skill learning**. It is based on a **Recurrent Latent World Model** and a novel **Skill Manager** that leverages multiple hierarchical conceptual graphs to learn and master different tasks without catastrophic forgetting.
+
+### 1.1. Architecture Diagram
+
+```
++-----------------------------------------------------------------------------------+
+|                                 Chimera Agent                                     |
+|                                                                                   |
+|  +---------------------------+     +-------------------------------------------+  |
+|  |      Sensory Cortexes     | --> |               World Model                 |  |
+|  | (Vision, Vector, etc.)    |     |    (Encoder, GRU, Decoder)                |  |
+|  +---------------------------+     +----------------------+--------------------+  |
+|      ^                             |                      |                       |
+|      |                             | h (hidden_state)     |                       |
+|      |                             v                      v                       |
+|  +---+-------------------------+  +----------------------+--------------------+  |
+|  |     Environment             |  |                 Skill Manager               |  |
+|  | (e.g., "CartPole-v1")       |  |                                             |  |
+|  +---------------------------+ |  | +------------------+   +------------------+ |  |
+|      ^          |              |  | | Skill A: STAG    |   | Skill B: STAG    | |  |
+|      | Action   | Observation  |  | | (for "CartPole") |   | (for "LunarLander")| |  |
+|      |          v              |  | +------------------+   +------------------+ |  |
+|  +---+-------------------------+  +-----------+--------------------------+----+  |
+|  |         Action Head           |              ^ C_t (context vector)  |       |
+|  |        (Policy)               |--------------------------------------+       |
+|  +-------------------------------+                                              |
+|                                                                                   |
++-----------------------------------------------------------------------------------+
+```
+
+### 1.2. Information Flow
 
 The flow of information for learning and decision-making follows these main stages:
 
-1.  **Sensory Cortexes**: Raw input from the environment (e.g., vectors, text from a user) is processed by a corresponding **Cortex** module. The cortex converts the raw data into a fixed-size numerical observation vector.
+1.  **Set Active Skill**: Before interacting with an environment, the training script informs the agent of the current task (e.g., `agent.set_active_skill("CartPole-v1")`).
 
-2.  **World Model**: The observation vector is passed to the **World Model**. This is the agent's core "brain" and consists of three parts:
-    *   **Encoder**: Compresses the observation into a smaller, more abstract **latent state (`z`)**.
+2.  **Sensory Cortexes**: Raw input from the environment is processed by the appropriate **Cortex** module (e.g., `VisionCortex` for images, `DenseCortex` for vectors). The cortex converts the raw data into a fixed-size **embedding vector**.
+
+3.  **World Model**: The embedding vector is passed to the **World Model**. This is the agent's core "brain" and consists of three parts:
+    *   **Encoder**: Compresses the embedding into a smaller, more abstract **latent state (`z`)**.
     *   **Recurrent Core (GRU)**: The agent's temporal memory. It integrates the latent state `z`, the agent's last action, and its own previous memory state (`h_old`) to produce a new, context-rich memory state (`h_new`).
     *   **Decoder**: Takes the new memory state `h_new` and uses it to predict the future: the expected next observation and the expected reward.
 
-3.  **Action Selection**: The agent's internal memory state `h` is fed into an **Action Head**, which decides on the next action to take.
+4.  **Conceptualization (Skill Manager & STAG)**: The agent's memory state `h` is passed to the **Skill Manager**, which routes it to the appropriate **STAG (Self-organizing Tree-like Adaptive Graph)** instance for the active skill. This allows the agent to build a separate, isolated, hierarchical conceptual model for each task.
 
-4.  **Hierarchical World Model (STAG Framework)**: The agent's memory states (`h`) are continuously organized by the **STAG (Self-organizing Tree-like Adaptive Graph)** framework. This provides a long-term, hierarchical conceptual model of the situations the agent has encountered.
+5.  **Action Selection**: The agent's memory state `h` and a **context vector (`C_t`)** derived from the active STAG are fed into an **Action Head**, which decides on the next action to take.
 
 ## 2. Core Components
 
-### 2.1. World Model (`world_model_core.py`)
+### 2.1. Skill Manager (`skill_manager.py`)
 
-This is the central predictive component of the agent. It is a single PyTorch `nn.Module` containing:
--   **Encoder**: A multi-layer perceptron (MLP) that maps observations to latent states.
--   **Recurrent Core**: A Gated Recurrent Unit (GRU) cell that updates the agent's hidden memory state.
--   **Decoder**: Two separate MLPs that predict the next observation and the next reward from the hidden state.
+This is the central component for enabling multi-skill learning. It replaces the previous single, monolithic STAG framework.
+-   **Manages Multiple STAGs**: The `SkillManager` holds a dictionary of `STAG_Framework` instances, keyed by a `skill_id` (the environment ID).
+-   **Dynamic Creation**: When the agent encounters a new skill ID, the manager creates a new, empty STAG for it automatically.
+-   **Delegation**: All operations on the conceptual graph (finding paths, pruning, etc.) are delegated by the manager to the STAG instance corresponding to the agent's currently active skill. This ensures that learning in one environment does not interfere with the conceptual knowledge of another.
 
-The entire World Model is trained to minimize the difference between its predictions and the actual outcomes from the environment.
+### 2.2. STAG Framework (`stag_framework.py`)
 
-### 2.2. GNG Engine & STAG Framework (`gng_engine.py`, `stag_framework.py`)
+This class now represents a single, hierarchical conceptual graph for one specific skill. Its internal logic, including the GNG engine and the tree-like hierarchy, remains the same.
 
-These components remain from the previous architecture, but their role has changed. Instead of organizing static memories, the STAG framework now organizes the **hidden states (`h`)** from the World Model's recurrent core. This means the agent builds a conceptual hierarchy of *dynamic situations* rather than just static observations.
+### 2.3. Cortexes (`cortex/`)
 
-### 2.3. Action Head (`action/modules.py`)
+The cortex system has been made more robust.
+-   **`CortexFactory`**: A new factory in `cortex/factory.py` automatically determines the correct cortex configuration (e.g., `DenseCortex` for vectors, `VisionCortex` for images) by inspecting an environment's observation space.
+-   **`VisionCortex`**: A new `nn.Module` that uses a Convolutional Neural Network (CNN) to process image-based observations into the agent's standard `embedding_dim`.
 
-The Action Head is an `nn.Module` that maps the agent's current hidden state `h` to a probability distribution over possible actions. It is trained alongside the World Model to take actions that lead to states with high predicted rewards.
+### 2.4. World Model & Action Head
 
-### 2.4. State History Manager (`state_history_manager.py`)
+These components remain architecturally the same but have been given a larger "brain capacity" via increased default dimensions (`embedding_dim`, `hidden_dim`, `latent_dim`) to better handle the complexity of learning multiple tasks.
 
-This service provides a "self-preservation" mechanism for the agent. It implements a Git-like versioning system for the agent's learnable parameters (the weights of the `WorldModel` and `ActionHead`).
--   **Base & Diff Snapshots**: To save memory, it periodically saves a full "base" snapshot of the weights. Between these, it only saves the *difference* (delta) from the previous version.
--   **History Log**: A `history.json` file tracks every version, allowing the agent's state to be reconstructed or reverted to any point in time.
+## 3. Learning Process
 
-## 3. Learning Process (Online Learning)
+The learning process is now based on a **curriculum learning** paradigm.
 
-The agent learns in a continuous, online fashion after every interaction with the environment.
-1.  **Perceive & Act**: The agent perceives the current state, updates its internal hidden state `h`, and selects an action.
-2.  **Record Experience**: The experience tuple `(observation, action, reward, next_observation)` is stored in a `ReplayBuffer`.
-3.  **Train**: After each step, the agent samples a batch of experiences from the `ReplayBuffer` and performs one gradient descent step to train its models:
-    *   The **World Model** is trained to accurately predict `next_observation` and `reward`.
-    *   The **Action Head** is trained to select actions that lead to states with high predicted rewards.
+1.  **Curriculum Training**: The primary training scripts (`train.py`, `run_colosseum_agents.py`) are designed to run a single agent through a sequence of environments (a "curriculum").
+2.  **Set Active Skill**: Before starting training on a new environment, the script calls `agent.set_active_skill(env_id)`. This tells the `SkillManager` which conceptual graph to use.
+3.  **Online Learning**: Within an environment, the agent learns continuously. It collects experiences in a `ReplayBuffer` and trains its World Model and Action Head after each step (or every N steps).
+4.  **Two-Phase GNG Training**: To build stable conceptual graphs, the GNGs within each STAG now use a two-phase learning process. They start with a high learning rate to quickly establish a rough topology (ordering phase) and then switch to a lower learning rate for fine-tuning.
+5.  **Graph Pruning**: To manage complexity, each STAG is periodically pruned. Nodes with utility below a certain threshold are removed, keeping the graphs efficient and focused on relevant concepts.
 
 ---
 
@@ -63,55 +94,43 @@ This manual provides practical instructions for running and interacting with the
 
 All training and model parameters are controlled by `backend/config.yaml`.
 
--   **`env_name`**: The Gymnasium environment ID to use for the `train_agent` script (e.g., "CartPole-v1").
--   **`default_agent_id_prefix`**: A prefix for naming agent save files.
--   **`force_new_agent`**: If `true`, the agent will start with a fresh brain, ignoring any saved state.
--   **`episodes_per_env`**: The number of episodes to run for each environment in parallel when using the Colosseum trainer.
-
--   **`language_model`**:
-    -   `enabled`: Set to `true` to enable the Gemma LLM for chatting.
-    -   `model_id`: The model ID from the Hugging Face Hub (e.g., "google/gemma-3-270m").
-    -   `local_model_path`: If you have the model files locally, provide the path to the directory here to prevent downloading. This path is prioritized over `model_id`.
-
 -   **`agent_config`**:
-    -   `latent_dim`, `hidden_dim`: The dimensions of the World Model's internal vectors.
-    -   `hyperparams`: Contains learning parameters like `learning_rate`, `gamma`, `batch_size`, and `buffer_capacity`.
+    -   `embedding_dim`, `latent_dim`, `hidden_dim`: The dimensions of the agent's core neural networks. These have been increased to provide more capacity for multi-task learning.
+    -   `hyperparams`: Contains learning parameters. New additions include:
+        -   `world_model_pretrain_steps`, `stag_update_frequency`: Control the decoupling of World Model and STAG training.
+        -   `gng_pruning_frequency`, `gng_min_utility_threshold`: Control the periodic pruning of the STAGs.
+        -   `gng_ordering_phase_steps`, `gng_winner_learning_rate_initial`: Control the new two-phase learning for GNGs.
+        -   `world_model_weight_decay`: Controls L2 regularization on the World Model.
 
 ## B. Training the Agent
 
-There are two ways to train the agent:
+The training scripts have been updated to support curriculum learning.
 
-### 1. Local Training (Single Environment)
+### 1. Local Training with Curriculum
 
-This is useful for simple debugging and testing.
+The `train.py` script can train a single agent on a curriculum of local Gymnasium environments.
 
 ```bash
-python backend/manage.py train_agent
+# Example: Train on CartPole first, then LunarLander
+python backend/train.py --env-curriculum "CartPole-v1,LunarLander-v2" --steps-per-env 20000
 ```
-- This script uses the `env_name` specified in `config.yaml`.
-- It saves the agent's state history in `backend/storage/<agent_id>_history/`.
+-   `--env-curriculum`: A comma-separated list of environment IDs.
+-   `--steps-per-env`: The number of steps to train on each environment before moving to the next.
 
-### 2. Colosseum Training (Multi-Environment, Real-time)
+### 2. Colosseum Training with Curriculum
 
-This is the primary method for large-scale, parallel training. It requires the Colosseum server to be running.
+The `run_colosseum_agents.py` script has been refactored to train a single agent on a curriculum of Colosseum environments.
 
 ```bash
 python backend/run_colosseum_agents.py
 ```
-- This script reads the `env_list` from the file itself (can be moved to config).
-- It launches a separate agent for each environment and runs them all concurrently.
+-   The script now reads the `env_list` from within the file and trains a single agent sequentially on them.
+-   The old `multi_session_manager.py` has been removed.
 
 ## C. Interactive Chat Mode
 
-To chat with an agent that has a language model enabled:
-
-1.  Ensure `language_model.enabled` is `true` in `config.yaml`.
-2.  Ensure you have a trained agent state saved in the history directory.
-3.  Run the interactive script:
+This remains the same. To chat with a trained agent:
 
 ```bash
 python backend/interactive_mode.py
 ```
-- The script will load the latest version of the agent specified in the config.
-- You can then type messages in the console and receive responses from the agent.
-- Type `quit` to exit.
