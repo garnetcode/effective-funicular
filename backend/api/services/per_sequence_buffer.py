@@ -152,8 +152,15 @@ class PERSequenceBuffer:
                 batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
             else:
                 data = [getattr(exp, key) for seq in batch for exp in seq]
-                if data and isinstance(data[0], torch.Tensor):
-                    batch_dict[key] = torch.stack(data).detach().cpu().numpy()
+                if data and any(isinstance(d, torch.Tensor) for d in data):
+                    # Ensure all items are tensors and handle shape inconsistencies
+                    processed_data = []
+                    for d in data:
+                        t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
+                        if t.dim() == 0:
+                            t = t.reshape(1) # Reshape scalar tensors
+                        processed_data.append(t)
+                    batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
                 else:
                     batch_dict[key] = np.array(data)
 
