@@ -75,8 +75,8 @@ async def run_training_curriculum():
 
                 # Reconstruct the action space
                 action_space_info = specs['action_space']
-                if action_space_info['type'] == 'Discrete':
-                    max_action_dim = max(max_action_dim, action_space_info['n'])
+                if action_space_info.get('type', '').lower() == 'discrete':
+                    max_action_dim = max(max_action_dim, action_space_info.get('n', 0))
 
                 valid_env_list.append(name)
             except (KeyError, TypeError) as e:
