@@ -127,6 +127,8 @@ class ChimeraAgent:
         self.gng_pruning_frequency = self.hyperparams.get('gng_pruning_frequency', 1000)
         self.gng_min_utility_threshold = self.hyperparams.get('gng_min_utility_threshold', 0.1)
         self.world_model_weight_decay = self.hyperparams.get('world_model_weight_decay', 1e-6)
+        self.num_ensemble_models = self.hyperparams.get('num_ensemble_models', 5)
+        self.uncertainty_penalty_weight = self.hyperparams.get('uncertainty_penalty_weight', 0.1)
         # Schedules
         self.imagination_horizon_start = self.hyperparams.get('imagination_horizon_start', 5)
         self.imagination_horizon_end = self.hyperparams.get('imagination_horizon_end', 15)
@@ -174,8 +176,18 @@ class ChimeraAgent:
         # --- Initialize Architecture Components ---
         self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim, self.device)
 
-        # World Model (RSSM-based)
-        self.world_model = WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams).to(self.device)
+        # World Model Ensemble
+        self.world_models = nn.ModuleList([
+            WorldModel(self.embedding_dim, self.max_action_dim, latent_dim, hidden_dim, hyperparams=self.hyperparams)
+            for _ in range(self.num_ensemble_models)
+        ]).to(self.device)
+        self.world_model_optimizers = [
+            torch.optim.Adam(
+                wm.parameters(),
+                lr=self.hyperparams.get('world_model_lr', 1e-4),
+                weight_decay=self.world_model_weight_decay
+            ) for wm in self.world_models
+        ]
         self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
 
         # Skill Manager (manages multiple STAGs)
@@ -204,12 +216,13 @@ class ChimeraAgent:
         ).to(self.device)
 
         self.planner = LatentPlanner(
-            world_model=self.world_model,
+            world_models=self.world_models,
             action_dim=self.max_action_dim,
             plan_horizon=self.hyperparams.get('cem_plan_horizon', 12),
             num_samples=self.hyperparams.get('cem_num_samples', 1000),
             top_k=self.hyperparams.get('cem_top_k', 100),
-            iterations=self.hyperparams.get('cem_iterations', 10)
+            iterations=self.hyperparams.get('cem_iterations', 10),
+            uncertainty_penalty_weight=self.uncertainty_penalty_weight
         ).to(self.device)
 
         self.graph_planner = GraphPlanner()
@@ -236,7 +249,7 @@ class ChimeraAgent:
     def save_state(self, version_info={}):
         """Saves the agent's core models to a new version snapshot."""
         learnable_params = {
-            'world_model_state_dict': self.world_model.state_dict(),
+            'world_model_state_dicts': [wm.state_dict() for wm in self.world_models],
             'action_head_state_dict': self.action_head.state_dict(),
             'value_head_state_dict': self.value_head.state_dict(),
             'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
@@ -248,7 +261,14 @@ class ChimeraAgent:
         """Loads the agent's core models from a version snapshot."""
         learnable_params = self.history_manager.load_snapshot(version)
         if learnable_params:
-            self.world_model.load_state_dict(learnable_params['world_model_state_dict'])
+            if 'world_model_state_dicts' in learnable_params:
+                for i, state_dict in enumerate(learnable_params['world_model_state_dicts']):
+                    if i < len(self.world_models):
+                        self.world_models[i].load_state_dict(state_dict)
+            elif 'world_model_state_dict' in learnable_params:
+                # Handle old single-model checkpoints
+                self.world_models[0].load_state_dict(learnable_params['world_model_state_dict'])
+
             self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
             self.value_head.load_state_dict(learnable_params['value_head_state_dict'])
             self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict'))
@@ -276,10 +296,9 @@ class ChimeraAgent:
         obs_numpy = self.cortexes[cortex_id].process(raw_obs)
         obs_tensor = torch.from_numpy(obs_numpy).float().unsqueeze(0).to(self.device)
 
-        # 3. Use the world model to update the agent's internal state (h_t, z_t)
+        # 3. Use the first world model in the ensemble to update the agent's internal state
         with torch.no_grad():
-            # The world model's forward pass is now just for training. We need to call the rssm directly.
-            h_next, z_next, _ = self.world_model.rssm(obs_tensor, self.last_action, self.hidden_state, self.latent_state)
+            h_next, z_next, _ = self.world_models[0].rssm(obs_tensor, self.last_action, self.hidden_state, self.latent_state)
 
         # 4. Update the agent's internal state
         self.hidden_state = h_next
@@ -514,82 +533,72 @@ class ChimeraAgent:
 
     def train_world_model(self, cortex_id="vector_input"):
         """
-        Trains the World Model (RSSM, Obs/Reward Decoders) on a batch of sequences.
+        Trains the World Model ensemble on batches of sequences.
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
 
-        # --- Sample a batch of sequences ---
-        batch = self.replay_buffer.sample(batch_size)
+        # --- Sample a batch of sequences for each model in the ensemble ---
+        batches = self.replay_buffer.sample(batch_size, self.num_ensemble_models)
 
-        # --- Prepare tensors ---
-        obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
-        action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
-        reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
+        total_wm_loss = 0
 
-        # Process observations through the appropriate cortex
-        if obs_sequence.dim() == 5: # Image-based observations
-            batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
-            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
-            obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
-        else: # Vector-based observations
-            batch_size, seq_len, obs_dim = obs_sequence.shape
-            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_dim))
-            obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+        for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
+            batch = batches[i]
+            # --- Prepare tensors ---
+            obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
+            action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
+            reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
 
-        # --- Optimizers ---
-        wm_params = list(self.world_model.parameters())
-        if isinstance(self.cortexes[cortex_id], nn.Module):
-            wm_params += list(self.cortexes[cortex_id].parameters())
-        wm_optimizer = torch.optim.Adam(
-            wm_params,
-            lr=self.hyperparams.get('world_model_lr', 1e-4),
-            weight_decay=self.world_model_weight_decay
-        )
+            # Process observations through the appropriate cortex
+            if obs_sequence.dim() == 5: # Image-based observations
+                batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
+                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
+                obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+            else: # Vector-based observations
+                batch_size, seq_len, obs_dim = obs_sequence.shape
+                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_dim))
+                obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
 
-        # --- Sequence-based Forward Pass and Loss Calculation ---
-        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
-        
-        total_recon_loss = 0
-        total_reward_loss = 0
-        total_kl_loss = 0
+            # --- Sequence-based Forward Pass and Loss Calculation ---
+            h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+            z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
 
-        for t in range(self.replay_buffer.sequence_length):
-            obs_t = obs_sequence_processed[:, t]
-            action_t = action_sequence[:, t]
-            reward_t = reward_sequence[:, t]
+            total_recon_loss = 0
+            total_reward_loss = 0
+            total_kl_loss = 0
 
-            h_t, z_t, kl_loss = self.world_model.rssm(obs_t, action_t, h_t, z_t)
+            for t in range(self.replay_buffer.sequence_length):
+                obs_t = obs_sequence_processed[:, t]
+                action_t = action_sequence[:, t]
+                reward_t = reward_sequence[:, t]
 
-            obs_recon = self.world_model.obs_decoder(z_t, h_t)
-            reward_pred = self.world_model.reward_model(z_t, h_t)
+                h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
 
-            recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_t)
-            reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_t.unsqueeze(-1))
+                obs_recon = world_model.obs_decoder(z_t, h_t)
+                reward_pred = world_model.reward_model(z_t, h_t)
 
-            free_bits = self.hyperparams.get('free_bits', 1.0)
-            kl_loss = torch.clamp(kl_loss, min=free_bits)
+                recon_loss = torch.nn.functional.mse_loss(obs_recon, obs_t)
+                reward_loss = torch.nn.functional.mse_loss(reward_pred, reward_t.unsqueeze(-1))
 
-            total_recon_loss += recon_loss
-            total_reward_loss += reward_loss
-            total_kl_loss += kl_loss
+                free_bits = self.hyperparams.get('free_bits', 1.0)
+                kl_loss = torch.clamp(kl_loss, min=free_bits)
 
-        world_model_loss = (total_recon_loss + total_reward_loss + total_kl_loss) / self.replay_buffer.sequence_length
+                total_recon_loss += recon_loss
+                total_reward_loss += reward_loss
+                total_kl_loss += kl_loss
 
-        # --- Backpropagation ---
-        wm_optimizer.zero_grad()
-        world_model_loss.backward()
-        torch.nn.utils.clip_grad_norm_(wm_params, self.max_grad_norm)
-        wm_optimizer.step()
+            world_model_loss = (total_recon_loss + total_reward_loss + total_kl_loss) / self.replay_buffer.sequence_length
+            total_wm_loss += world_model_loss.item()
 
-        return {
-            "wm_loss": world_model_loss.item(),
-            "recon_loss": (total_recon_loss / self.replay_buffer.sequence_length).item(),
-            "reward_loss": (total_reward_loss / self.replay_buffer.sequence_length).item(),
-            "kl_loss": (total_kl_loss / self.replay_buffer.sequence_length).item()
-        }
+            # --- Backpropagation ---
+            wm_optimizer.zero_grad()
+            world_model_loss.backward()
+            torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
+            wm_optimizer.step()
+
+        return {"wm_loss": total_wm_loss / self.num_ensemble_models}
 
     def train_policy_in_imagination(self):
         """

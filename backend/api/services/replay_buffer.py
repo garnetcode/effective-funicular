@@ -24,16 +24,28 @@ class ReplayBuffer:
         if e.done:
             self.episode_ends.append(self.position)
 
-    def sample(self, batch_size):
-        """Samples a batch of sequences."""
-        # This is a simplified sampling method. A more robust implementation would
-        # handle edge cases like very short episodes or a buffer that is not yet full.
+    def sample(self, batch_size, num_models=1):
+        """
+        Samples a batch of sequences. If num_models > 1, it returns a list of
+        batches, one for each model, sampled with replacement.
+        """
+        if num_models == 1:
+            return self._sample_batch(batch_size)
+        else:
+            return [self._sample_batch(batch_size, with_replacement=True) for _ in range(num_models)]
+
+    def _sample_batch(self, batch_size, with_replacement=False):
+        """Helper method to sample a single batch of sequences."""
         batch = []
         for _ in range(batch_size):
-            # Find a valid starting index for a sequence
             while True:
-                start_index = random.randint(0, len(self.memory) - self.sequence_length)
-                # Check if the sequence crosses an episode boundary
+                if with_replacement:
+                    start_index = random.randint(0, len(self.memory) - self.sequence_length)
+                else:
+                    # This logic for avoiding episode boundaries is simple and might be slow.
+                    # A more robust implementation would pre-calculate valid start indices.
+                    start_index = random.randint(0, len(self.memory) - self.sequence_length)
+
                 crosses_boundary = False
                 for end_pos in self.episode_ends:
                     if start_index < end_pos < start_index + self.sequence_length:
@@ -45,24 +57,20 @@ class ReplayBuffer:
             sequence = self.memory[start_index : start_index + self.sequence_length]
             batch.append(sequence)
 
-        # Transpose the batch of sequences and convert to numpy arrays
         batch_dict = {}
         for key in Experience._fields:
-            # The 'obs' and 'next_obs' might be sequences of images, stack them carefully
             if key in ['obs', 'next_obs']:
-                 batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
+                batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
             else:
-                # Other fields can be converted to numpy arrays more directly
                 data = [getattr(exp, key) for seq in batch for exp in seq]
-                # Check if the data is a list of tensors before trying to stack
-                if isinstance(data[0], torch.Tensor):
+                if data and isinstance(data[0], torch.Tensor):
                     batch_dict[key] = torch.stack(data).detach().cpu().numpy()
                 else:
                     batch_dict[key] = np.array(data)
 
-        # Reshape to (batch_size, sequence_length, ...)
         for key, value in batch_dict.items():
-            batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
+            if value.size > 0:
+                batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
 

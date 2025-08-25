@@ -2,84 +2,79 @@ import torch
 import torch.nn as nn
 
 class LatentPlanner(nn.Module):
-    def __init__(self, world_model, action_dim, plan_horizon=12, num_samples=1000, top_k=100, iterations=10):
+    def __init__(self, world_models, action_dim, plan_horizon=12, num_samples=1000, top_k=100, iterations=10, uncertainty_penalty_weight=0.1):
         super().__init__()
-        self.world_model = world_model
+        self.world_models = world_models
         self.action_dim = action_dim
         self.plan_horizon = plan_horizon
         self.num_samples = num_samples
         self.top_k = top_k
         self.iterations = iterations
+        self.uncertainty_penalty_weight = uncertainty_penalty_weight
 
     def plan(self, h_t, z_t, subgoal_weight=None):
         """
-        Plans the best action sequence using the Cross-Entropy Method (CEM).
-        If a subgoal_weight is provided, the reward is the negative distance to the subgoal.
-        Otherwise, it's the reward predicted by the world model.
+        Plans the best action sequence using the Cross-Entropy Method (CEM) with an ensemble of world models.
         """
         device = h_t.device
         batch_size = h_t.size(0)
+        num_models = len(self.world_models)
 
-        # Initialize the belief over action sequences
         action_mean = torch.zeros(self.plan_horizon, batch_size, self.action_dim, device=device)
         action_std = torch.ones(self.plan_horizon, batch_size, self.action_dim, device=device)
 
         for _ in range(self.iterations):
-            # 1. Sample action sequences from the current belief
             actions = torch.normal(
                 mean=action_mean.unsqueeze(2).expand(-1, -1, self.num_samples, -1),
                 std=action_std.unsqueeze(2).expand(-1, -1, self.num_samples, -1)
             )
             actions = torch.clamp(actions, -1, 1)
 
-            # 2. Rollout the sequences in the latent space
-            h_sim = h_t.unsqueeze(1).expand(-1, self.num_samples, -1)
-            z_sim = z_t.unsqueeze(1).expand(-1, self.num_samples, -1)
+            all_model_returns = torch.zeros(num_models, batch_size, self.num_samples, device=device)
 
-            returns = torch.zeros(batch_size, self.num_samples, device=device)
+            for i, world_model in enumerate(self.world_models):
+                h_sim = h_t.unsqueeze(1).expand(-1, self.num_samples, -1)
+                z_sim = z_t.unsqueeze(1).expand(-1, self.num_samples, -1)
 
-            with torch.no_grad():
-                for t in range(self.plan_horizon):
-                    action_t_samples = actions[t]
+                with torch.no_grad():
+                    for t in range(self.plan_horizon):
+                        action_t_samples = actions[t]
 
-                    h_sim_flat = h_sim.view(-1, h_sim.size(-1))
-                    z_sim_flat = z_sim.view(-1, z_sim.size(-1))
-                    action_t_flat = action_t_samples.view(-1, action_t_samples.size(-1))
+                        h_sim_flat = h_sim.view(-1, h_sim.size(-1))
+                        z_sim_flat = z_sim.view(-1, z_sim.size(-1))
+                        action_t_flat = action_t_samples.view(-1, action_t_samples.size(-1))
 
-                    h_sim_flat, prior_mean, prior_std = self.world_model.rssm.transition_model(z_sim_flat, action_t_flat, h_sim_flat)
-                    z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
+                        h_sim_flat, prior_mean, prior_std = world_model.rssm.transition_model(z_sim_flat, action_t_flat, h_sim_flat)
+                        z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
 
-                    if subgoal_weight is not None:
-                        # Reward is negative distance to subgoal
-                        dist_to_subgoal = torch.norm(h_sim_flat - subgoal_weight, dim=-1)
-                        reward_pred = -dist_to_subgoal
-                    else:
-                        # Predict rewards using the reward model
-                        reward_pred = self.world_model.reward_model(z_sim_flat, h_sim_flat).squeeze(-1)
+                        if subgoal_weight is not None:
+                            dist_to_subgoal = torch.norm(h_sim_flat - subgoal_weight, dim=-1)
+                            reward_pred = -dist_to_subgoal
+                        else:
+                            reward_pred = world_model.reward_model(z_sim_flat, h_sim_flat).squeeze(-1)
 
-                    h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
-                    z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)
-                    returns += reward_pred.view(batch_size, self.num_samples)
+                        h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
+                        z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)
+                        all_model_returns[i] += reward_pred.view(batch_size, self.num_samples)
 
-            # 3. Select the top-K action sequences based on their returns
-            _, top_k_indices = torch.topk(returns, self.top_k, dim=1)
+            # Calculate mean reward and uncertainty penalty
+            mean_returns = all_model_returns.mean(dim=0)
+            reward_variance = all_model_returns.var(dim=0)
 
-            # Extract the action sequences corresponding to the top-K returns
-            # top_k_indices shape: [batch_size, top_k]
-            # actions shape: [horizon, batch_size, num_samples, action_dim]
-            # We need to gather the top actions for each step in the horizon
+            # Objective is to maximize mean reward and minimize variance
+            objective = mean_returns - self.uncertainty_penalty_weight * reward_variance
+
+            _, top_k_indices = torch.topk(objective, self.top_k, dim=1)
+
             top_actions = []
             for t in range(self.plan_horizon):
-                # indices for gather need to match the dimensions of the input tensor
                 top_k_indices_expanded = top_k_indices.unsqueeze(-1).expand(-1, -1, self.action_dim)
-                action_t_samples = actions[t] # [batch_size, num_samples, action_dim]
+                action_t_samples = actions[t]
                 top_action_t = torch.gather(action_t_samples, 1, top_k_indices_expanded)
                 top_actions.append(top_action_t)
-            top_actions = torch.stack(top_actions) # [horizon, batch_size, top_k, action_dim]
+            top_actions = torch.stack(top_actions)
 
-            # 4. Refit the belief (mean and std) to the top-K action sequences
             action_mean = top_actions.mean(dim=2)
-            action_std = top_actions.std(dim=2) + 1e-6 # Add epsilon for numerical stability
+            action_std = top_actions.std(dim=2) + 1e-6
 
-        # Return the first action of the mean sequence
         return action_mean[0]

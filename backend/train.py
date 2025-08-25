@@ -105,8 +105,8 @@ def main(args):
                     print(f"--- Episode {episode_num} ---")
                     episode_reward = 0
                     state, _ = env.reset()
-                    agent.hidden_state, agent.latent_state = agent.world_model.get_initial_state()
-                    agent.last_action = torch.tensor([0])
+                    agent.hidden_state, agent.latent_state = agent.world_models[0].get_initial_state()
+                    agent.last_action = torch.tensor([0], device=agent.device)
                     terminated, truncated = False, False
 
                     while not (terminated or truncated):
