@@ -458,7 +458,7 @@ class ChimeraAgent:
 
             with torch.no_grad():
                 # The planner returns the full sequence of actions
-                self.action_plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight)
+                self.action_plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight, self.current_goal)
 
             # Take the first action from the new plan
             action_continuous = self.action_plan[0]
