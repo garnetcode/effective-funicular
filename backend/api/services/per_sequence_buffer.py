@@ -146,15 +146,6 @@ class PERSequenceBuffer:
 
     def _format_batch(self, batch, batch_size):
         """Formats a batch of sequences into a dictionary of numpy arrays."""
-        # AGENT_FIX: Pad short sequences to prevent reshape errors.
-        # This is a robust but potentially noisy fix for an underlying bug in the
-        # sequence sampling logic which can produce short sequences.
-        for i, seq in enumerate(batch):
-            if len(seq) < self.sequence_length:
-                padding_element = seq[-1]
-                num_to_pad = self.sequence_length - len(seq)
-                batch[i] = seq + [padding_element] * num_to_pad
-
         batch_dict = {}
         for key in Experience._fields:
             if key in ['obs', 'next_obs']:
@@ -171,19 +162,10 @@ class PERSequenceBuffer:
                         processed_data.append(t)
                     batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
                 else:
-                    try:
-                        batch_dict[key] = np.array(data)
-                    except ValueError:
-                        # This will now only trigger if activation_path or another non-tensor,
-                        # non-obs field has inhomogeneous data. We'll handle it by
-                        # just storing the list as-is.
-                        batch_dict[key] = data
-
+                    batch_dict[key] = np.array(data)
 
         for key, value in batch_dict.items():
-            # The 'activation_path' is a list of lists and doesn't have a 'size' attribute
-            # or a uniform shape, so we skip it in the reshaping process.
-            if hasattr(value, 'size') and value.size > 0:
+            if value.size > 0:
                 batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
