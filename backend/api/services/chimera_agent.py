@@ -56,7 +56,8 @@ class StagContextProcessor(nn.Module):
             return torch.zeros(1, self.processor.out_features) # Return a zero vector if path is empty
 
         concatenated_weights = torch.cat(activation_path_weights, dim=0)
-        return self.processor(concatenated_weights.unsqueeze(0))
+        # Ensure the tensor is flat before adding the batch dimension
+        return self.processor(concatenated_weights.flatten().unsqueeze(0))
 
 
 def _initialize_cortexes(configs, output_dim, device):
