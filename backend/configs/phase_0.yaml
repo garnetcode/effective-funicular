@@ -1,0 +1,17 @@
+# Configuration for Phase 0: Foundations & Instrumentation
+
+# Inherit from the base configuration
+imports:
+  - base.yaml
+
+# Phase-specific settings
+training:
+  seed: 42 # For reproducibility
+  checkpoint_every_n_steps: 50000
+  save_on_best_return: true
+
+# In this phase, we use a random policy to gather diverse data
+agent_config:
+  hyperparams:
+    epsilon_start: 1.0
+    epsilon_end: 1.0

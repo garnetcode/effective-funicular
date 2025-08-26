@@ -21,13 +21,50 @@ class Command(BaseCommand):
     help = 'Train a ChimeraAgent against a Colosseum server.'
 
     def add_arguments(self, parser):
-        parser.add_argument("--config", type=str, default="config.yaml", help="Path to the configuration file.")
+        parser.add_argument("--config", type=str, default="configs/phase_0.yaml", help="Path to the main configuration file.")
 
     def _safe_format(self, value, format_spec):
         """Safely format a value, returning a placeholder if it's not a number."""
         if isinstance(value, (int, float)):
             return f"{value:{format_spec}}"
         return str(value)
+
+    def _deep_merge(self, source, destination):
+        """Recursively merge source dict into destination dict."""
+        for key, value in source.items():
+            if isinstance(value, dict):
+                # get node or create one
+                node = destination.setdefault(key, {})
+                self._deep_merge(value, node)
+            else:
+                destination[key] = value
+        return destination
+
+    def _load_config(self, config_path):
+        """Loads a YAML config file and handles imports."""
+        try:
+            with open(config_path, 'r') as f:
+                main_config = yaml.safe_load(f)
+        except FileNotFoundError:
+            logger.error(f"Config file not found at: {config_path}")
+            return None
+
+        # Handle imports
+        if 'imports' in main_config:
+            base_config = {}
+            config_dir = os.path.dirname(config_path)
+            for import_file in main_config['imports']:
+                import_path = os.path.join(config_dir, import_file)
+                imported_config = self._load_config(import_path)
+                if imported_config:
+                    base_config = self._deep_merge(base_config, imported_config)
+
+            # Merge main config over the base
+            config = self._deep_merge(base_config, main_config)
+        else:
+            config = main_config
+
+        return config
 
     def handle(self, *args, **options):
         # We are calling an async method from a sync command.
@@ -45,15 +82,21 @@ class Command(BaseCommand):
         )
 
         # --- Load Configuration ---
-        config_path = options['config']
-        try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-        except FileNotFoundError:
-            logger.error(f"Config file not found at: {config_path}")
+        config_path = os.path.join('backend', options['config'])
+        config = self._load_config(config_path)
+        if not config:
             return
 
-        logger.debug(f"Loaded configuration from {config_path}")
+        logger.debug(f"Loaded and merged configuration from {config_path}")
+
+        # --- Set Seed for Reproducibility ---
+        seed = config.get('training', {}).get('seed')
+        if seed is not None:
+            logger.info(f"Setting random seed to {seed}")
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
 
         # --- Environment & Agent Setup ---
         env_name = config['env_name']
@@ -132,6 +175,12 @@ class Command(BaseCommand):
 
         # --- Training Loop ---
         total_rewards = []
+        total_steps = 0
+        best_avg_reward = -float('inf')
+        last_checkpoint_step = 0
+        training_config = config.get('training', {})
+        checkpoint_interval = training_config.get('checkpoint_every_n_steps', 50000)
+        save_on_best = training_config.get('save_on_best_return', True)
         current_obs = np.array(session_data.get("observation"))
         burnin_steps = agent_config.get('hyperparams', {}).get('burnin_steps', 1000)
         logger.info(f"Starting burn-in phase for {burnin_steps} steps...")
@@ -226,6 +275,7 @@ class Command(BaseCommand):
 
                             current_obs = next_obs
                             episode_reward += external_reward  # Track original env reward for stats
+                            total_steps += 1
 
                         elif msg_type == "game.over":
                             logger.debug(f"Game over message received. Final reward: {msg.get('final_reward')}")
@@ -261,10 +311,21 @@ class Command(BaseCommand):
                     }
                     agent_data_signal.send(sender=self.__class__, data=agent_data)
 
-                    if (episode + 1) % 1000 == 0:
-                        agent.save_state(version_info=train_stats)
+                    # --- Checkpointing Logic ---
+                    # Save based on best average reward
+                    if save_on_best and avg_reward > best_avg_reward:
+                        best_avg_reward = avg_reward
+                        logger.info(f"New best average reward: {best_avg_reward:.2f}. Saving best model...")
+                        agent.save_state(version_info={**train_stats, "best_avg_reward": best_avg_reward, "episode": episode + 1})
 
-                    pbar.set_postfix({
+                    # Save based on step interval
+                    if total_steps >= last_checkpoint_step + checkpoint_interval:
+                        last_checkpoint_step = total_steps
+                        logger.info(f"Reached {total_steps} steps. Saving periodic checkpoint...")
+                        agent.save_state(version_info={**train_stats, "total_steps": total_steps, "episode": episode + 1})
+
+                    # Create a dictionary of metrics for the progress bar
+                    postfix_metrics = {
                         "Reward": f"{episode_reward:.2f}",
                         "Avg Rwd": f"{avg_reward:.2f}",
                         "Epsilon": f"{epsilon:.3f}",
@@ -272,9 +333,17 @@ class Command(BaseCommand):
                         "Integrity": f"{agent.integrity:.1f}",
                         "Decision": decision_maker,
                         "Action Time": f"{action_time:.4f}s",
-                        "Action Prob": f"{torch.exp(log_prob).item():.3f}",
-                        "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
-                    })
+                        # World Model losses
+                        "WM_Total": self._safe_format(train_stats.get('wm_loss_total'), '.4f'),
+                        "W_Recon": self._safe_format(train_stats.get('wm_loss_recon'), '.4f'),
+                        "W_KL": self._safe_format(train_stats.get('wm_loss_kl'), '.4f'),
+                        # Policy losses
+                        "AC_Total": self._safe_format(train_stats.get('ac_loss'), '.4f'),
+                        "Policy": self._safe_format(train_stats.get('policy_loss'), '.4f'),
+                        "Critic": self._safe_format(train_stats.get('critic_loss'), '.4f'),
+                        "Entropy": self._safe_format(train_stats.get('entropy'), '.4f'),
+                    }
+                    pbar.set_postfix(postfix_metrics)
                     pbar.update(1)
 
                     # --- Reset for next episode ---

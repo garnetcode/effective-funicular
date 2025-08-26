@@ -656,7 +656,23 @@ class ChimeraAgent:
             error = actual_r - predicted_r
             self.reward_weights += self.sf_learning_rate * torch.mean(error.unsqueeze(-1) * state_features, dim=0)
 
-        return {"wm_loss": total_wm_loss / self.num_ensemble_models, "contrastive_loss": contrastive_loss.item()}, indices, final_priorities
+        # --- Collect and return detailed statistics ---
+        avg_wm_loss = total_wm_loss / self.num_ensemble_models
+        # Note: The individual losses are from the last model in the ensemble loop. This is a simplification.
+        # For more accurate per-component loss, we would need to average them across the ensemble as well.
+        avg_recon_loss = (total_recon_loss / self.replay_buffer.sequence_length).mean().item()
+        avg_reward_loss = (total_reward_loss / self.replay_buffer.sequence_length).mean().item()
+        avg_kl_loss = (total_kl_loss / self.replay_buffer.sequence_length).mean().item()
+
+        stats = {
+            "wm_loss_total": avg_wm_loss,
+            "wm_loss_recon": avg_recon_loss,
+            "wm_loss_reward": avg_reward_loss,
+            "wm_loss_kl": avg_kl_loss,
+            "wm_loss_contrastive": contrastive_loss.item()
+        }
+
+        return stats, indices, final_priorities
 
     def train_policy_in_imagination(self):
         """
