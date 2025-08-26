@@ -36,7 +36,6 @@ from .per_sequence_buffer import PERSequenceBuffer
 from . import cortex as cortex_modules
 from .cortex.vision_cortex import VisionCortex # Import the new cortex
 from .action.modules import ActionHead
-from .action.generation_head import TextGenerationHead
 from .action.latent_planner import LatentPlanner
 from .action.graph_planner import GraphPlanner
 from .world_model.rep_learning import ContrastiveLoss
@@ -78,14 +77,6 @@ def _initialize_cortexes(configs, output_dim, device):
                 cortex_instance = CortexClass(input_dim=params['input_dim'], output_dim=output_dim)
             elif class_name == "VisionCortex":
                 cortex_instance = VisionCortex(input_shape=params['input_shape'], output_dim=output_dim)
-            elif class_name == "LanguageCortex":
-                # LanguageCortex might not be a torch module, handle gracefully
-                cortex_instance = CortexClass(
-                    model_path_or_id=params['model_id'],
-                    output_dim=output_dim,
-                    api_base=params.get('api_base'),
-                    embedding_dim=params.get('embedding_dim')
-                )
             else: # For TextCortex etc.
                 cortex_instance = CortexClass(output_dim=output_dim)
 
@@ -172,19 +163,6 @@ class ChimeraAgent:
         self.action_plan = None
         self.cortex_configs = cortex_configs or {}
 
-        # Language Model setup (remains the same)
-        lm_config = self.hyperparams.get('language_model', {})
-        self.language_model_enabled = lm_config.get('enabled', False)
-        embedding_model_id = None
-        generation_model_id = None
-        if self.language_model_enabled:
-            embedding_model_id = lm_config.get('embedding_model_id')
-            generation_model_id = lm_config.get('generation_model_id')
-            api_base = lm_config.get('api_base')
-            embedding_dim = lm_config.get('embedding_dim')
-            if embedding_model_id:
-                self.cortex_configs['language_cortex'] = {"type": "LanguageCortex", "params": {"model_id": embedding_model_id, "api_base": api_base, "embedding_dim": embedding_dim}}
-
         # --- Initialize Architecture Components ---
         self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim, self.device)
 
@@ -243,16 +221,6 @@ class ChimeraAgent:
         # Random projection matrix for state features phi(s)
         self.sf_projection_matrix = torch.randn(self.hidden_dim, self.sf_dimension, device=self.device)
         self.reward_weights = torch.zeros(self.sf_dimension, device=self.device)
-
-        self.text_generation_head = None
-        if self.language_model_enabled and generation_model_id:
-            self.text_generation_head = TextGenerationHead(
-                model_path_or_id=generation_model_id,
-                input_dim=self.hidden_dim,
-                api_base=api_base
-            )
-            if isinstance(self.text_generation_head, nn.Module):
-                self.text_generation_head.to(self.device)
 
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
@@ -832,32 +800,6 @@ class ChimeraAgent:
             "horizon": horizon,
             "entropy_coef": entropy_coef
         }
-
-    def generate_response(self, max_new_tokens=50):
-        """
-        Generates a natural language response based on the agent's current state.
-        """
-        if not self.language_model_enabled or not self.text_generation_head:
-            return "I am currently unable to speak."
-
-        # Construct a dictionary of the agent's current state and vitals
-        agent_state = {
-            "vitals": {
-                "energy": round(self.energy, 2),
-                "integrity": round(self.integrity, 2),
-            },
-            "state_summary": {
-                "mean": round(self.hidden_state.mean().item(), 4),
-                "max": round(self.hidden_state.max().item(), 4),
-                "min": round(self.hidden_state.min().item(), 4),
-                "std": round(self.hidden_state.std().item(), 4),
-            }
-        }
-
-        return self.text_generation_head.generate(
-            agent_state,
-            max_new_tokens=max_new_tokens
-        )
 
     def get_graph_structure(self, skill_id=None):
         """
