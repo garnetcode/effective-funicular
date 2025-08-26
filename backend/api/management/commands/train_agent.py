@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import time
 import torch
 import yaml
 import logging
@@ -183,13 +184,21 @@ class Command(BaseCommand):
 
                     # --- Gameplay Loop for one episode ---
                     while not done:
-                        # Perceive the environment and get agent's internal state and novelty
+                        # 1. Perceive Stage
+                        start_time = time.time()
                         _, _, _, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                        logger.info(f"[STAGE] Perceive & Update State: {time.time() - start_time:.4f}s")
+
+                        # 2. Select Action Stage
+                        start_time = time.time()
                         action, log_prob, stag_context, decision_maker, epsilon = agent.select_action(actual_action_dim, activation_path)
+                        logger.info(f"[STAGE] Select Action: {time.time() - start_time:.4f}s")
 
-
+                        # 3. Environment Step Stage
+                        start_time = time.time()
                         await connector.send_action(action)
                         msg = await connector.receive_message()
+                        logger.info(f"[STAGE] Environment Step (Action + Receive): {time.time() - start_time:.4f}s")
 
                         if not msg:
                             logger.warning("Disconnection detected. Ending episode.")
@@ -203,15 +212,18 @@ class Command(BaseCommand):
                             external_reward = msg.get("reward")
                             done = msg.get("done")
 
-                            # Get internal reward and update vitals
+                            # 4. Process Reward Stage
+                            start_time = time.time()
                             use_internal_reward = agent.hyperparams.get('use_internal_reward', True)
                             if use_internal_reward:
                                 internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
                                 total_reward = external_reward + internal_reward
                             else:
                                 total_reward = external_reward
+                            logger.info(f"[STAGE] Process Reward: {time.time() - start_time:.4f}s")
 
-                            # Record experience with the combined, immediate reward
+                            # 5. Record Experience Stage
+                            start_time = time.time()
                             agent.record_experience(
                                 agent.hidden_state,
                                 agent.latent_state,
@@ -223,6 +235,7 @@ class Command(BaseCommand):
                                 next_obs,
                                 done
                             )
+                            logger.info(f"[STAGE] Record Experience: {time.time() - start_time:.4f}s")
 
                             current_obs = next_obs
                             episode_reward += external_reward  # Track original env reward for stats
@@ -244,7 +257,9 @@ class Command(BaseCommand):
 
                     # --- Post-Episode: Train the agent ---
                     logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training...")
+                    start_time = time.time()
                     train_stats = agent.train(cortex_id=cortex_id)
+                    logger.info(f"[STAGE] Agent Training: {time.time() - start_time:.4f}s")
 
                     # --- Send data for visualization ---
                     agent_data = {
