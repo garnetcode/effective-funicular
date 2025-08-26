@@ -146,26 +146,40 @@ class PERSequenceBuffer:
 
     def _format_batch(self, batch, batch_size):
         """Formats a batch of sequences into a dictionary of numpy arrays."""
+        # AGENT_FIX: Pad short sequences to prevent reshape errors.
+        # This is a robust but potentially noisy fix for an underlying bug in the
+        # sequence sampling logic which can produce short sequences.
+        for i, seq in enumerate(batch):
+            if len(seq) < self.sequence_length:
+                padding_element = seq[-1]
+                num_to_pad = self.sequence_length - len(seq)
+                batch[i] = seq + [padding_element] * num_to_pad
+
         batch_dict = {}
         for key in Experience._fields:
-            if key in ['obs', 'next_obs']:
-                batch_dict[key] = np.stack([getattr(exp, key) for seq in batch for exp in seq])
+            data = [getattr(exp, key) for seq in batch for exp in seq]
+            if key in ['obs', 'next_obs', 'goal']:
+                # These are expected to be numpy arrays and can be stacked.
+                batch_dict[key] = np.stack(data)
+            elif key in ['h', 'z', 'log_prob']:
+                # These are tensors.
+                processed_data = []
+                for d in data:
+                    t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
+                    if t.dim() == 0:
+                        t = t.reshape(1)  # Reshape scalar tensors
+                    processed_data.append(t)
+                batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
+            elif key == 'activation_path':
+                # This is a list of lists/dicts and is not used in a numeric context.
+                batch_dict[key] = data
             else:
-                data = [getattr(exp, key) for seq in batch for exp in seq]
-                if data and any(isinstance(d, torch.Tensor) for d in data):
-                    # Ensure all items are tensors and handle shape inconsistencies
-                    processed_data = []
-                    for d in data:
-                        t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
-                        if t.dim() == 0:
-                            t = t.reshape(1) # Reshape scalar tensors
-                        processed_data.append(t)
-                    batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
-                else:
-                    batch_dict[key] = np.array(data)
+                # This handles 'action', 'reward', 'done'.
+                batch_dict[key] = np.array(data)
 
         for key, value in batch_dict.items():
-            if value.size > 0:
+            # Skip reshaping for keys that are not numpy arrays or are empty.
+            if isinstance(value, np.ndarray) and value.size > 0:
                 batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
 
         return batch_dict
