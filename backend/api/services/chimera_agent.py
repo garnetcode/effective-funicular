@@ -243,6 +243,12 @@ class ChimeraAgent:
             self.kl_error_integral = 0
             self.kl_last_error = 0
 
+        # Running stats for novelty z-scoring
+        self.novelty_stats = {
+            'error_fast': {'mean': 0.0, 'std': 1.0, 'count': 0},
+            'error_slow': {'mean': 0.0, 'std': 1.0, 'count': 0}
+        }
+
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
@@ -335,7 +341,19 @@ class ChimeraAgent:
             # Find the activation path and get the potential novelty signal (error)
             terminal_node, winner_id, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
             if terminal_node and winner_id is not None:
-                novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
+                winner_node = terminal_node['gng'].nodes[winner_id]
+                error_fast = winner_node.get('error_fast', 0)
+                error_slow = winner_node.get('error_slow', 0)
+
+                # Update running stats for z-scoring
+                self._update_running_stats('error_fast', error_fast)
+                self._update_running_stats('error_slow', error_slow)
+
+                # Calculate z-scores
+                z_score_fast = (error_fast - self.novelty_stats['error_fast']['mean']) / self.novelty_stats['error_fast']['std']
+                z_score_slow = (error_slow - self.novelty_stats['error_slow']['mean']) / self.novelty_stats['error_slow']['std']
+
+                novelty = max(z_score_fast, z_score_slow)
 
                 # Check for STAG node transition
                 if self.last_stag_node_id is not None and self.last_stag_node_id != winner_id:
@@ -527,6 +545,24 @@ class ChimeraAgent:
         internal_reward += novelty_reward_weight * novelty_signal
 
         return internal_reward
+
+    def _update_running_stats(self, key, value, decay=0.99):
+        """Welford's online algorithm for running mean and std."""
+        stats = self.novelty_stats[key]
+        stats['count'] += 1
+
+        old_mean = stats['mean']
+        new_mean = old_mean + (value - old_mean) / stats['count']
+
+        # Using variance is more stable
+        old_var = stats['std']**2
+        new_var = old_var + (value - old_mean) * (value - new_mean)
+
+        stats['mean'] = new_mean
+        stats['std'] = np.sqrt(new_var / stats['count']) if stats['count'] > 1 else 1.0
+        # Add a small epsilon to prevent division by zero
+        stats['std'] = max(stats['std'], 1e-6)
+
 
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer and updates subgoal counters."""

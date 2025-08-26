@@ -38,7 +38,8 @@ class GNG_Engine:
         self.max_edge_age = kwargs.get('gng_max_edge_age', 50)
         self.n_iter_before_neuron_added = kwargs.get('gng_n_iter_before_neuron_added', 100)
         self.after_split_error_decay_rate = kwargs.get('gng_after_split_error_decay_rate', 0.5)
-        self.error_decay_rate = kwargs.get('gng_error_decay_rate', 0.001)
+        self.error_decay_fast = kwargs.get('gng_error_decay_fast', 0.01)
+        self.error_decay_slow = kwargs.get('gng_error_decay_slow', 0.001)
         self.utility_decay_rate = kwargs.get('gng_utility_decay_rate', 0.0005)
         self.utility_gain = kwargs.get('gng_utility_gain', 1.0)
         self.faiss_rebuild_interval = kwargs.get('gng_faiss_rebuild_interval', 100)
@@ -76,7 +77,7 @@ class GNG_Engine:
         self.faiss_index = faiss.IndexFlatL2(self.dimensions)
         self.faiss_index.add(weights)
 
-    def _add_node(self, weight_vector, error=0.0, utility=1.0):
+    def _add_node(self, weight_vector, error_fast=0.0, error_slow=0.0, utility=1.0):
         node_id = self._next_node_id
 
         # Normalize the weight vector to have a length of 1
@@ -84,7 +85,8 @@ class GNG_Engine:
 
         self.nodes[node_id] = {
             'weight': weight_vector.astype('float32'),
-            'error': error,
+            'error_fast': error_fast,
+            'error_slow': error_slow,
             'utility': utility,
             'creation_iteration': self._iterations,
             'psi': np.zeros(self.sf_dimension)
@@ -109,7 +111,8 @@ class GNG_Engine:
 
         # 2. Update Utility and Error Accumulation
         winner_dist_sq = np.sum((self.nodes[s1_id]['weight'] - input_vector) ** 2)
-        self.nodes[s1_id]['error'] += winner_dist_sq
+        self.nodes[s1_id]['error_fast'] += winner_dist_sq
+        self.nodes[s1_id]['error_slow'] += winner_dist_sq
         reward_gain = np.tanh(reward)
         self.nodes[s1_id]['utility'] += self.utility_gain * (1 + reward_gain)
 
@@ -147,7 +150,8 @@ class GNG_Engine:
 
         # 6. Global Damping (Error and Utility)
         for node_id in self.nodes:
-            self.nodes[node_id]['error'] *= (1 - self.error_decay_rate)
+            self.nodes[node_id]['error_fast'] *= (1 - self.error_decay_fast)
+            self.nodes[node_id]['error_slow'] *= (1 - self.error_decay_slow)
             self.nodes[node_id]['utility'] *= (1 - self.utility_decay_rate)
             # Clip and floor utility
             self.nodes[node_id]['utility'] = np.clip(self.nodes[node_id]['utility'], self.utility_floor, self.utility_clip)
@@ -229,15 +233,20 @@ class GNG_Engine:
         """Inserts a new node into the network (step 5)."""
         if len(self.nodes) < 2: return
 
-        q_id = max(self.nodes, key=lambda nid: self.nodes[nid]['error'])
+        # Use the slow-decaying error for finding where to insert
+        q_id = max(self.nodes, key=lambda nid: self.nodes[nid]['error_slow'])
         q_neighbors = self._get_neighbors(q_id)
         if not q_neighbors: return
-        f_id = max(q_neighbors, key=lambda nid: self.nodes[nid]['error'])
+        f_id = max(q_neighbors, key=lambda nid: self.nodes[nid]['error_slow'])
 
         q_node, f_node = self.nodes[q_id], self.nodes[f_id]
         r_weight = 0.5 * (q_node['weight'] + f_node['weight'])
         r_utility = 0.5 * (q_node['utility'] + f_node['utility'])
-        r_id = self._add_node(r_weight, utility=r_utility)
+
+        # Initialize new node's error based on the parent
+        r_error_fast = q_node['error_fast'] * self.after_split_error_decay_rate
+        r_error_slow = q_node['error_slow'] * self.after_split_error_decay_rate
+        r_id = self._add_node(r_weight, error_fast=r_error_fast, error_slow=r_error_slow, utility=r_utility)
 
         edge_to_remove = tuple(sorted((q_id, f_id)))
         original_edge = next((e for e in self.edges if e[0] == edge_to_remove[0] and e[1] == edge_to_remove[1]), None)
@@ -247,9 +256,10 @@ class GNG_Engine:
         self.edges.add((tuple(sorted((q_id, r_id)))[0], tuple(sorted((q_id, r_id)))[1], 0))
         self.edges.add((tuple(sorted((f_id, r_id)))[0], tuple(sorted((f_id, r_id)))[1], 0))
 
-        q_node['error'] *= self.after_split_error_decay_rate
-        f_node['error'] *= self.after_split_error_decay_rate
-        self.nodes[r_id]['error'] = self.nodes[q_id]['error']
+        q_node['error_fast'] *= self.after_split_error_decay_rate
+        q_node['error_slow'] *= self.after_split_error_decay_rate
+        f_node['error_fast'] *= self.after_split_error_decay_rate
+        f_node['error_slow'] *= self.after_split_error_decay_rate
 
         self.faiss_index = None # Invalidate index
 
@@ -259,7 +269,8 @@ class GNG_Engine:
         serializable_nodes = {
             nid: {
                 'weight': node['weight'].tolist(),
-                'error': node['error'],
+                'error_fast': node['error_fast'],
+                'error_slow': node['error_slow'],
                 'utility': node['utility']
             }
             for nid, node in self.nodes.items()
@@ -280,7 +291,8 @@ class GNG_Engine:
         gng.nodes = {
             int(nid): {
                 'weight': np.array(node['weight']),
-                'error': node['error'],
+                'error_fast': node.get('error_fast', node.get('error', 0.0)), # Backwards compatibility
+                'error_slow': node.get('error_slow', node.get('error', 0.0)), # Backwards compatibility
                 'utility': node['utility']
             }
             for nid, node in state_dict['nodes'].items()

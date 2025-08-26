@@ -254,10 +254,21 @@ class Command(BaseCommand):
                             done = msg.get("done")
 
                             # 3. Process reward and record experience
-                            use_internal_reward = agent.hyperparams.get('use_internal_reward', True)
+                            use_internal_reward = agent.hyperparams.get('use_internal_reward', False)
                             if use_internal_reward:
                                 internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
-                                total_reward = external_reward + internal_reward
+
+                                # Adaptive Reward Mixing
+                                reward_mix_params = agent.hyperparams.get('reward_mixing', {})
+                                schedule_steps = reward_mix_params.get('schedule_steps', 1)
+                                start_weight = reward_mix_params.get('intrinsic_start_weight', 0.0)
+                                end_weight = reward_mix_params.get('intrinsic_end_weight', 0.0)
+
+                                progress = min(1.0, total_steps / schedule_steps)
+                                intrinsic_weight = start_weight + progress * (end_weight - start_weight)
+                                extrinsic_weight = 1.0 - intrinsic_weight
+
+                                total_reward = (extrinsic_weight * external_reward) + (intrinsic_weight * internal_reward)
                             else:
                                 total_reward = external_reward
 
