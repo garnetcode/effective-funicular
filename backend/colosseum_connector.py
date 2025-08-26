@@ -124,39 +124,45 @@ class ColosseumConnector:
 
     async def reset_environment(self):
         """
-        Sends a reset message and waits for confirmation, ignoring any
-        other messages that may be in the buffer.
+        Sends a reset message and waits for confirmation. This version uses a more
+        robust loop to drain the message queue of any other messages (e.g., 'game.over')
+        that may have arrived before the reset confirmation.
         """
         logger.debug("Sending agent.reset message.")
         reset_message = {"type": "agent.reset"}
         await self.send_message(reset_message)
 
-        # Wait for the 'environment.reset' confirmation, ignoring other messages.
         start_time = asyncio.get_event_loop().time()
-        timeout = 30.0  # Increased timeout for slower environments
+        timeout = 30.0
+
         while asyncio.get_event_loop().time() - start_time < timeout:
             try:
-                # Use a shorter timeout for each recv() call within the main loop
-                response = await asyncio.wait_for(self.receive_message(), timeout=1.0)
+                # Calculate remaining time to ensure we respect the total timeout.
+                remaining_time = timeout - (asyncio.get_event_loop().time() - start_time)
+                if remaining_time <= 0:
+                    break
 
-                if response and response.get("type") == "environment.reset":
+                # Wait for a message using the remaining time as the timeout.
+                message = await asyncio.wait_for(self.websocket.recv(), timeout=remaining_time)
+                data = json.loads(message)
+
+                if data and data.get("type") == "environment.reset":
                     logger.debug("Environment reset successfully.")
-                    return response
-                elif response:
-                    # Log other messages received while waiting
-                    logger.debug(f"Ignoring buffered message of type '{response.get('type')}' while waiting for reset confirmation. Content: {response}")
-                # If response is None (due to connection closed), the loop will continue and eventually time out.
+                    return data
+                else:
+                    logger.debug(f"Ignoring buffered message of type '{data.get('type')}' while waiting for reset confirmation.")
 
             except asyncio.TimeoutError:
-                # This is a timeout for a single receive, not the whole operation.
-                # It's okay, we just continue waiting for the confirmation.
-                logger.debug("Timeout waiting for a message, will try again...")
-                continue
+                # This timeout means the total time has elapsed.
+                logger.error("Total timeout exceeded while waiting for 'environment.reset'.")
+                break  # Exit the loop
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("Connection closed while waiting for reset confirmation.")
+                return None
             except Exception as e:
                 logger.error(f"An unexpected error occurred while waiting for reset confirmation: {e}")
-                return None # Exit on other errors
+                return None
 
-        # If the while loop finishes, it means the main timeout was exceeded
         logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation within the total timeout.")
         return None
 
