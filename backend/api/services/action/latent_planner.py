@@ -12,7 +12,7 @@ class LatentPlanner(nn.Module):
         self.iterations = iterations
         self.uncertainty_penalty_weight = uncertainty_penalty_weight
 
-    def plan(self, h_t, z_t, subgoal_weight=None):
+    def plan(self, h_t, z_t, goal=None):
         """
         Plans the best action sequence using the Cross-Entropy Method (CEM) with an ensemble of world models.
         """
@@ -49,11 +49,20 @@ class LatentPlanner(nn.Module):
                         h_sim_flat, prior_mean, prior_std = world_model.rssm.transition_model(z_sim_flat, action_t_flat, h_sim_flat)
                         z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
 
-                        if subgoal_weight is not None:
-                            dist_to_subgoal = torch.norm(h_sim_flat - subgoal_weight, dim=-1)
-                            reward_pred = -dist_to_subgoal
+                        if goal is not None:
+                            # AGENT_FIX: The goal needs to be expanded to match the simulation batch size
+                            num_sims = z_sim_flat.shape[0]
+                            goal_expanded = goal.unsqueeze(0).expand(num_sims, -1)
+                            # AGENT_FIX: Call the reward model with the correct concatenated input
+                            reward_input = torch.cat([z_sim_flat, h_sim_flat, goal_expanded], dim=1)
+                            reward_pred = world_model.reward_model(reward_input).squeeze(-1)
                         else:
-                            reward_pred = world_model.reward_model(z_sim_flat, h_sim_flat).squeeze(-1)
+                            # Fallback if no goal is provided (though the agent should always have one)
+                            # This part is tricky as the model requires a goal. We can send a zero goal.
+                            goal_dim = world_model.reward_model[0].in_features - z_sim_flat.shape[1] - h_sim_flat.shape[1]
+                            zero_goal = torch.zeros(z_sim_flat.shape[0], goal_dim, device=device)
+                            reward_input = torch.cat([z_sim_flat, h_sim_flat, zero_goal], dim=1)
+                            reward_pred = world_model.reward_model(reward_input).squeeze(-1)
 
                         h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
                         z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)
