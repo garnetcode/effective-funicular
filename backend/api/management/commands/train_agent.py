@@ -186,7 +186,7 @@ class Command(BaseCommand):
                     while not done:
                         # 1. Perceive and Select Action
                         _, _, _, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
-                        action, log_prob, stag_context, decision_maker, epsilon = agent.select_action(actual_action_dim, activation_path)
+                        action, log_prob, stag_context, decision_maker, epsilon, action_time = agent.select_action(actual_action_dim, activation_path)
 
                         # 2. Step the environment
                         await connector.send_action(action)
@@ -271,6 +271,7 @@ class Command(BaseCommand):
                         "Energy": f"{agent.energy:.1f}",
                         "Integrity": f"{agent.integrity:.1f}",
                         "Decision": decision_maker,
+                        "Action Time": f"{action_time:.4f}s",
                         "Action Prob": f"{torch.exp(log_prob).item():.3f}",
                         "Policy Loss": self._safe_format(train_stats.get('policy_loss'), '.4f')
                     })
