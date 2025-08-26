@@ -213,3 +213,11 @@ class STAG_Framework:
         """
         for level_id, gng_instance in self.level_map.items():
             gng_instance.prune_low_utility_nodes(min_utility)
+
+    def find_k_nearest_in_terminal_gng(self, vector, k=5):
+        """Finds the k-nearest neighbors in the terminal GNG for a given vector."""
+        if not self.level_map:
+            return [], []
+
+        terminal_gng = self.level_map[max(self.level_map.keys())]
+        return terminal_gng.find_k_nearest_neighbors(vector, k)

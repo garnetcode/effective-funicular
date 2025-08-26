@@ -188,6 +188,34 @@ class GNG_Engine:
             s1_idx, s2_idx = two_smallest_indices
             return node_ids[s1_idx], node_ids[s2_idx]
 
+    def find_k_nearest_neighbors(self, vector, k=5):
+        """Finds the k nearest neighbors to a given vector."""
+        if not self.nodes or k == 0:
+            return [], []
+
+        if self.faiss_index:
+            query_vector = np.array([vector]).astype('float32')
+            distances, indices = self.faiss_index.search(query_vector, k)
+            neighbor_ids = [self.faiss_id_map[i] for i in indices[0]]
+            return neighbor_ids, distances[0]
+        else:
+            # NumPy fallback
+            node_ids = list(self.nodes.keys())
+            weights = np.array([self.nodes[nid]['weight'] for nid in node_ids])
+            distances_sq = np.sum((weights - vector) ** 2, axis=1)
+
+            k = min(k, len(node_ids))
+
+            # Use argpartition for efficiency
+            k_smallest_indices = np.argpartition(distances_sq, k-1)[:k]
+
+            # Sort only the k-smallest to get them in order
+            sorted_indices = k_smallest_indices[np.argsort(distances_sq[k_smallest_indices])]
+
+            neighbor_ids = [node_ids[i] for i in sorted_indices]
+            return neighbor_ids, np.sqrt(distances_sq[sorted_indices])
+
+
     def _get_neighbors(self, node_id):
         """Returns the set of node IDs connected to the given node."""
         neighbors = set()

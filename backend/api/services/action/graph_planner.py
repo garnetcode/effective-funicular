@@ -113,3 +113,30 @@ class GraphPlanner:
             current_node_id = came_from[current_node_id]
             total_path.append(current_node_id)
         return total_path[::-1]
+
+    def bfs_distances(self, start_node_id, stag_graph):
+        """
+        Calculates the shortest path distance (in number of edges) from a start node
+        to all other nodes in the graph using Breadth-First Search.
+        """
+        if start_node_id not in stag_graph['nodes']:
+            return {}
+
+        distances = {node_id: float('inf') for node_id in stag_graph['nodes']}
+        distances[start_node_id] = 0
+
+        queue = [(start_node_id, 0)]
+
+        visited = {start_node_id}
+
+        while queue:
+            current_node, dist = queue.pop(0)
+
+            neighbors = self._get_neighbors(current_node, stag_graph)
+            for neighbor in neighbors:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    distances[neighbor] = dist + 1
+                    queue.append((neighbor, dist + 1))
+
+        return distances

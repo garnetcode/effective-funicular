@@ -255,6 +255,11 @@ class ChimeraAgent:
         self.lambda_bc_end = self.distill_params.get('lambda_bc_end', 0.1)
         self.lambda_bc_schedule_steps = self.distill_params.get('lambda_bc_schedule_steps', 300000)
 
+        # Hierarchical Control
+        self.h_control_params = self.hyperparams.get('hierarchical_control', {})
+        self.h_step_interval = self.h_control_params.get('h_step_interval', 50)
+        self.h_step_counter = 0
+
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
@@ -418,104 +423,120 @@ class ChimeraAgent:
 
     def select_action(self, actual_action_dim, activation_path):
         """
-        Selects an action using the policy or a planner.
+        Selects an action using the hierarchical planning and control system.
         """
         start_time = time.time()
-        # 1. Construct the context vector C_t from the STAG's activation path
-        path_weights = []
-        if activation_path:
-            active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-            for step in activation_path:
-                level_gng = active_stag.level_map[step['level_id']]
-                node_weight = level_gng.nodes[step['winner_id']]['weight']
-                path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
-
-        while len(path_weights) < self.max_stag_path_length:
-            path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
-
-        with torch.no_grad():
-            stag_context_vector = self.stag_context_processor(path_weights)
-        if not self.use_stag_in_ac_loss:
-            stag_context_vector = torch.zeros_like(stag_context_vector)
-
-        # Normalize hidden state before passing to policy
-        h_normalized = self.h_norm(self.hidden_state)
-        combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
-
-        # 3. Select action
-        epsilon = self._get_epsilon()
         self.steps_done += 1
+        self.h_step_counter += 1
+        decision_maker = "policy" # Default
+        log_prob = torch.tensor(0.0) # Default
+        stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device) # Default
 
-        # Decide whether to use the planner or the learned policy
-        use_planner_this_step = self.use_planner and (self.action_plan is None or len(self.action_plan) == 0) and (self.steps_done % self.low_level_plan_frequency == 0)
+        # --- Hierarchical Planning Logic ---
+        # 1. High-Level Planner (GraphPlanner)
+        if self.use_planner and (self.current_subgoal is None or self.h_step_counter >= self.h_step_interval):
+            self.h_step_counter = 0
+            stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
+            if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
+                    # --- Goal Curriculum Logic ---
+                    curriculum_params = self.h_control_params.get('goal_curriculum', {})
+                    if curriculum_params.get('enabled', False):
+                        # Calculate current max distance
+                        schedule_steps = curriculum_params.get('schedule_steps', 1)
+                        progress = min(1.0, self.train_steps / schedule_steps)
+                        start_dist = curriculum_params.get('initial_max_graph_dist', 2)
+                        end_dist = curriculum_params.get('max_graph_dist_end', 10)
+                        max_dist = int(start_dist + progress * (end_dist - start_dist))
 
-        if use_planner_this_step:
-            # Hierarchical planning logic
-            if self.current_subgoal is None or self.train_steps % self.high_level_replan_frequency == 0:
-                stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
-                if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
-                    possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
-                    if possible_goals:
-                        goal_node_id = random.choice(possible_goals)
-                        self.high_level_plan = self.graph_planner.plan(stag_graph, self.skill_manager.option_models.get(self.active_skill_id, {}), self.last_stag_node_id, goal_node_id)
+                        # Find reachable goals within the curriculum distance
+                        distances = self.graph_planner.bfs_distances(self.last_stag_node_id, stag_graph)
+                        possible_goals = [nid for nid, dist in distances.items() if 1 <= dist <= max_dist]
+                    else:
+                        # Fallback to original logic if curriculum is disabled
+                        possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
 
-                if self.high_level_plan:
-                    self.high_level_plan.pop(0)
-                    if self.high_level_plan:
-                        self.current_subgoal = self.high_level_plan.pop(0)
+                if possible_goals:
+                    goal_node_id = random.choice(possible_goals)
+                    self.high_level_plan = self.graph_planner.plan(stag_graph, self.skill_manager.option_models.get(self.active_skill_id, {}), self.last_stag_node_id, goal_node_id)
+                    if self.high_level_plan and len(self.high_level_plan) > 1:
+                        self.current_subgoal = self.high_level_plan[1] # Target the next node in the path
+                        logger.info(f"H-Planner: New subgoal set to STAG node {self.current_subgoal}")
+                        self.action_plan = None # Invalidate low-level plan
+                    else:
+                        self.current_subgoal = None # Plan failed or is trivial
 
-            subgoal_weight = None
-            if self.current_subgoal:
-                stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                terminal_gng = stag.level_map[max(stag.level_map.keys())]
-                if self.current_subgoal in terminal_gng.nodes:
-                    subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
+        # 2. Mid-Level Planner (LatentPlanner)
+        if self.use_planner and self.current_subgoal is not None and self.action_plan is None:
+            stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+            # This assumes subgoals are in the terminal GNG
+            terminal_gng = stag.level_map[max(stag.level_map.keys())]
+            if self.current_subgoal in terminal_gng.nodes:
+                subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
+                with torch.no_grad():
+                    logger.info(f"M-Planner: Planning trajectory to subgoal {self.current_subgoal}")
+                    plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight=subgoal_weight)
 
-            with torch.no_grad():
-                # The planner returns the full sequence of actions
-                self.action_plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight, self.current_goal)
+                if plan is not None and len(plan) > 0:
+                    self.action_plan = plan
+                else:
+                    # Fallback: Planner failed, find a nearby alternative subgoal
+                    logger.warning(f"M-Planner failed for subgoal {self.current_subgoal}. Finding alternative.")
+                    original_subgoal_weight = subgoal_weight.cpu().numpy()
+                    neighbor_ids, _ = self.skill_manager.find_k_nearest_neighbors(self.active_skill_id, original_subgoal_weight, k=5)
 
-            # Take the first action from the new plan
+                    # Try the next closest neighbor that isn't the one we just failed on
+                    new_subgoal = next((nid for nid in neighbor_ids if nid != self.current_subgoal), None)
+
+                    if new_subgoal:
+                        logger.info(f"Fallback: Setting new subgoal to {new_subgoal}")
+                        self.current_subgoal = new_subgoal
+                    else:
+                        logger.warning("Fallback failed, no alternative subgoals found. Clearing subgoal.")
+                        self.current_subgoal = None
+            else:
+                # Fallback: Subgoal not found in GNG
+                logger.warning(f"Subgoal {self.current_subgoal} not found in terminal GNG. Clearing subgoal.")
+                self.current_subgoal = None
+
+        # 3. Low-Level Execution (Plan Following or Policy)
+        if self.action_plan is not None and len(self.action_plan) > 0:
             action_continuous = self.action_plan[0]
-            action_tensor = torch.argmax(action_continuous[:actual_action_dim], dim=-1)
-            self.action_plan = self.action_plan[1:] # Consume the first action
+            # The planner might return a sequence of means, not one-hot vectors.
+            # We take the argmax to get the discrete action.
+            action_tensor = torch.argmax(action_continuous, dim=-1)
+            self.action_plan = self.action_plan[1:]
             decision_maker = "planner"
-            log_prob = torch.tensor(0.0)
-
-        elif self.action_plan is not None and len(self.action_plan) > 0:
-            # Execute the existing plan
-            action_continuous = self.action_plan[0]
-            action_tensor = torch.argmax(action_continuous[:actual_action_dim], dim=-1)
-            self.action_plan = self.action_plan[1:] # Consume the action
-            decision_maker = "plan_follower"
-            log_prob = torch.tensor(0.0)
-
-        else: # Use the policy
+        else:
+            # Fallback to learned policy
             with torch.no_grad():
-                if self.current_goal is None:
-                    logger.warning("self.current_goal was None in select_action. Defaulting to a zero vector.")
-                    self.current_goal = np.zeros(self.goal_dim)
+                h_normalized = self.h_norm(self.hidden_state)
+                # STAG context is not fully integrated into this hierarchical loop yet
+                stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device)
+                combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
+
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
                 goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
                 action_dist = self.action_head(combined_input, goal_tensor_expanded)
+
                 mask = torch.full(action_dist.logits.shape, -float('inf'), device=self.device)
                 mask[0, :actual_action_dim] = 0
                 masked_logits = action_dist.logits + mask
                 action_dist = Categorical(logits=masked_logits)
 
-            if np.random.rand() < epsilon:
-                action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
-                decision_maker = "random"
-            else:
-                action_tensor = action_dist.sample()
-                decision_maker = "policy"
-
-            log_prob = action_dist.log_prob(action_tensor)
+                epsilon = self._get_epsilon()
+                if np.random.rand() < epsilon:
+                    action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
+                    decision_maker = "random"
+                else:
+                    action_tensor = action_dist.sample()
+                    decision_maker = "policy"
+                log_prob = action_dist.log_prob(action_tensor)
 
         action = action_tensor.item()
-        # Ensure last_action is always a 1D tensor of shape (1,) for consistency.
         self.last_action = action_tensor.reshape(1)
         action_time = time.time() - start_time
+        epsilon = self._get_epsilon() # Recalculate for logging
+
         return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time
 
     def _get_epsilon(self):
