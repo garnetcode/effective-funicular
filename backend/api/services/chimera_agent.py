@@ -56,8 +56,7 @@ class StagContextProcessor(nn.Module):
             return torch.zeros(1, self.processor.out_features) # Return a zero vector if path is empty
 
         concatenated_weights = torch.cat(activation_path_weights, dim=0)
-        # Ensure the tensor is flat before adding the batch dimension
-        return self.processor(concatenated_weights.flatten().unsqueeze(0))
+        return self.processor(concatenated_weights.unsqueeze(0))
 
 
 def _initialize_cortexes(configs, output_dim, device):
@@ -722,6 +721,10 @@ class ChimeraAgent:
             # use a zero vector for the context.
             if not self.use_stag_in_ac_loss or self.steps_done <= self.world_model_pretrain_steps:
                 stag_context_batch = torch.zeros_like(stag_context_batch)
+
+            # Squeeze the context batch if it has an extra dimension
+            if stag_context_batch.dim() > 2:
+                stag_context_batch = stag_context_batch.squeeze(1)
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t
             action_input = torch.cat([h_t, stag_context_batch], dim=-1)
