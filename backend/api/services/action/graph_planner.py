@@ -27,6 +27,25 @@ class OptionModel:
     def expected_duration(self):
         return self.total_duration / self.count if self.count > 0 else float('inf')
 
+    def to_dict(self):
+        """Returns a serializable dictionary representation."""
+        return {
+            'from_node': self.from_node,
+            'to_node': self.to_node,
+            'total_reward': self.total_reward,
+            'total_duration': self.total_duration,
+            'count': self.count,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Creates an OptionModel instance from a dictionary."""
+        model = cls(data['from_node'], data['to_node'])
+        model.total_reward = data['total_reward']
+        model.total_duration = data['total_duration']
+        model.count = data['count']
+        return model
+
 
 class GraphPlanner:
     """
@@ -100,10 +119,10 @@ class GraphPlanner:
         """Returns the neighbors of a node in the STAG graph."""
         neighbors = set()
         for edge in stag_graph['edges']:
-            if edge[0] == node_id:
-                neighbors.add(edge[1])
-            elif edge[1] == node_id:
-                neighbors.add(edge[0])
+            if edge['source'] == node_id:
+                neighbors.add(edge['target'])
+            elif edge['target'] == node_id:
+                neighbors.add(edge['source'])
         return neighbors
 
     def _reconstruct_path(self, came_from, current_node_id):

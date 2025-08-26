@@ -93,15 +93,20 @@ class SkillManager:
 
     def get_serializable_structure(self):
         """
-        Returns a serializable representation of all skill graphs.
-        NOTE: Option models and successor features are not currently serialized.
+        Returns a serializable representation of all skill graphs and their associated option models.
         """
-        all_skill_data = {}
-        for skill_id, stag_instance in self.skill_graphs.items():
-            all_skill_data[skill_id] = stag_instance.get_serializable_structure()
+        serializable_option_models = {}
+        for skill_id, options in self.option_models.items():
+            serializable_option_models[skill_id] = {}
+            for (from_node, to_node), model in options.items():
+                # Convert tuple key to a string for JSON compatibility
+                str_key = f"{from_node},{to_node}"
+                serializable_option_models[skill_id][str_key] = model.to_dict()
+
         return {
             'dimensions': self.dimensions,
-            'skill_graphs': all_skill_data
+            'skill_graphs': {sid: stag.get_serializable_structure() for sid, stag in self.skill_graphs.items()},
+            'option_models': serializable_option_models,
         }
 
     @classmethod
@@ -112,11 +117,15 @@ class SkillManager:
         dimensions = structure.get('dimensions')
         manager = cls(dimensions, **kwargs)
 
-        serializable_graphs = structure.get('skill_graphs', {})
-        for skill_id, stag_data in serializable_graphs.items():
+        # Load skill graphs
+        for skill_id, stag_data in structure.get('skill_graphs', {}).items():
             manager.skill_graphs[skill_id] = STAG_Framework.from_serializable_structure(stag_data, **kwargs)
-            if skill_id not in manager.option_models:
-                manager.option_models[skill_id] = {}
 
+        # Load option models
+        for skill_id, options_data in structure.get('option_models', {}).items():
+            manager.option_models[skill_id] = {}
+            for str_key, model_data in options_data.items():
+                from_node, to_node = map(int, str_key.split(','))
+                manager.option_models[skill_id][(from_node, to_node)] = OptionModel.from_dict(model_data)
 
         return manager
