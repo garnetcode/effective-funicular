@@ -144,8 +144,8 @@ class STAG_Framework:
                     'level_id': level_id,
                     'gng_node_id': node_id,
                     'weight': node_data['weight'].tolist(),
-                    'error': node_data['error'],
-                    'utility': node_data['utility']
+                    'error': node_data.get('error', 0.0),
+                    'utility': node_data.get('utility', 0.0)
                 }
                 final_nodes[global_id] = serializable_node
                 node_id_counter += 1
