@@ -94,6 +94,24 @@ def softmax(x):
     e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
 
+def sanitize_state_dict(state):
+    """
+    Recursively iterates through a dictionary and converts numpy data types to native
+    Python types to ensure compatibility with torch.save/load.
+    """
+    for key, value in state.items():
+        if isinstance(value, dict):
+            sanitize_state_dict(value)
+        elif isinstance(value, (np.int_, np.intc, np.intp, np.int8,
+                                np.int16, np.int32, np.int64, np.uint8,
+                                np.uint16, np.uint32, np.uint64)):
+            state[key] = int(value)
+        elif isinstance(value, (np.float64, np.float16, np.float32)):
+            state[key] = float(value)
+        elif isinstance(value, np.ndarray):
+            state[key] = value.tolist()
+    return state
+
 class ChimeraAgent:
     def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=128, hidden_dim=512, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
@@ -307,9 +325,10 @@ class ChimeraAgent:
             'contrastive_queue_ptr': self.contrastive_queue_ptr,
         }
 
-        # Combine with any additional info provided
+        # Combine with any additional info provided and sanitize for saving
         full_state_package = {**agent_state, **version_info}
-        self.history_manager.save_snapshot(full_state_package, version_info)
+        sanitized_state = sanitize_state_dict(full_state_package)
+        self.history_manager.save_snapshot(sanitized_state, version_info)
 
     def load_state(self, version='latest'):
         """Loads the complete state of the agent for resumable training."""
@@ -340,8 +359,11 @@ class ChimeraAgent:
         self.train_steps = state_dict.get('train_steps', 0)
         self.novelty_stats = state_dict.get('novelty_stats', self.novelty_stats)
         if 'skill_manager_state' in state_dict:
+            # Pass the agent's hidden_dim to ensure correct initialization.
+            skill_manager_kwargs = self.hyperparams.copy()
+            skill_manager_kwargs['dimensions'] = self.hidden_dim
             self.skill_manager = SkillManager.from_serializable_structure(
-                state_dict['skill_manager_state'], **self.hyperparams
+                state_dict['skill_manager_state'], **skill_manager_kwargs
             )
 
         # --- Load Learning Mechanism States ---

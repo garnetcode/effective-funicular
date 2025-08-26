@@ -114,7 +114,12 @@ class SkillManager:
         """
         Creates a SkillManager instance from a serialized structure.
         """
-        dimensions = structure.get('dimensions')
+        # Prioritize the dimension passed directly from the agent constructor,
+        # fallback to the one saved in the structure. This handles legacy save files.
+        dimensions = kwargs.get('dimensions', structure.get('dimensions'))
+        if dimensions is None:
+            raise ValueError("SkillManager deserialization failed: 'dimensions' is None.")
+
         manager = cls(dimensions, **kwargs)
 
         # Load skill graphs
