@@ -695,9 +695,6 @@ class ChimeraAgent:
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
         This is the second part of the "Sleep" phase.
         """
-        if self.train_steps < self.world_model_pretrain_steps:
-            return {}
-
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
@@ -716,6 +713,7 @@ class ChimeraAgent:
         batch, _, _ = self.replay_buffer.sample(batch_size)
         h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device)
         z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device)
+        goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
 
         # --- Imagine Trajectories ---
         h_t, z_t = h_start, z_start
@@ -763,7 +761,7 @@ class ChimeraAgent:
 
             # 3. World model predicts next state (do this without tracking gradients)
             with torch.no_grad():
-                h_t, prior_mean, prior_std = self.world_model.rssm.transition_model(z_t, action, h_t)
+                h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
 
             imagined_h.append(h_t)
@@ -780,7 +778,7 @@ class ChimeraAgent:
         # --- Predict Rewards and Values for Imagined Trajectory ---
         # For simplicity, we assume the goal is constant for the whole trajectory
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
-        imagined_rewards = self.world_models[0].reward_model(imagined_z, imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)).squeeze(-1)
+        imagined_rewards = self.world_models[0].reward_model(torch.cat([imagined_z, imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)], dim=-1)).squeeze(-1)
 
         # Expand goal for value prediction
         goal_sequence_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)

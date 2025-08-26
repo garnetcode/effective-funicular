@@ -35,7 +35,8 @@ class ChimeraAgentStagDecouplingTests(TestCase):
                 'world_model_pretrain_steps': self.pretrain_steps,
                 'stag_update_frequency': 10,
                 'batch_size': 4,
-                'imagine_horizon': 2
+                'imagine_horizon': 2,
+                'sequence_length': 4
             }
         )
         self.agent.set_active_skill("test_skill")
@@ -93,12 +94,21 @@ class ChimeraAgentStagDecouplingTests(TestCase):
                         log_prob=0.5,
                         reward=0.0,
                         next_obs=np.zeros(self.obs_dim),
-                        done=False
+                        done=False,
+                        goal=np.zeros(self.obs_dim)
                     )
                     mock_experiences.append(exp)
 
-                mock_buffer.sample.return_value = mock_experiences
+                mock_buffer.sample.return_value = (
+                    {
+                        'h': np.random.rand(batch_size, 1, self.agent.hidden_dim),
+                        'z': np.random.rand(batch_size, 1, self.agent.latent_dim),
+                        'goal': np.random.rand(batch_size, 1, self.agent.goal_dim),
+                    },
+                    None, None
+                )
                 mock_buffer.__len__.return_value = batch_size
+                mock_buffer.sequence_length = self.agent.hyperparams.get('sequence_length')
 
                 # Patch the action head's forward method to capture the input
                 with patch.object(self.agent.action_head.layer, 'forward') as mock_action_layer_forward:

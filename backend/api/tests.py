@@ -15,7 +15,12 @@ class GNG_EngineTests(TestCase):
     def setUp(self):
         # We use a fixed seed for reproducibility of random initial nodes
         np.random.seed(42)
-        self.gng = GNG_Engine(dimensions=2, gng_utility_gain=1.0, gng_utility_decay_rate=0.0)
+        self.gng = GNG_Engine(
+            dimensions=2,
+            gng_utility_gain=1.0,
+            gng_utility_decay_rate=0.0,
+            gng_pruning_grace_period=0
+        )
 
     def test_utility_gain_on_winner(self):
         """Test that the winning node's utility increases after processing an input."""
@@ -100,6 +105,7 @@ class GNG_EngineTests(TestCase):
         self.gng.nodes[node4_id]['utility'] = 7.0  # High utility
 
         min_utility_threshold = 0.1
+        self.gng._iterations = 1 # Ensure nodes are not in their grace period
         self.gng.prune_low_utility_nodes(min_utility_threshold)
 
         # Assert that low-utility nodes are gone
@@ -247,33 +253,25 @@ class ChimeraAgentTests(TestCase):
     def test_world_model_weight_decay(self):
         """Tests that the weight_decay hyperparameter is correctly passed to the optimizer."""
         decay_value = 0.01
-        agent = ChimeraAgent(
-            agent_id="test-weight-decay-agent",
-            embedding_dim=self.obs_dim,
-            max_action_dim=self.action_dim,
-            cortex_configs=self.agent.cortex_configs,
-            load_from_storage=False,
-            hyperparams={'world_model_weight_decay': decay_value, 'batch_size': 1}
-        )
-        agent.set_active_skill("test_cortex")
-
-        # Populate the buffer with enough data to pass the size check
-        for _ in range(2):
-            agent.record_experience(
-                torch.rand(1, agent.hidden_dim), torch.rand(1, agent.latent_dim), [],
-                np.random.rand(self.obs_dim), 0, 0.5, 1.0, np.random.rand(self.obs_dim), False
-            )
 
         with patch('torch.optim.Adam') as mock_adam:
-            agent.train_world_model(cortex_id="test_cortex")
-
-            # Check if Adam was called
+            agent = ChimeraAgent(
+                agent_id="test-weight-decay-agent",
+                embedding_dim=self.obs_dim,
+                max_action_dim=self.action_dim,
+                cortex_configs=self.agent.cortex_configs,
+                load_from_storage=False,
+                hyperparams={'world_model_weight_decay': decay_value, 'batch_size': 1}
+            )
+            # Check if Adam was called during initialization
             self.assertTrue(mock_adam.called)
 
             # Check the keyword arguments passed to Adam
-            _, kwargs = mock_adam.call_args
-            self.assertIn('weight_decay', kwargs)
-            self.assertEqual(kwargs['weight_decay'], decay_value)
+            # It's called for each model in the ensemble
+            for call in mock_adam.call_args_list:
+                _, kwargs = call
+                self.assertIn('weight_decay', kwargs)
+                self.assertEqual(kwargs['weight_decay'], decay_value)
 
         # Clean up the agent's directory
         history_dir = agent.history_manager.storage_dir
