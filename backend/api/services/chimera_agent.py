@@ -626,7 +626,7 @@ class ChimeraAgent:
                 hidden_states.append(h_t)
 
                 obs_recon = world_model.obs_decoder(z_t, h_t)
-                reward_pred = world_model.reward_model(z_t, h_t, goal_sequence[:, t])
+                reward_pred = world_model.reward_model(torch.cat([z_t, h_t, goal_sequence[:, t]], dim=-1))
 
                 recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
                 reward_loss = torch.mean((reward_pred - reward_t.unsqueeze(-1))**2, dim=-1)
