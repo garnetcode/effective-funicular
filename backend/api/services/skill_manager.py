@@ -120,6 +120,8 @@ class SkillManager:
         if dimensions is None:
             raise ValueError("SkillManager deserialization failed: 'dimensions' is None.")
 
+        # Avoid passing 'dimensions' as a keyword argument if it's already being passed positionally.
+        kwargs.pop('dimensions', None)
         manager = cls(dimensions, **kwargs)
 
         # Load skill graphs
