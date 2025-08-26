@@ -33,8 +33,8 @@ agent_config:
   hyperparams:
     learning_rate: 0.0003
     gamma: 0.99
-    batch_size: 32
-    buffer_capacity: 10000
+    batch_size: 16
+    buffer_capacity: 5000
     value_loss_weight: 1.0 # Increased from default 0.5 to stabilize critic
     # Vitals-based reward shaping
     low_energy_threshold: 0.2 # 20%
@@ -74,8 +74,8 @@ agent_config:
     free_bits: 1.0 # KL balancing parameter
     # Latent Planner (CEM)
     cem_plan_horizon: 12
-    cem_num_samples: 100 # Reduced from 1000
-    cem_top_k: 10 # Reduced from 100
+    cem_num_samples: 50 # Reduced from 1000
+    cem_top_k: 5 # Reduced from 100
     cem_iterations: 3 # Reduced from 10
     low_level_plan_frequency: 10 # Plan every 10 steps
     use_planner: true
