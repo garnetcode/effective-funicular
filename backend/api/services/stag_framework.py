@@ -196,9 +196,22 @@ class STAG_Framework:
         """
         Creates a STAG instance from a serialized structure.
         """
-        stag = cls(structure.get('dimensions', kwargs.get('dimensions')), **kwargs)
+        # Determine dimensions, prioritizing the structure's value but falling back to kwargs.
+        # This is key to supporting older save files where the agent's top-level
+        # dimensions need to be passed down.
+        dimensions = structure.get('dimensions', kwargs.get('dimensions'))
+
+        # Create a clean set of kwargs for initialization, removing 'dimensions'
+        # to prevent a TypeError from passing it both positionally and as a keyword.
+        init_kwargs = kwargs.copy()
+        init_kwargs.pop('dimensions', None)
+
+        stag = cls(dimensions, **init_kwargs)
         stag._next_level_id = structure.get('_next_level_id', 0)
-        stag.tree = stag._deserialize_level(structure['tree'], kwargs)
+
+        # Pass the clean kwargs down to the level deserialization to prevent
+        # the same TypeError in the GNG_Engine constructor.
+        stag.tree = stag._deserialize_level(structure['tree'], init_kwargs)
         return stag
 
     def _deserialize_level(self, level_dict, kwargs):
