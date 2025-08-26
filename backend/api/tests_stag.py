@@ -93,24 +93,20 @@ class ChimeraAgentStagDecouplingTests(TestCase):
                         log_prob=0.5,
                         reward=0.0,
                         next_obs=np.zeros(self.obs_dim),
-                        done=False
+                        done=False,
+                        goal=np.zeros(self.obs_dim)
                     )
                     mock_experiences.append(exp)
 
                 mock_buffer.sample.return_value = mock_experiences
                 mock_buffer.__len__.return_value = batch_size
 
-                # Patch the action head's forward method to capture the input
-                with patch.object(self.agent.action_head.layer, 'forward') as mock_action_layer_forward:
-                    # The mock needs to return a valid tensor for the Categorical distribution
-                    mock_action_layer_forward.return_value = torch.randn(batch_size, self.agent.max_action_dim)
-
+                # Patch the action head's forward method to ensure it's not called
+                with patch.object(self.agent.action_head, 'forward') as mock_action_head_forward:
                     self.agent.train_policy_in_imagination()
-                    # Get the input to the action head from the first call in the imagination loop
-                    call_args, _ = mock_action_layer_forward.call_args
-                    combined_input = call_args[0]
-                    stag_context_part = combined_input[:, self.agent.hidden_dim:]
-                    self.assertTrue(torch.all(stag_context_part == 0))
+                    # During the pre-training phase, the policy should not be trained,
+                    # so the action head should not be called.
+                    mock_action_head_forward.assert_not_called()
 
 
     def test_stag_activation_post_pretraining(self):

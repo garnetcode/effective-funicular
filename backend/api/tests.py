@@ -99,6 +99,9 @@ class GNG_EngineTests(TestCase):
         self.gng.nodes[node3_id]['utility'] = 0.01 # Low utility (to be pruned)
         self.gng.nodes[node4_id]['utility'] = 7.0  # High utility
 
+        # Simulate enough iterations to pass the pruning grace period for all nodes
+        self.gng._iterations = self.gng.pruning_grace_period + 1
+
         min_utility_threshold = 0.1
         self.gng.prune_low_utility_nodes(min_utility_threshold)
 
@@ -247,38 +250,27 @@ class ChimeraAgentTests(TestCase):
     def test_world_model_weight_decay(self):
         """Tests that the weight_decay hyperparameter is correctly passed to the optimizer."""
         decay_value = 0.01
-        agent = ChimeraAgent(
-            agent_id="test-weight-decay-agent",
-            embedding_dim=self.obs_dim,
-            max_action_dim=self.action_dim,
-            cortex_configs=self.agent.cortex_configs,
-            load_from_storage=False,
-            hyperparams={'world_model_weight_decay': decay_value, 'batch_size': 1}
-        )
-        agent.set_active_skill("test_cortex")
-
-        # Populate the buffer with enough data to pass the size check
-        for _ in range(2):
-            agent.record_experience(
-                torch.rand(1, agent.hidden_dim), torch.rand(1, agent.latent_dim), [],
-                np.random.rand(self.obs_dim), 0, 0.5, 1.0, np.random.rand(self.obs_dim), False
-            )
-
         with patch('torch.optim.Adam') as mock_adam:
-            agent.train_world_model(cortex_id="test_cortex")
+            agent = ChimeraAgent(
+                agent_id="test-weight-decay-agent",
+                embedding_dim=self.obs_dim,
+                max_action_dim=self.action_dim,
+                cortex_configs=self.agent.cortex_configs,
+                load_from_storage=False,
+                hyperparams={'world_model_weight_decay': decay_value}
+            )
+            # Clean up the agent's directory since we are done with it.
+            history_dir = agent.history_manager.storage_dir
+            if os.path.exists(history_dir):
+                shutil.rmtree(history_dir)
 
-            # Check if Adam was called
-            self.assertTrue(mock_adam.called)
+        # The optimizers are created in __init__, so we check the mock after instantiation.
+        self.assertTrue(mock_adam.called)
 
-            # Check the keyword arguments passed to Adam
-            _, kwargs = mock_adam.call_args
-            self.assertIn('weight_decay', kwargs)
-            self.assertEqual(kwargs['weight_decay'], decay_value)
-
-        # Clean up the agent's directory
-        history_dir = agent.history_manager.storage_dir
-        if os.path.exists(history_dir):
-            shutil.rmtree(history_dir)
+        # Check the keyword arguments passed to the first Adam call
+        _, kwargs = mock_adam.call_args_list[0]
+        self.assertIn('weight_decay', kwargs)
+        self.assertEqual(kwargs['weight_decay'], decay_value)
 
 
 class StateHistoryManagerTests(TestCase):

@@ -38,6 +38,24 @@ class SegmentTree:
     def total(self):
         return self.tree[0]
 
+    def sum(self, start=0, end=None):
+        """Calculates the sum of priorities over a given range."""
+        if end is None:
+            end = self.size
+        start += self.size
+        end += self.size
+        res = 0
+        while start < end:
+            if start % 2 == 1:
+                res += self.tree[start]
+                start += 1
+            if end % 2 == 1:
+                end -= 1
+                res += self.tree[end]
+            start //= 2
+            end //= 2
+        return res
+
 class PERSequenceBuffer:
     def __init__(self, capacity, sequence_length=50, alpha=0.6, beta_start=0.4, beta_frames=100000, her_replay_strategy='future', her_replay_k=4):
         self.capacity = capacity
@@ -119,28 +137,41 @@ class PERSequenceBuffer:
         beta = self.beta_by_frame(self.frame)
         self.frame += 1
 
-        valid_indices = [i for i in range(len(self.memory) - self.sequence_length + 1)]
-        if not valid_indices:
+        num_valid_sequences = len(self.memory) - self.sequence_length + 1
+        if num_valid_sequences <= 0:
             return None, None
 
-        total_priority = self.priorities.total()
+        # Correctly calculate total priority over valid sequence start indices only
+        total_priority = self.priorities.sum(0, num_valid_sequences)
+
         if total_priority == 0:
-            indices = np.random.choice(valid_indices, size=batch_size)
-        else:
-            indices = []
-            segment = total_priority / batch_size
-            for i in range(batch_size):
-                a = segment * i
-                b = segment * (i + 1)
-                value = random.uniform(a, b)
-                idx = self.priorities.find(value)
-                indices.append(idx)
+            # If all priorities are zero, sample uniformly from valid indices
+            indices = np.random.choice(num_valid_sequences, size=batch_size)
+            weights = np.ones_like(indices, dtype=np.float32)
+            return indices, weights
 
+        indices = []
+        segment = total_priority / batch_size
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            # Add a small epsilon to b to ensure it's strictly greater than a
+            b = b + 1e-9
+            value = random.uniform(a, b)
+            idx = self.priorities.find(value)
+            indices.append(idx)
+
+        # Calculate importance sampling weights
         priorities = np.array([self.priorities.tree[i + self.priorities.size] for i in indices])
-        sampling_probs = priorities / total_priority
+        sampling_probs = priorities / total_priority if total_priority > 0 else 0
 
-        weights = (len(valid_indices) * sampling_probs) ** -beta
-        weights /= weights.max()
+        weights = (num_valid_sequences * sampling_probs) ** -beta
+        # Clamp weights to avoid division by zero or large numbers if sampling_probs is zero
+        weights = np.nan_to_num(weights, nan=0.0, posinf=1.0, neginf=0.0)
+
+        max_weight = weights.max()
+        if max_weight > 0:
+            weights /= max_weight
 
         return indices, np.array(weights, dtype=np.float32)
 
