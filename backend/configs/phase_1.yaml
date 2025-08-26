@@ -1,0 +1,33 @@
+# Configuration for Phase 1: Perception + World Model Pretraining
+
+imports:
+  - base.yaml
+
+training:
+  phase: 1
+  # Override base settings for this phase
+  episodes_per_env: 40 # Corresponds to ~200k steps for MountainCar
+
+agent_config:
+  hyperparams:
+    # --- Phase 1 Specific Settings ---
+    # Force random policy for diverse data collection
+    epsilon_start: 1.0
+    epsilon_end: 1.0
+
+    # --- New Features for Phase 1 ---
+    # KL Balancing
+    kl_balancing: true
+    kl_target: 3.0
+    kl_coeff_initial: 1.0
+    kl_coeff_pid_kp: 0.01
+    kl_coeff_pid_ki: 0.0001
+    kl_coeff_pid_kd: 0.001
+
+    # InfoNCE Contrastive Loss
+    contrastive_loss_type: 'infonce'
+    contrastive_queue_size: 4096
+    contrastive_temperature: 0.07
+
+    # Ensemble Diversity
+    ensemble_diversity_prob: 0.5 # Probability of training ensemble members on different batches

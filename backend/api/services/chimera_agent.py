@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributions import Normal, Categorical
 import random
 import time
+from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,9 @@ class ChimeraAgent:
                 weight_decay=self.world_model_weight_decay
             ) for wm in self.world_models
         ]
+        # Normalization Hub
         self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
+        self.z_norm = nn.LayerNorm(self.latent_dim).to(self.device)
 
         # Skill Manager (manages multiple STAGs)
         self.skill_manager = SkillManager(self.hidden_dim, **self.hyperparams)
@@ -221,6 +224,24 @@ class ChimeraAgent:
         # Random projection matrix for state features phi(s)
         self.sf_projection_matrix = torch.randn(self.hidden_dim, self.sf_dimension, device=self.device)
         self.reward_weights = torch.zeros(self.sf_dimension, device=self.device)
+
+        # MoCo-style queue for contrastive learning
+        self.contrastive_queue_size = self.hyperparams.get('contrastive_queue_size', 4096)
+        if self.contrastive_queue_size > 0:
+            self.register_buffer("contrastive_queue", torch.randn(self.contrastive_queue_size, self.hidden_dim))
+            self.contrastive_queue = F.normalize(self.contrastive_queue, dim=1)
+            self.register_buffer("contrastive_queue_ptr", torch.zeros(1, dtype=torch.long))
+
+        # KL Balancing
+        self.use_kl_balancing = self.hyperparams.get('kl_balancing', True)
+        if self.use_kl_balancing:
+            self.kl_target = self.hyperparams.get('kl_target', 3.0)
+            self.kl_coeff = self.hyperparams.get('kl_coeff_initial', 1.0)
+            self.pid_kp = self.hyperparams.get('kl_coeff_pid_kp', 0.01)
+            self.pid_ki = self.hyperparams.get('kl_coeff_pid_ki', 0.0001)
+            self.pid_kd = self.hyperparams.get('kl_coeff_pid_kd', 0.001)
+            self.kl_error_integral = 0
+            self.kl_last_error = 0
 
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
@@ -393,7 +414,9 @@ class ChimeraAgent:
         if not self.use_stag_in_ac_loss:
             stag_context_vector = torch.zeros_like(stag_context_vector)
 
-        combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
+        # Normalize hidden state before passing to policy
+        h_normalized = self.h_norm(self.hidden_state)
+        combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
 
         # 3. Select action
         epsilon = self._get_epsilon()
@@ -555,124 +578,136 @@ class ChimeraAgent:
 
         contrastive_loss_fn = ContrastiveLoss()
 
-        # For PER, we sample a single batch and use it for all models
-        batch, indices, weights = self.replay_buffer.sample(batch_size)
-        weights = torch.from_numpy(weights).float().to(self.device)
+        # For PER, we sample a single batch that will be used for calculating priorities
+        shared_batch, shared_indices, shared_weights_np = self.replay_buffer.sample(batch_size)
+        shared_weights = torch.from_numpy(shared_weights_np).float().to(self.device)
 
         total_wm_loss = 0
+        # Priorities are calculated based on the average loss on the shared_batch across the ensemble
         sequence_priorities = torch.zeros(batch_size, device=self.device)
 
         for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
-            # --- Prepare tensors ---
-            obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
-            action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
-            reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
-            goal_sequence = torch.from_numpy(batch['goal']).float().to(self.device)
 
-            # Process observations
-            if obs_sequence.dim() == 5:
-                batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
-                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
+            # --- Ensemble Diversity Logic ---
+            if i > 0 and random.random() < self.hyperparams.get('ensemble_diversity_prob', 0.5):
+                train_batch, _, _ = self.replay_buffer.sample(batch_size)
+                train_weights = torch.ones(batch_size, device=self.device) / batch_size
             else:
-                batch_size, seq_len, obs_dim = obs_sequence.shape
-                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_dim))
-            obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+                train_batch, train_weights = shared_batch, shared_weights
 
-            # --- Sequence-based Forward Pass and Loss Calculation ---
-            h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-            z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
-
-            total_recon_loss, total_reward_loss, total_kl_loss = 0, 0, 0
-            hidden_states = []
-
-            for t in range(self.replay_buffer.sequence_length):
-                obs_t = obs_sequence_processed[:, t]
-                action_t = action_sequence[:, t]
-                reward_t = reward_sequence[:, t]
-
-                h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
-                hidden_states.append(h_t)
-
-                obs_recon = world_model.obs_decoder(z_t, h_t)
-                reward_pred = world_model.reward_model(torch.cat([z_t, h_t, goal_sequence[:, t]], dim=-1))
-
-                recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
-                reward_loss = torch.mean((reward_pred - reward_t.unsqueeze(-1))**2, dim=-1)
-
-                free_bits = self.hyperparams.get('free_bits', 1.0)
-                kl_loss = torch.clamp(kl_loss, min=free_bits)
-
-                total_recon_loss += recon_loss
-                total_reward_loss += reward_loss
-                total_kl_loss += kl_loss
-
-            hidden_states = torch.stack(hidden_states, dim=1) # (batch, seq_len, hidden_dim)
-
-            # --- Contrastive Loss Calculation ---
-            # Positive pairs are adjacent states in the sequence
-            anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
-            positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
-
-            # Negative pairs are all other states in the batch
-            # This is a simplification. A better approach would be to use a memory bank of negatives.
-            # For now, we'll just use other states in the same batch.
-            negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
-            contrastive_loss = contrastive_loss_fn(anchor, positive, negatives)
-
-            # --- Total Loss ---
-            world_model_loss = (
-                (total_recon_loss + total_reward_loss + total_kl_loss) / self.replay_buffer.sequence_length
+            # --- Main Training Pass on `train_batch` ---
+            # This is where the model parameters are updated
+            # (The detailed implementation of the forward pass and loss calculation is encapsulated in a helper)
+            world_model_loss, contrastive_loss, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
+                world_model, train_batch, cortex_id, train_weights
             )
 
-            # The priority is based on the reconstruction error
-            sequence_priorities += world_model_loss.detach()
-
-            # Weight the loss by the importance sampling weights
-            total_loss = (weights * world_model_loss).mean() + self.contrastive_loss_weight * contrastive_loss
-            total_wm_loss += total_loss.item()
-
-            # --- Backpropagation ---
             wm_optimizer.zero_grad()
-            total_loss.backward()
+            world_model_loss.backward()
             torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
             wm_optimizer.step()
+            total_wm_loss += world_model_loss.item()
+
+            # --- Priority Calculation Pass on `shared_batch` ---
+            # This pass is only for calculating the loss to be used as priority, so no gradients needed.
+            with torch.no_grad():
+                priority_loss, _, _, _ = self._calculate_world_model_loss(
+                    world_model, shared_batch, cortex_id, shared_weights
+                )
+                # The priority for an experience is the loss from the model that trained on it
+                sequence_priorities += priority_loss.detach()
+
+        # --- Update the contrastive queue ---
+        if self.contrastive_queue_size > 0:
+            keys_to_enqueue = last_hidden_states.view(-1, self.hidden_dim).detach()
+            self._dequeue_and_enqueue(keys_to_enqueue)
 
         # Average the priorities over the ensemble
         final_priorities = (sequence_priorities / self.num_ensemble_models).cpu().numpy()
 
-        # Learn reward weights
+        # Learn reward weights using the last batch from the loop
         with torch.no_grad():
-            # Use the last hidden state of the sequence to represent the state
-            last_h = hidden_states[:, -1]
+            last_h = last_hidden_states[:, -1]
             state_features = torch.matmul(last_h, self.sf_projection_matrix)
-
-            # Predict reward using current weights
             predicted_r = torch.einsum('bd,d->b', [state_features, self.reward_weights])
-
-            # Get the actual reward for the last step of the sequence
-            actual_r = reward_sequence[:, -1]
-
-            # LMS update rule
+            actual_r = torch.from_numpy(last_reward_seq).float().to(self.device)[:, -1]
             error = actual_r - predicted_r
             self.reward_weights += self.sf_learning_rate * torch.mean(error.unsqueeze(-1) * state_features, dim=0)
 
         # --- Collect and return detailed statistics ---
+        # Note: These stats are from the last model's training batch, which is a simplification.
         avg_wm_loss = total_wm_loss / self.num_ensemble_models
-        # Note: The individual losses are from the last model in the ensemble loop. This is a simplification.
-        # For more accurate per-component loss, we would need to average them across the ensemble as well.
-        avg_recon_loss = (total_recon_loss / self.replay_buffer.sequence_length).mean().item()
-        avg_reward_loss = (total_reward_loss / self.replay_buffer.sequence_length).mean().item()
-        avg_kl_loss = (total_kl_loss / self.replay_buffer.sequence_length).mean().item()
+        stats = { "wm_loss_total": avg_wm_loss }
+        return stats, shared_indices, final_priorities
 
-        stats = {
-            "wm_loss_total": avg_wm_loss,
-            "wm_loss_recon": avg_recon_loss,
-            "wm_loss_reward": avg_reward_loss,
-            "wm_loss_kl": avg_kl_loss,
-            "wm_loss_contrastive": contrastive_loss.item()
-        }
+    def _calculate_world_model_loss(self, world_model, batch, cortex_id, weights):
+        """Helper function to calculate the world model loss for a given batch."""
+        # --- Prepare tensors ---
+        obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
+        action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
+        reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
+        goal_sequence = torch.from_numpy(batch['goal']).float().to(self.device)
 
-        return stats, indices, final_priorities
+        # Process observations
+        batch_size = obs_sequence.size(0)
+        if obs_sequence.dim() == 5:
+            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, *obs_sequence.shape[2:]))
+        else:
+            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
+        obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
+
+        # --- Sequence-based Forward Pass and Loss Calculation ---
+        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
+
+        total_recon_loss, total_reward_loss, total_kl_loss = 0, 0, 0
+        hidden_states = []
+
+        for t in range(self.replay_buffer.sequence_length):
+            obs_t = obs_sequence_processed[:, t]
+            action_t = action_sequence[:, t]
+            h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
+            hidden_states.append(h_t)
+
+            obs_recon = world_model.obs_decoder(z_t, h_t)
+            reward_pred = world_model.reward_model(torch.cat([z_t, h_t, goal_sequence[:, t]], dim=-1))
+
+            recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
+            reward_loss = torch.mean((reward_pred - reward_sequence[:, t].unsqueeze(-1))**2, dim=-1)
+
+            if self.use_kl_balancing:
+                kl_loss_detached = kl_loss.detach()
+                error = kl_loss_detached - self.kl_target
+                self.kl_error_integral += error
+                derivative = error - self.kl_last_error
+                self.kl_last_error = error
+                pid_adjustment = self.pid_kp * error + self.pid_ki * self.kl_error_integral + self.pid_kd * derivative
+                self.kl_coeff = max(0.1, self.kl_coeff + pid_adjustment)
+            else:
+                kl_loss = torch.clamp(kl_loss, min=self.hyperparams.get('free_bits', 1.0))
+
+            total_recon_loss += recon_loss
+            total_reward_loss += reward_loss
+            total_kl_loss += kl_loss
+
+        hidden_states = torch.stack(hidden_states, dim=1)
+        world_model_kl_loss = self.kl_coeff * total_kl_loss if self.use_kl_balancing else total_kl_loss
+
+        # --- Contrastive Loss Calculation ---
+        anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
+        positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
+        if self.contrastive_queue_size > 0:
+            negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
+        else:
+            negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
+        contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
+
+        # --- Total Loss ---
+        world_model_loss_per_item = (total_recon_loss + total_reward_loss + world_model_kl_loss) / self.replay_buffer.sequence_length
+        total_loss = (weights * world_model_loss_per_item).mean() + self.contrastive_loss_weight * contrastive_loss
+
+        return total_loss, contrastive_loss, hidden_states, batch['reward']
+
 
     def train_policy_in_imagination(self):
         """
@@ -763,11 +798,16 @@ class ChimeraAgent:
         # --- Predict Rewards and Values for Imagined Trajectory ---
         # For simplicity, we assume the goal is constant for the whole trajectory
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
-        imagined_rewards = self.world_models[0].reward_model(torch.cat([imagined_z, imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)], dim=-1)).squeeze(-1)
+
+        # Normalize states before use
+        norm_imagined_h = self.h_norm(imagined_h)
+        norm_imagined_z = self.z_norm(imagined_z)
+
+        imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)], dim=-1)).squeeze(-1)
 
         # Expand goal for value prediction
         goal_sequence_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
-        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z, goal_sequence_expanded], dim=-1)).squeeze(-1)
+        imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_sequence_expanded], dim=-1)).squeeze(-1)
 
         # --- Calculate Value Targets (Lambda-Return) ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
@@ -784,7 +824,7 @@ class ChimeraAgent:
         advantage = (lambda_returns - imagined_values[:-1]).detach()
         # Normalize advantages to stabilize training
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-        action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
+        action_input = torch.cat([norm_imagined_h[:-1], imagined_stag_contexts], dim=-1)
         log_probs = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).log_prob(imagined_actions)
         policy_loss = -(log_probs * advantage).mean()
 
@@ -817,6 +857,26 @@ class ChimeraAgent:
             "horizon": horizon,
             "entropy_coef": entropy_coef
         }
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, keys):
+        """Update the MoCo queue with a batch of keys."""
+        batch_size = keys.shape[0]
+        ptr = int(self.contrastive_queue_ptr)
+
+        # Ensure the keys fit in the queue
+        if ptr + batch_size > self.contrastive_queue_size:
+            # If they don't, wrap around
+            remaining = self.contrastive_queue_size - ptr
+            self.contrastive_queue[ptr:] = keys[:remaining]
+            self.contrastive_queue[:batch_size - remaining] = keys[remaining:]
+            ptr = batch_size - remaining
+        else:
+            self.contrastive_queue[ptr:ptr + batch_size] = keys
+            ptr = (ptr + batch_size) % self.contrastive_queue_size
+
+        self.contrastive_queue_ptr[0] = ptr
+
 
     def get_graph_structure(self, skill_id=None):
         """

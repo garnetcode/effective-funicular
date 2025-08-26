@@ -289,9 +289,21 @@ class Command(BaseCommand):
                         else:
                             logger.warning(f"Unexpected message type received: {msg_type}")
 
-                    # --- Post-Episode: Train the agent ---
+                    # --- Post-Episode: Train the agent based on the current phase ---
                     logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training...")
-                    train_stats = agent.train(cortex_id=cortex_id)
+
+                    phase = training_config.get('phase', 1) # Default to phase 1 if not specified
+                    train_stats = {}
+
+                    if phase == 1:
+                        # Phase 1: World Model Pretraining
+                        logger.debug("Phase 1: Training world model only.")
+                        stats, _, _ = agent.train_world_model(cortex_id=cortex_id)
+                        train_stats.update(stats)
+                    else:
+                        # Default/other phases: Full training
+                        logger.debug(f"Phase {phase}: Running full agent training.")
+                        train_stats = agent.train(cortex_id=cortex_id)
 
                     # --- Post-Episode Statistics and Logging ---
                     total_rewards.append(episode_reward)
