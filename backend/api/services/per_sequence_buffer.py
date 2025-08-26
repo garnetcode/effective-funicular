@@ -14,7 +14,15 @@ class SegmentTree:
 
     def _propagate(self, idx):
         parent = (idx - 1) // 2
-        self.tree[parent] = self.tree[2 * parent + 1] + self.tree[2 * parent + 2]
+        left_child = 2 * parent + 1
+        right_child = left_child + 1
+
+        if right_child < len(self.tree):
+            self.tree[parent] = self.tree[left_child] + self.tree[right_child]
+        else:
+            # Handle cases where there is no right child
+            self.tree[parent] = self.tree[left_child]
+
         if parent > 0:
             self._propagate(parent)
 
