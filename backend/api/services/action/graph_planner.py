@@ -116,14 +116,8 @@ class GraphPlanner:
         return ((weight1 - weight2)**2).sum()**0.5
 
     def _get_neighbors(self, node_id, stag_graph):
-        """Returns the neighbors of a node in the STAG graph."""
-        neighbors = set()
-        for edge in stag_graph['edges']:
-            if edge['source'] == node_id:
-                neighbors.add(edge['target'])
-            elif edge['target'] == node_id:
-                neighbors.add(edge['source'])
-        return neighbors
+        """Returns the neighbors of a node using the pre-computed adjacency list."""
+        return stag_graph['adj'].get(node_id, [])
 
     def _reconstruct_path(self, came_from, current_node_id):
         """Reconstructs the path from the came_from dictionary."""
