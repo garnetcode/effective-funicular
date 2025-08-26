@@ -191,6 +191,7 @@ class Command(BaseCommand):
             last_checkpoint_step = 0
             last_refresh_step = 0
 
+        hyperparams = agent_config.get('hyperparams', {})
         dr_config = hyperparams.get('domain_randomization', {})
         obs_noise_level = dr_config.get('obs_noise_level', 0.0)
         action_delay_prob = dr_config.get('action_delay_prob', 0.0)
@@ -198,7 +199,6 @@ class Command(BaseCommand):
         checkpoint_interval = training_config.get('checkpoint_every_n_steps', 50000)
         save_on_best = training_config.get('save_on_best_return', True)
 
-        hyperparams = agent_config.get('hyperparams', {})
         refresh_interval = hyperparams.get('on_policy_refresh_interval', 20000)
         refresh_duration = hyperparams.get('on_policy_refresh_duration', 2000)
         on_policy_epsilon = hyperparams.get('on_policy_epsilon', 0.1)
