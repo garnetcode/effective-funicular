@@ -480,22 +480,22 @@ class ChimeraAgent:
             self.h_step_counter = 0
             stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
             if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
-                    # --- Goal Curriculum Logic ---
-                    curriculum_params = self.h_control_params.get('goal_curriculum', {})
-                    if curriculum_params.get('enabled', False):
-                        # Calculate current max distance
-                        schedule_steps = curriculum_params.get('schedule_steps', 1)
-                        progress = min(1.0, self.train_steps / schedule_steps)
-                        start_dist = curriculum_params.get('initial_max_graph_dist', 2)
-                        end_dist = curriculum_params.get('max_graph_dist_end', 10)
-                        max_dist = int(start_dist + progress * (end_dist - start_dist))
+                # --- Goal Curriculum Logic ---
+                curriculum_params = self.h_control_params.get('goal_curriculum', {})
+                if curriculum_params.get('enabled', False):
+                    # Calculate current max distance
+                    schedule_steps = curriculum_params.get('schedule_steps', 1)
+                    progress = min(1.0, self.train_steps / schedule_steps)
+                    start_dist = curriculum_params.get('initial_max_graph_dist', 2)
+                    end_dist = curriculum_params.get('max_graph_dist_end', 10)
+                    max_dist = int(start_dist + progress * (end_dist - start_dist))
 
-                        # Find reachable goals within the curriculum distance
-                        distances = self.graph_planner.bfs_distances(self.last_stag_node_id, stag_graph)
-                        possible_goals = [nid for nid, dist in distances.items() if 1 <= dist <= max_dist]
-                    else:
-                        # Fallback to original logic if curriculum is disabled
-                        possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
+                    # Find reachable goals within the curriculum distance
+                    distances = self.graph_planner.bfs_distances(self.last_stag_node_id, stag_graph)
+                    possible_goals = [nid for nid, dist in distances.items() if 1 <= dist <= max_dist]
+                else:
+                    # Fallback to original logic if curriculum is disabled
+                    possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
 
                 if possible_goals:
                     goal_node_id = random.choice(possible_goals)
