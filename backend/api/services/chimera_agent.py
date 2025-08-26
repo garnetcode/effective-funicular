@@ -722,12 +722,10 @@ class ChimeraAgent:
             if not self.use_stag_in_ac_loss or self.steps_done <= self.world_model_pretrain_steps:
                 stag_context_batch = torch.zeros_like(stag_context_batch)
 
-            # Squeeze the context batch if it has an extra dimension
-            if stag_context_batch.dim() > 2:
-                stag_context_batch = stag_context_batch.squeeze(1)
-
             # 2. Actor selects action based on h_t and the dynamically generated C_t
-            action_input = torch.cat([h_t, stag_context_batch], dim=-1)
+            # Speculative fix: Squeeze h_t if it has an extra dimension, as it's the likely culprit for the 3D vs 2D tensor error.
+            h_t_squeezed = h_t.squeeze(0) if h_t.dim() == 3 else h_t
+            action_input = torch.cat([h_t_squeezed, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
             action = action_dist.sample()
 
