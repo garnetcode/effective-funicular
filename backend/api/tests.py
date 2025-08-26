@@ -8,8 +8,6 @@ import shutil
 from .services.gng_engine import GNG_Engine
 from .services.chimera_agent import ChimeraAgent
 from .services.state_history_manager import StateHistoryManager
-from .services.cortex.language_cortex import LanguageCortex
-from .services.action.generation_head import TextGenerationHead
 
 class GNG_EngineTests(TestCase):
     def setUp(self):
@@ -346,81 +344,3 @@ class StateHistoryManagerTests(TestCase):
         self.assertEqual(history[3]['type'], 'base')
         self.assertEqual(history[4]['type'], 'diff')
         self.assertEqual(history[4]['info']['loss'], 6.0)
-
-
-# Patch the components where they are looked up
-@patch('api.services.chimera_agent.TextGenerationHead')
-@patch('api.services.chimera_agent.cortex_modules.LanguageCortex')
-class LanguageComponentsIntegrationTests(TestCase):
-
-    def test_language_integration_and_toggle(self, mock_language_cortex_class, mock_text_generation_head_class):
-        """
-        Tests that ChimeraAgent correctly initializes, uses, and toggles the language components.
-        This test mocks the components themselves to focus on the integration logic.
-        """
-        # --- Configure Mocks ---
-        # When the mocked class is instantiated, its return_value is a mock instance.
-        # We can configure the methods of that mock instance.
-        mock_cortex_instance = mock_language_cortex_class.return_value
-        mock_cortex_instance.process.return_value = np.random.rand(64)
-
-        mock_generation_head_instance = mock_text_generation_head_class.return_value
-        mock_generation_head_instance.generate.return_value = "A mocked response."
-
-        # --- 1. Test with Hub ID (local path not provided) ---
-        hub_hyperparams = {
-            "language_model": {
-                "enabled": True,
-                "embedding_model_id": "google/gemma-hub-id",
-                "generation_model_id": "google/gemma-hub-id"
-            }
-        }
-        agent_hub = ChimeraAgent(
-            "test-hub-agent", embedding_dim=64, max_action_dim=4,
-            hyperparams=hub_hyperparams, load_from_storage=False
-        )
-        agent_hub.set_active_skill("language_cortex")
-
-        # Assert that constructors were called with the hub ID
-        self.assertIn('language_cortex', agent_hub.cortexes)
-        mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-hub-id", output_dim=64, api_base=None, embedding_dim=None)
-        # The agent's default hidden_dim is now 512
-        mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-hub-id", input_dim=512, api_base=None)
-
-        # --- 2. Test with a valid Local Path ---
-        # Reset mocks to check calls for the next agent instance
-        mock_language_cortex_class.reset_mock()
-        mock_text_generation_head_class.reset_mock()
-
-        local_path = "backend/test_storage/mock_model_dir"
-        os.makedirs(local_path, exist_ok=True) # Create a dummy directory
-
-        local_hyperparams = {
-            "language_model": {
-                "enabled": True,
-                "embedding_model_id": "google/gemma-local-id", # Should be used
-                "generation_model_id": "google/gemma-local-id", # Should be used
-                "local_model_path": local_path # This is currently ignored by the agent logic
-            }
-        }
-        agent_local = ChimeraAgent(
-            "test-local-agent", embedding_dim=64, max_action_dim=4,
-            hyperparams=local_hyperparams, load_from_storage=False
-        )
-        agent_local.set_active_skill("language_cortex")
-
-        # Assert that constructors were called with the hub id, as local_model_path is not used to override
-        mock_language_cortex_class.assert_called_with(model_path_or_id="google/gemma-local-id", output_dim=64, api_base=None, embedding_dim=None)
-        mock_text_generation_head_class.assert_called_with(model_path_or_id="google/gemma-local-id", input_dim=512, api_base=None)
-
-        shutil.rmtree(local_path) # Clean up dummy directory
-
-        # --- 3. Test with Language Model DISABLED ---
-        disabled_hyperparams = { "language_model": { "enabled": False } }
-        disabled_agent = ChimeraAgent(
-            "test-disabled-agent", embedding_dim=64, max_action_dim=4,
-            hyperparams=disabled_hyperparams, load_from_storage=False
-        )
-        disabled_agent.set_active_skill("default")
-        self.assertFalse(disabled_agent.language_model_enabled)
-        self.assertIsNone(disabled_agent.text_generation_head)

@@ -15,15 +15,6 @@ agent_history:
 # Main training settings
 episodes_per_env: 20 # How many episodes each parallel agent should run
 
-# Language Model (LLM) Integration
-language_model:
-  enabled: true # Toggle the language capabilities on/off
-  generation_model_id: "gemma3:1b" # Model for generating text responses
-  embedding_model_id: "nomic-embed-text" # Model for creating embeddings
-  embedding_dim: 768 # The dimension of the embeddings produced by the model
-  api_base: "http://localhost:11434/v1" # Ollama API endpoint
-  local_model_path: "" # Set to empty to avoid conflict with API usage
-
 # Agent architecture and hyperparameters
 agent_config:
   embedding_dim: 512 # The fixed-size vector dimension produced by any cortex.
