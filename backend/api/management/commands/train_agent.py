@@ -387,7 +387,7 @@ class Command(BaseCommand):
                     pbar.set_postfix(postfix_metrics)
 
                     # Environment reset is handled by the game server on 'done'
-                    if not connector.websocket or connector.websocket.closed:
+                    if not connector.websocket:
                         logger.error("Lost connection to server. Stopping training.")
                         break
 
