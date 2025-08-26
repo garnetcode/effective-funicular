@@ -249,6 +249,12 @@ class ChimeraAgent:
             'error_slow': {'mean': 0.0, 'std': 1.0, 'count': 0}
         }
 
+        # Policy Distillation
+        self.distill_params = self.hyperparams.get('policy_distillation', {})
+        self.lambda_bc_start = self.distill_params.get('lambda_bc_start', 1.0)
+        self.lambda_bc_end = self.distill_params.get('lambda_bc_end', 0.1)
+        self.lambda_bc_schedule_steps = self.distill_params.get('lambda_bc_schedule_steps', 300000)
+
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
@@ -748,148 +754,121 @@ class ChimeraAgent:
     def train_policy_in_imagination(self):
         """
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
-        This is the second part of the "Sleep" phase.
+        This version implements policy distillation from a planner.
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
 
         # --- Calculate scheduled parameters ---
-        # Imagination Horizon
         progress = min(1.0, self.train_steps / self.imagination_horizon_schedule_steps)
         horizon = int(self.imagination_horizon_start + progress * (self.imagination_horizon_end - self.imagination_horizon_start))
 
-        # Entropy Coefficient
         progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
 
+        progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
+        lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
 
         # --- Sample starting states from real data ---
         batch, _, _ = self.replay_buffer.sample(batch_size)
-        # Squeeze the middle dimension, which is an artifact of how states are stored in the replay buffer.
         h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
         z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
 
-        # --- Imagine Trajectories ---
+        # --- Generate "teacher" plan from the latent planner ---
+        with torch.no_grad():
+            teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
+
+        # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
         imagined_h = [h_t]
         imagined_z = [z_t]
-        imagined_actions = []
-        imagined_stag_contexts = []
 
-        # --- Imagine Trajectories with Dynamic STAG Context ---
-        for _ in range(horizon):
-            # 1. Generate STAG context dynamically for the current imagined state h_t
-            # This part needs to have gradient tracking for the StagContextProcessor
-            stag_contexts = []
-            for i in range(h_t.size(0)): # Process each state in the batch
-                h_numpy = h_t[i].detach().numpy().flatten()
-                norm = np.linalg.norm(h_numpy)
-                h_normalized = h_numpy / norm if norm > 0 else h_numpy
+        policy_actions = []
+        policy_log_probs = []
+        policy_entropies = []
 
-                _, _, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
+        for t in range(horizon):
+            norm_h = self.h_norm(h_t)
+            # Note: STAG context is not used in this simplified distillation loop for now.
+            stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
 
-                path_weights = []
-                if activation_path:
-                    active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                    for step in activation_path:
-                        level_gng = active_stag.level_map[step['level_id']]
-                        node_weight = level_gng.nodes[step['winner_id']]['weight']
-                        path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
-
-                while len(path_weights) < self.max_stag_path_length:
-                    path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
-
-                stag_contexts.append(self.stag_context_processor(path_weights))
-
-            stag_context_batch = torch.cat(stag_contexts, dim=0)
-
-            # If STAG is disabled for training OR we are in the pre-training phase,
-            # use a zero vector for the context.
-            if not self.use_stag_in_ac_loss or self.steps_done <= self.world_model_pretrain_steps:
-                stag_context_batch = torch.zeros_like(stag_context_batch)
-
-            # 2. Actor selects action based on h_t and the dynamically generated C_t
-            action_input = torch.cat([h_t, stag_context_batch], dim=-1)
+            action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
-            action = action_dist.sample()
 
-            # 3. World model predicts next state (do this without tracking gradients)
+            action = action_dist.sample()
+            policy_actions.append(action)
+            policy_log_probs.append(action_dist.log_prob(action))
+            policy_entropies.append(action_dist.entropy())
+
             with torch.no_grad():
                 h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
 
             imagined_h.append(h_t)
             imagined_z.append(z_t)
-            imagined_actions.append(action)
-            imagined_stag_contexts.append(stag_context_batch)
 
-        imagined_h = torch.stack(imagined_h) # Shape: [horizon+1, batch, hidden_dim]
-        imagined_z = torch.stack(imagined_z) # Shape: [horizon+1, batch, latent_dim]
-        imagined_actions = torch.stack(imagined_actions) # Shape: [horizon, batch]
-        imagined_stag_contexts = torch.stack(imagined_stag_contexts) # Shape: [horizon, batch, context_dim]
+        imagined_h = torch.stack(imagined_h)
+        imagined_z = torch.stack(imagined_z)
+        policy_actions = torch.stack(policy_actions)
+        policy_log_probs = torch.stack(policy_log_probs)
+        policy_entropies = torch.stack(policy_entropies)
 
-
-        # --- Predict Rewards and Values for Imagined Trajectory ---
-        # For simplicity, we assume the goal is constant for the whole trajectory
-        goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
-
-        # Normalize states before use
+        # --- Predict Rewards and Values for the policy's imagined trajectory ---
         norm_imagined_h = self.h_norm(imagined_h)
         norm_imagined_z = self.z_norm(imagined_z)
+        goal_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
 
-        imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)], dim=-1)).squeeze(-1)
+        imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_expanded], dim=-1)).squeeze(-1)
+        imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded], dim=-1)).squeeze(-1)
 
-        # Expand goal for value prediction
-        goal_sequence_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
-        imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_sequence_expanded], dim=-1)).squeeze(-1)
-
-        # --- Calculate Value Targets (Lambda-Return) ---
+        # --- Calculate Value Targets (Lambda-Return) for the RL loss ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
         returns = torch.zeros_like(imagined_values[-1])
         lambda_returns = []
         for t in reversed(range(horizon)):
-            # V_target = r_t + gamma * ( (1-lambda) * V(s_{t+1}) + lambda * V_target_{t+1} )
             returns = imagined_rewards[t] + self.gamma * ((1 - lambda_) * imagined_values[t+1].detach() + lambda_ * returns)
             lambda_returns.append(returns)
         lambda_returns = torch.stack(list(reversed(lambda_returns)))
 
-        # --- Actor-Critic Loss Calculation (ℒ_AC) ---
-        # Actor Loss
+        # --- Calculate Losses ---
+        # 1. RL Policy Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
-        # Normalize advantages to stabilize training
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-        action_input = torch.cat([norm_imagined_h[:-1], imagined_stag_contexts], dim=-1)
-        log_probs = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).log_prob(imagined_actions)
-        policy_loss = -(log_probs * advantage).mean()
+        policy_loss = -(policy_log_probs * advantage).mean()
 
-        # Critic Loss
-        critic_loss = torch.nn.functional.mse_loss(imagined_values[:-1], lambda_returns.detach())
+        # 2. RL Critic Loss
+        critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
-        # Entropy Bonus
-        entropy = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).entropy().mean()
+        # 3. Behavioral Cloning (BC) Loss
+        # The teacher plan has shape (horizon, batch, action_dim)
+        # We need the policy's logits for the states it visited
+        policy_logits = self.action_head(torch.cat([norm_imagined_h[:-1], torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)], dim=-1), goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).logits
+        bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
-        # --- Total AC Loss and Backpropagation ---
-        w_policy = self.hyperparams.get('w_policy', 1.0)
-        w_critic = self.hyperparams.get('w_critic', 0.5)
+        # 4. Entropy Bonus
+        entropy_loss = -entropy_coef * policy_entropies.mean()
 
-        ac_loss = w_policy * policy_loss + w_critic * critic_loss - entropy_coef * entropy
+        # --- Total Loss and Backpropagation ---
+        total_loss = policy_loss + critic_loss + lambda_bc * bc_loss + entropy_loss
 
         ac_optimizer = torch.optim.Adam(
             list(self.action_head.parameters()) + list(self.value_head.parameters()),
             lr=self.hyperparams.get('actor_critic_lr', 0.0003)
         )
         ac_optimizer.zero_grad()
-        ac_loss.backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.action_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
         ac_optimizer.step()
 
         return {
-            "ac_loss": ac_loss.item(),
+            "ac_loss": total_loss.item(),
             "policy_loss": policy_loss.item(),
             "critic_loss": critic_loss.item(),
-            "entropy": entropy.item(),
+            "bc_loss": bc_loss.item(),
+            "entropy": -entropy_loss.item() / entropy_coef if entropy_coef > 0 else 0,
+            "lambda_bc": lambda_bc,
             "horizon": horizon,
             "entropy_coef": entropy_coef
         }

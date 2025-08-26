@@ -178,9 +178,16 @@ class Command(BaseCommand):
         total_steps = 0
         best_avg_reward = -float('inf')
         last_checkpoint_step = 0
+        last_refresh_step = 0
         training_config = config.get('training', {})
         checkpoint_interval = training_config.get('checkpoint_every_n_steps', 50000)
         save_on_best = training_config.get('save_on_best_return', True)
+
+        hyperparams = agent_config.get('hyperparams', {})
+        refresh_interval = hyperparams.get('on_policy_refresh_interval', 20000)
+        refresh_duration = hyperparams.get('on_policy_refresh_duration', 2000)
+        on_policy_epsilon = hyperparams.get('on_policy_epsilon', 0.1)
+
         current_obs = np.array(session_data.get("observation"))
         burnin_steps = agent_config.get('hyperparams', {}).get('burnin_steps', 1000)
         logger.info(f"Starting burn-in phase for {burnin_steps} steps...")
@@ -300,10 +307,43 @@ class Command(BaseCommand):
                         else:
                             logger.warning(f"Unexpected message type received: {msg_type}")
 
+                    # --- On-Policy Refresh with Planner ---
+                    phase = training_config.get('phase', 1)
+                    if phase >= 3 and total_steps > last_refresh_step + refresh_interval:
+                        logger.info(f"Step {total_steps}: Starting on-policy data refresh with planner...")
+                        last_refresh_step = total_steps
+                        for _ in tqdm(range(refresh_duration), desc="On-Policy Refresh"):
+                            # Use planner for action selection
+                            agent.use_planner = True
+                            _, _, _, activation_path, _ = agent.perceive_and_update_state(cortex_id, current_obs)
+                            action, _, _, _, _, _ = agent.select_action(actual_action_dim, activation_path)
+                            agent.use_planner = False # Reset to default behavior
+
+                            # Step environment and record experience (similar to main loop)
+                            await connector.send_action(action)
+                            msg = await connector.receive_message()
+                            if not msg or msg.get("type") != "action.taken":
+                                if msg and msg.get("type") == "game.over":
+                                    reset_response = await connector.reset_environment()
+                                    if reset_response: current_obs = np.array(reset_response.get("observation"))
+                                continue
+
+                            next_obs = np.array(msg.get("observation"))
+                            external_reward = msg.get("reward")
+                            done = msg.get("done")
+                            # Use dummy log_prob as it's not from the policy
+                            agent.record_experience(agent.hidden_state, agent.latent_state, activation_path, current_obs, action, torch.tensor(0.0), external_reward, next_obs, done)
+                            current_obs = next_obs
+                            total_steps += 1
+                            if done:
+                                reset_response = await connector.reset_environment()
+                                if reset_response: current_obs = np.array(reset_response.get("observation"))
+                        logger.info("On-policy data refresh complete.")
+
+
                     # --- Post-Episode: Train the agent based on the current phase ---
                     logger.debug(f"Episode {episode + 1} finished. Reward: {episode_reward:.2f}. Training...")
 
-                    phase = training_config.get('phase', 1) # Default to phase 1 if not specified
                     train_stats = {}
 
                     if phase == 1:
