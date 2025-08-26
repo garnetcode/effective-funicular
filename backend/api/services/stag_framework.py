@@ -178,9 +178,16 @@ class STAG_Framework:
 
         traverse(self.tree)
 
+        # Create adjacency list for efficient lookups
+        adj_list = {node_id: [] for node_id in final_nodes}
+        for edge in final_edges:
+            adj_list[edge['source']].append(edge['target'])
+            adj_list[edge['target']].append(edge['source'])
+
         return {
             'nodes': final_nodes,
             'edges': final_edges,
+            'adj': adj_list,
             'dimensions': self.dimensions
         }
 
