@@ -44,11 +44,11 @@ agent_config:
     epsilon_end: 0.05
     epsilon_decay_steps: 200000
     burnin_steps: 1000
-    sequence_length: 50
+    sequence_length: 20
     policy_train_frequency: 10
     # Training Schedules
     imagination_horizon_start: 5
-    imagination_horizon_end: 15
+    imagination_horizon_end: 10
     imagination_horizon_schedule_steps: 10000
     entropy_coef_start: 0.01
     entropy_coef_end: 0.001
@@ -85,7 +85,7 @@ agent_config:
     per_beta_start: 0.4
     per_beta_frames: 100000
     # World Model Ensemble
-    num_ensemble_models: 5
+    num_ensemble_models: 3
     uncertainty_penalty_weight: 0.1
     # Goal-Conditioning
     goal_dim: 512 # Should match the hidden_dim for now
