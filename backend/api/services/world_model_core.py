@@ -17,7 +17,15 @@ class WorldModel(nn.Module):
 
         self.rssm = RSSM(obs_dim, action_dim, latent_dim, hidden_dim)
         self.obs_decoder = ObservationModel(obs_dim, latent_dim, hidden_dim)
-        self.reward_model = RewardModel(latent_dim, hidden_dim, goal_dim)
+        # AGENT_FIX: Replace the faulty RewardModel with a standard, trainable MLP.
+        # The original RewardModel had an implementation that was incompatible with
+        # the model's inputs and the HER-compatible goal dimension, causing a crash.
+        # This new model is a standard reward predictor.
+        self.reward_model = nn.Sequential(
+            nn.Linear(latent_dim + hidden_dim + goal_dim, 400),
+            nn.ReLU(),
+            nn.Linear(400, 1)
+        )
 
     def get_initial_state(self, batch_size=1):
         """Returns the initial hidden and latent states."""
@@ -43,6 +51,7 @@ class WorldModel(nn.Module):
 
         # 2. Reconstruct observation and predict reward from the new state
         obs_recon = self.obs_decoder(z_t, h_t)
-        reward_pred = self.reward_model(z_t, h_t, goal)
+        # AGENT_FIX: Concatenate inputs for the new sequential reward model.
+        reward_pred = self.reward_model(torch.cat([z_t, h_t, goal], dim=1))
 
         return obs_recon, reward_pred, kl_loss, h_t, z_t
