@@ -1,4 +1,5 @@
 import heapq
+import numpy as np
 
 class OptionModel:
     """
@@ -90,7 +91,10 @@ class GraphPlanner:
         """
         node1 = stag_graph['nodes'][node1_id]
         node2 = stag_graph['nodes'][node2_id]
-        return ((node1['weight'] - node2['weight'])**2).sum()**0.5
+        # The weights may be lists from serialization, so we convert them to numpy arrays
+        weight1 = np.array(node1['weight'])
+        weight2 = np.array(node2['weight'])
+        return ((weight1 - weight2)**2).sum()**0.5
 
     def _get_neighbors(self, node_id, stag_graph):
         """Returns the neighbors of a node in the STAG graph."""
