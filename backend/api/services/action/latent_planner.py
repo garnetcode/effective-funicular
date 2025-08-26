@@ -12,7 +12,7 @@ class LatentPlanner(nn.Module):
         self.iterations = iterations
         self.uncertainty_penalty_weight = uncertainty_penalty_weight
 
-    def plan(self, h_t, z_t, subgoal_weight=None):
+    def plan(self, h_t, z_t, subgoal_weight=None, current_goal=None):
         """
         Plans the best action sequence using the Cross-Entropy Method (CEM) with an ensemble of world models.
         """
@@ -50,10 +50,16 @@ class LatentPlanner(nn.Module):
                         z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
 
                         if subgoal_weight is not None:
-                            dist_to_subgoal = torch.norm(h_sim_flat - subgoal_weight, dim=-1)
+                            # If a latent-space subgoal is provided, use distance in h-space as reward
+                            dist_to_subgoal = torch.norm(h_sim_flat - subgoal_weight.unsqueeze(0), dim=-1)
                             reward_pred = -dist_to_subgoal
+                        elif current_goal is not None:
+                            # If an observation-space goal is provided, use the reward model
+                            goal_expanded = torch.from_numpy(current_goal).float().to(device).unsqueeze(0).expand(h_sim_flat.size(0), -1)
+                            reward_pred = world_model.reward_model(torch.cat([z_sim_flat, h_sim_flat, goal_expanded], dim=-1)).squeeze(-1)
                         else:
-                            reward_pred = world_model.reward_model(z_sim_flat, h_sim_flat).squeeze(-1)
+                            # Default to zero reward if no goal is provided
+                            reward_pred = torch.zeros(h_sim_flat.size(0), device=device)
 
                         h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
                         z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)
