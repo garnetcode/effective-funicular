@@ -182,13 +182,13 @@ class Command(BaseCommand):
         if agent.loaded_snapshot_data:
             snapshot_data = agent.loaded_snapshot_data
             total_steps = snapshot_data.get('total_steps', 0)
-            best_avg_reward = snapshot_data.get('best_avg_reward', -float('inf'))
+            episode_count = snapshot_data.get('episode_count', 0)
             last_checkpoint_step = snapshot_data.get('last_checkpoint_step', 0)
             last_refresh_step = snapshot_data.get('last_refresh_step', 0)
-            logger.info(f"Restored training loop state. Total steps: {total_steps}, Best Avg Reward: {best_avg_reward:.2f}")
+            logger.info(f"Restored training loop state. Total steps: {total_steps}, Episodes: {episode_count}")
         else:
             total_steps = 0
-            best_avg_reward = -float('inf')
+            episode_count = 0
             last_checkpoint_step = 0
             last_refresh_step = 0
 
@@ -198,7 +198,7 @@ class Command(BaseCommand):
         action_delay_prob = dr_config.get('action_delay_prob', 0.0)
         last_sent_action = 0
         checkpoint_interval = training_config.get('checkpoint_every_n_steps', 50000)
-        save_on_best = training_config.get('save_on_best_return', True)
+        save_every_n_episodes = training_config.get('save_every_n_episodes', 500)
 
         refresh_interval = hyperparams.get('on_policy_refresh_interval', 20000)
         refresh_duration = hyperparams.get('on_policy_refresh_duration', 2000)
@@ -339,8 +339,9 @@ class Command(BaseCommand):
                             logger.warning(f"Unexpected message type received: {msg_type}")
 
                     # --- Post-Episode Logic ---
+                    episode_count += 1
                     episode_steps = total_steps - episode_start_step
-                    logger.debug(f"Episode finished in {episode_steps} steps. Reward: {episode_reward:.2f}. Training...")
+                    logger.debug(f"Episode {episode_count} finished in {episode_steps} steps. Reward: {episode_reward:.2f}. Training...")
 
                     # --- Training, Checkpointing, and Logging ---
                     phase = training_config.get('phase', 1)
@@ -353,15 +354,18 @@ class Command(BaseCommand):
                     total_rewards.append(episode_reward)
                     avg_reward = np.mean(total_rewards[-100:]) if total_rewards else 0
 
-                    # Checkpointing, etc.
-                    training_loop_state = {'total_steps': total_steps, 'best_avg_reward': best_avg_reward, 'last_checkpoint_step': last_checkpoint_step, 'last_refresh_step': last_refresh_step}
-                    if save_on_best and avg_reward > best_avg_reward:
-                        best_avg_reward = avg_reward
-                        logger.info(f"New best average reward: {best_avg_reward:.2f}. Saving best model...")
+                    # --- Checkpointing Logic ---
+                    training_loop_state = {'total_steps': total_steps, 'episode_count': episode_count, 'last_checkpoint_step': last_checkpoint_step, 'last_refresh_step': last_refresh_step}
+
+                    # Periodic saving based on episode count
+                    if save_every_n_episodes > 0 and episode_count % save_every_n_episodes == 0:
+                        logger.info(f"Reached episode {episode_count}. Saving periodic model...")
                         agent.save_state(version_info={**train_stats, **training_loop_state})
-                    if total_steps >= last_checkpoint_step + checkpoint_interval:
+
+                    # Periodic saving based on step count
+                    if checkpoint_interval > 0 and total_steps >= last_checkpoint_step + checkpoint_interval:
                         last_checkpoint_step = total_steps
-                        logger.info(f"Reached {total_steps} steps. Saving periodic checkpoint...")
+                        logger.info(f"Reached {total_steps} steps. Saving step-based checkpoint...")
                         agent.save_state(version_info={**train_stats, **training_loop_state})
 
                     # Update progress bar
