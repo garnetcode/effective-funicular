@@ -6,6 +6,7 @@ import yaml
 import logging
 import asyncio
 import pprint
+import random
 from tqdm import tqdm
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
@@ -386,7 +387,7 @@ class Command(BaseCommand):
                     pbar.set_postfix(postfix_metrics)
 
                     # Environment reset is handled by the game server on 'done'
-                    if not await connector.is_connected():
+                    if not connector.websocket or connector.websocket.closed:
                         logger.error("Lost connection to server. Stopping training.")
                         break
 
