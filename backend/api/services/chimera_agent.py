@@ -663,7 +663,6 @@ class ChimeraAgent:
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
         This is the second part of the "Sleep" phase.
         """
-        logger.info("--- Starting policy training in imagination ---")
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
@@ -680,11 +679,10 @@ class ChimeraAgent:
 
         # --- Sample starting states from real data ---
         batch, _, _ = self.replay_buffer.sample(batch_size)
-        h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device)
-        z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device)
+        # Squeeze the middle dimension, which is an artifact of how states are stored in the replay buffer.
+        h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
+        z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
-        logger.info(f"Initial h_start shape: {h_start.shape}")
-        logger.info(f"Initial z_start shape: {z_start.shape}")
 
         # --- Imagine Trajectories ---
         h_t, z_t = h_start, z_start
@@ -694,14 +692,12 @@ class ChimeraAgent:
         imagined_stag_contexts = []
 
         # --- Imagine Trajectories with Dynamic STAG Context ---
-        for t in range(horizon):
-            logger.info(f"--- Imagination step {t} ---")
-            logger.info(f"  h_t shape at start of loop: {h_t.shape}")
+        for _ in range(horizon):
             # 1. Generate STAG context dynamically for the current imagined state h_t
             # This part needs to have gradient tracking for the StagContextProcessor
             stag_contexts = []
             for i in range(h_t.size(0)): # Process each state in the batch
-                h_numpy = h_t[i].detach().cpu().numpy().flatten()
+                h_numpy = h_t[i].detach().numpy().flatten()
                 norm = np.linalg.norm(h_numpy)
                 h_normalized = h_numpy / norm if norm > 0 else h_numpy
 
@@ -718,13 +714,9 @@ class ChimeraAgent:
                 while len(path_weights) < self.max_stag_path_length:
                     path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
 
-                processor_output = self.stag_context_processor(path_weights)
-                if i == 0:
-                    logger.info(f"  StagContextProcessor output shape for one item: {processor_output.shape}")
-                stag_contexts.append(processor_output)
+                stag_contexts.append(self.stag_context_processor(path_weights))
 
             stag_context_batch = torch.cat(stag_contexts, dim=0)
-            logger.info(f"  stag_context_batch shape after cat: {stag_context_batch.shape}")
 
             # If STAG is disabled for training OR we are in the pre-training phase,
             # use a zero vector for the context.
@@ -732,21 +724,14 @@ class ChimeraAgent:
                 stag_context_batch = torch.zeros_like(stag_context_batch)
 
             # 2. Actor selects action based on h_t and the dynamically generated C_t
-            logger.info(f"  Shape of h_t before torch.cat: {h_t.shape}")
-            logger.info(f"  Shape of stag_context_batch before torch.cat: {stag_context_batch.shape}")
             action_input = torch.cat([h_t, stag_context_batch], dim=-1)
-            logger.info(f"  action_input shape: {action_input.shape}")
-
             action_dist = self.action_head(action_input, goal_sequence)
             action = action_dist.sample()
-            logger.info(f"  action shape: {action.shape}")
 
             # 3. World model predicts next state (do this without tracking gradients)
             with torch.no_grad():
                 h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
-                logger.info(f"  h_t shape after transition_model: {h_t.shape}")
-                logger.info(f"  z_t shape after rsample: {z_t.shape}")
 
             imagined_h.append(h_t)
             imagined_z.append(z_t)
