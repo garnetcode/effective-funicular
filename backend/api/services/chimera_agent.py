@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributions import Normal, Categorical
 import random
 import time
+from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,9 @@ class ChimeraAgent:
                 weight_decay=self.world_model_weight_decay
             ) for wm in self.world_models
         ]
+        # Normalization Hub
         self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
+        self.z_norm = nn.LayerNorm(self.latent_dim).to(self.device)
 
         # Skill Manager (manages multiple STAGs)
         self.skill_manager = SkillManager(self.hidden_dim, **self.hyperparams)
@@ -222,6 +225,44 @@ class ChimeraAgent:
         self.sf_projection_matrix = torch.randn(self.hidden_dim, self.sf_dimension, device=self.device)
         self.reward_weights = torch.zeros(self.sf_dimension, device=self.device)
 
+        # MoCo-style queue for contrastive learning
+        self.contrastive_queue_size = self.hyperparams.get('contrastive_queue_size', 4096)
+        if self.contrastive_queue_size > 0:
+            self.register_buffer("contrastive_queue", torch.randn(self.contrastive_queue_size, self.hidden_dim))
+            self.contrastive_queue = F.normalize(self.contrastive_queue, dim=1)
+            self.register_buffer("contrastive_queue_ptr", torch.zeros(1, dtype=torch.long))
+
+        # KL Balancing
+        self.use_kl_balancing = self.hyperparams.get('kl_balancing', True)
+        if self.use_kl_balancing:
+            self.kl_target = self.hyperparams.get('kl_target', 3.0)
+            self.kl_coeff = self.hyperparams.get('kl_coeff_initial', 1.0)
+            self.pid_kp = self.hyperparams.get('kl_coeff_pid_kp', 0.01)
+            self.pid_ki = self.hyperparams.get('kl_coeff_pid_ki', 0.0001)
+            self.pid_kd = self.hyperparams.get('kl_coeff_pid_kd', 0.001)
+            self.kl_error_integral = 0
+            self.kl_last_error = 0
+
+        # Running stats for novelty z-scoring
+        self.novelty_stats = {
+            'error_fast': {'mean': 0.0, 'std': 1.0, 'count': 0},
+            'error_slow': {'mean': 0.0, 'std': 1.0, 'count': 0}
+        }
+
+        # Policy Distillation
+        self.distill_params = self.hyperparams.get('policy_distillation', {})
+        self.lambda_bc_start = self.distill_params.get('lambda_bc_start', 1.0)
+        self.lambda_bc_end = self.distill_params.get('lambda_bc_end', 0.1)
+        self.lambda_bc_schedule_steps = self.distill_params.get('lambda_bc_schedule_steps', 300000)
+
+        # Hierarchical Control
+        self.h_control_params = self.hyperparams.get('hierarchical_control', {})
+        self.h_step_interval = self.h_control_params.get('h_step_interval', 50)
+        self.h_step_counter = 0
+
+        # This will be populated by load_state so the training script can access it
+        self.loaded_snapshot_data = None
+
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
@@ -240,38 +281,77 @@ class ChimeraAgent:
         )
 
     def save_state(self, version_info={}):
-        """Saves the agent's core models to a new version snapshot."""
-        learnable_params = {
-            'world_model_state_dicts': [wm.state_dict() for wm in self.world_models],
+        """Saves the complete state of the agent for resumable training."""
+        agent_state = {
+            # --- Model States ---
+            'world_models_state_dicts': [wm.state_dict() for wm in self.world_models],
             'action_head_state_dict': self.action_head.state_dict(),
             'value_head_state_dict': self.value_head.state_dict(),
             'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
-            'skill_manager_state': self.skill_manager.get_serializable_structure()
+
+            # --- Optimizer States ---
+            'world_model_optimizers_state_dicts': [opt.state_dict() for opt in self.world_model_optimizers],
+            # Note: AC optimizer is re-created in train_policy_in_imagination, so no need to save.
+
+            # --- Agent Internal State ---
+            'steps_done': self.steps_done,
+            'train_steps': self.train_steps,
+            'novelty_stats': self.novelty_stats,
+            'skill_manager_state': self.skill_manager.get_serializable_structure(),
+
+            # --- Learning Mechanism States ---
+            'kl_coeff': self.kl_coeff,
+            'kl_error_integral': self.kl_error_integral,
+            'kl_last_error': self.kl_last_error,
+            'contrastive_queue': self.contrastive_queue,
+            'contrastive_queue_ptr': self.contrastive_queue_ptr,
         }
-        self.history_manager.save_snapshot(learnable_params, version_info)
+
+        # Combine with any additional info provided
+        full_state_package = {**agent_state, **version_info}
+        self.history_manager.save_snapshot(full_state_package, version_info)
 
     def load_state(self, version='latest'):
-        """Loads the agent's core models from a version snapshot."""
-        learnable_params = self.history_manager.load_snapshot(version)
-        if learnable_params:
-            if 'world_model_state_dicts' in learnable_params:
-                for i, state_dict in enumerate(learnable_params['world_model_state_dicts']):
-                    if i < len(self.world_models):
-                        self.world_models[i].load_state_dict(state_dict)
-            elif 'world_model_state_dict' in learnable_params:
-                # Handle old single-model checkpoints
-                self.world_models[0].load_state_dict(learnable_params['world_model_state_dict'])
-
-            self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
-            self.value_head.load_state_dict(learnable_params['value_head_state_dict'])
-            self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict'))
-
-            if 'skill_manager_state' in learnable_params:
-                self.skill_manager = SkillManager.from_serializable_structure(
-                    learnable_params['skill_manager_state'], **self.hyperparams
-                )
-        else:
+        """Loads the complete state of the agent for resumable training."""
+        state_dict = self.history_manager.load_snapshot(version)
+        if not state_dict:
             print("Warning: No state to load.")
+            return
+
+        # Store the loaded data so the training script can access it
+        self.loaded_snapshot_data = state_dict
+
+        # --- Load Model States ---
+        if 'world_models_state_dicts' in state_dict:
+            for i, sd in enumerate(state_dict['world_models_state_dicts']):
+                if i < len(self.world_models): self.world_models[i].load_state_dict(sd)
+
+        self.action_head.load_state_dict(state_dict['action_head_state_dict'])
+        self.value_head.load_state_dict(state_dict['value_head_state_dict'])
+        self.stag_context_processor.load_state_dict(state_dict.get('stag_context_processor_state_dict'))
+
+        # --- Load Optimizer States ---
+        if 'world_model_optimizers_state_dicts' in state_dict:
+            for i, sd in enumerate(state_dict['world_model_optimizers_state_dicts']):
+                if i < len(self.world_model_optimizers): self.world_model_optimizers[i].load_state_dict(sd)
+
+        # --- Load Agent Internal State ---
+        self.steps_done = state_dict.get('steps_done', 0)
+        self.train_steps = state_dict.get('train_steps', 0)
+        self.novelty_stats = state_dict.get('novelty_stats', self.novelty_stats)
+        if 'skill_manager_state' in state_dict:
+            self.skill_manager = SkillManager.from_serializable_structure(
+                state_dict['skill_manager_state'], **self.hyperparams
+            )
+
+        # --- Load Learning Mechanism States ---
+        self.kl_coeff = state_dict.get('kl_coeff', self.kl_coeff)
+        self.kl_error_integral = state_dict.get('kl_error_integral', 0)
+        self.kl_last_error = state_dict.get('kl_last_error', 0)
+        if 'contrastive_queue' in state_dict: self.contrastive_queue.copy_(state_dict['contrastive_queue'])
+        if 'contrastive_queue_ptr' in state_dict: self.contrastive_queue_ptr.copy_(state_dict['contrastive_queue_ptr'])
+
+        logger.info(f"Agent state loaded from version '{version}'. Resuming from step {self.steps_done}.")
 
     def set_active_skill(self, skill_id):
         """Sets the currently active skill/environment for the agent."""
@@ -314,7 +394,19 @@ class ChimeraAgent:
             # Find the activation path and get the potential novelty signal (error)
             terminal_node, winner_id, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
             if terminal_node and winner_id is not None:
-                novelty = terminal_node['gng'].nodes[winner_id].get('error', 0)
+                winner_node = terminal_node['gng'].nodes[winner_id]
+                error_fast = winner_node.get('error_fast', 0)
+                error_slow = winner_node.get('error_slow', 0)
+
+                # Update running stats for z-scoring
+                self._update_running_stats('error_fast', error_fast)
+                self._update_running_stats('error_slow', error_slow)
+
+                # Calculate z-scores
+                z_score_fast = (error_fast - self.novelty_stats['error_fast']['mean']) / self.novelty_stats['error_fast']['std']
+                z_score_slow = (error_slow - self.novelty_stats['error_slow']['mean']) / self.novelty_stats['error_slow']['std']
+
+                novelty = max(z_score_fast, z_score_slow)
 
                 # Check for STAG node transition
                 if self.last_stag_node_id is not None and self.last_stag_node_id != winner_id:
@@ -373,102 +465,120 @@ class ChimeraAgent:
 
     def select_action(self, actual_action_dim, activation_path):
         """
-        Selects an action using the policy or a planner.
+        Selects an action using the hierarchical planning and control system.
         """
         start_time = time.time()
-        # 1. Construct the context vector C_t from the STAG's activation path
-        path_weights = []
-        if activation_path:
-            active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-            for step in activation_path:
-                level_gng = active_stag.level_map[step['level_id']]
-                node_weight = level_gng.nodes[step['winner_id']]['weight']
-                path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
-
-        while len(path_weights) < self.max_stag_path_length:
-            path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
-
-        with torch.no_grad():
-            stag_context_vector = self.stag_context_processor(path_weights)
-        if not self.use_stag_in_ac_loss:
-            stag_context_vector = torch.zeros_like(stag_context_vector)
-
-        combined_input = torch.cat((self.hidden_state, stag_context_vector), dim=1)
-
-        # 3. Select action
-        epsilon = self._get_epsilon()
         self.steps_done += 1
+        self.h_step_counter += 1
+        decision_maker = "policy" # Default
+        log_prob = torch.tensor(0.0) # Default
+        stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device) # Default
 
-        # Decide whether to use the planner or the learned policy
-        use_planner_this_step = self.use_planner and (self.action_plan is None or len(self.action_plan) == 0) and (self.steps_done % self.low_level_plan_frequency == 0)
+        # --- Hierarchical Planning Logic ---
+        # 1. High-Level Planner (GraphPlanner)
+        if self.use_planner and (self.current_subgoal is None or self.h_step_counter >= self.h_step_interval):
+            self.h_step_counter = 0
+            stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
+            if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
+                    # --- Goal Curriculum Logic ---
+                    curriculum_params = self.h_control_params.get('goal_curriculum', {})
+                    if curriculum_params.get('enabled', False):
+                        # Calculate current max distance
+                        schedule_steps = curriculum_params.get('schedule_steps', 1)
+                        progress = min(1.0, self.train_steps / schedule_steps)
+                        start_dist = curriculum_params.get('initial_max_graph_dist', 2)
+                        end_dist = curriculum_params.get('max_graph_dist_end', 10)
+                        max_dist = int(start_dist + progress * (end_dist - start_dist))
 
-        if use_planner_this_step:
-            # Hierarchical planning logic
-            if self.current_subgoal is None or self.train_steps % self.high_level_replan_frequency == 0:
-                stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
-                if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
-                    possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
-                    if possible_goals:
-                        goal_node_id = random.choice(possible_goals)
-                        self.high_level_plan = self.graph_planner.plan(stag_graph, self.skill_manager.option_models.get(self.active_skill_id, {}), self.last_stag_node_id, goal_node_id)
+                        # Find reachable goals within the curriculum distance
+                        distances = self.graph_planner.bfs_distances(self.last_stag_node_id, stag_graph)
+                        possible_goals = [nid for nid, dist in distances.items() if 1 <= dist <= max_dist]
+                    else:
+                        # Fallback to original logic if curriculum is disabled
+                        possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
 
-                if self.high_level_plan:
-                    self.high_level_plan.pop(0)
-                    if self.high_level_plan:
-                        self.current_subgoal = self.high_level_plan.pop(0)
+                if possible_goals:
+                    goal_node_id = random.choice(possible_goals)
+                    self.high_level_plan = self.graph_planner.plan(stag_graph, self.skill_manager.option_models.get(self.active_skill_id, {}), self.last_stag_node_id, goal_node_id)
+                    if self.high_level_plan and len(self.high_level_plan) > 1:
+                        self.current_subgoal = self.high_level_plan[1] # Target the next node in the path
+                        logger.info(f"H-Planner: New subgoal set to STAG node {self.current_subgoal}")
+                        self.action_plan = None # Invalidate low-level plan
+                    else:
+                        self.current_subgoal = None # Plan failed or is trivial
 
-            subgoal_weight = None
-            if self.current_subgoal:
-                stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                terminal_gng = stag.level_map[max(stag.level_map.keys())]
-                if self.current_subgoal in terminal_gng.nodes:
-                    subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
+        # 2. Mid-Level Planner (LatentPlanner)
+        if self.use_planner and self.current_subgoal is not None and self.action_plan is None:
+            stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+            # This assumes subgoals are in the terminal GNG
+            terminal_gng = stag.level_map[max(stag.level_map.keys())]
+            if self.current_subgoal in terminal_gng.nodes:
+                subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
+                with torch.no_grad():
+                    logger.info(f"M-Planner: Planning trajectory to subgoal {self.current_subgoal}")
+                    plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight=subgoal_weight)
 
-            with torch.no_grad():
-                # The planner returns the full sequence of actions
-                self.action_plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight, self.current_goal)
+                if plan is not None and len(plan) > 0:
+                    self.action_plan = plan
+                else:
+                    # Fallback: Planner failed, find a nearby alternative subgoal
+                    logger.warning(f"M-Planner failed for subgoal {self.current_subgoal}. Finding alternative.")
+                    original_subgoal_weight = subgoal_weight.cpu().numpy()
+                    neighbor_ids, _ = self.skill_manager.find_k_nearest_neighbors(self.active_skill_id, original_subgoal_weight, k=5)
 
-            # Take the first action from the new plan
+                    # Try the next closest neighbor that isn't the one we just failed on
+                    new_subgoal = next((nid for nid in neighbor_ids if nid != self.current_subgoal), None)
+
+                    if new_subgoal:
+                        logger.info(f"Fallback: Setting new subgoal to {new_subgoal}")
+                        self.current_subgoal = new_subgoal
+                    else:
+                        logger.warning("Fallback failed, no alternative subgoals found. Clearing subgoal.")
+                        self.current_subgoal = None
+            else:
+                # Fallback: Subgoal not found in GNG
+                logger.warning(f"Subgoal {self.current_subgoal} not found in terminal GNG. Clearing subgoal.")
+                self.current_subgoal = None
+
+        # 3. Low-Level Execution (Plan Following or Policy)
+        if self.action_plan is not None and len(self.action_plan) > 0:
             action_continuous = self.action_plan[0]
-            action_tensor = torch.argmax(action_continuous[:actual_action_dim], dim=-1)
-            self.action_plan = self.action_plan[1:] # Consume the first action
+            # The planner might return a sequence of means, not one-hot vectors.
+            # We take the argmax to get the discrete action.
+            action_tensor = torch.argmax(action_continuous, dim=-1)
+            self.action_plan = self.action_plan[1:]
             decision_maker = "planner"
-            log_prob = torch.tensor(0.0)
-
-        elif self.action_plan is not None and len(self.action_plan) > 0:
-            # Execute the existing plan
-            action_continuous = self.action_plan[0]
-            action_tensor = torch.argmax(action_continuous[:actual_action_dim], dim=-1)
-            self.action_plan = self.action_plan[1:] # Consume the action
-            decision_maker = "plan_follower"
-            log_prob = torch.tensor(0.0)
-
-        else: # Use the policy
+        else:
+            # Fallback to learned policy
             with torch.no_grad():
-                if self.current_goal is None:
-                    logger.warning("self.current_goal was None in select_action. Defaulting to a zero vector.")
-                    self.current_goal = np.zeros(self.goal_dim)
+                h_normalized = self.h_norm(self.hidden_state)
+                # STAG context is not fully integrated into this hierarchical loop yet
+                stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device)
+                combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
+
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
                 goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
                 action_dist = self.action_head(combined_input, goal_tensor_expanded)
+
                 mask = torch.full(action_dist.logits.shape, -float('inf'), device=self.device)
                 mask[0, :actual_action_dim] = 0
                 masked_logits = action_dist.logits + mask
                 action_dist = Categorical(logits=masked_logits)
 
-            if np.random.rand() < epsilon:
-                action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
-                decision_maker = "random"
-            else:
-                action_tensor = action_dist.sample()
-                decision_maker = "policy"
-
-            log_prob = action_dist.log_prob(action_tensor)
+                epsilon = self._get_epsilon()
+                if np.random.rand() < epsilon:
+                    action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
+                    decision_maker = "random"
+                else:
+                    action_tensor = action_dist.sample()
+                    decision_maker = "policy"
+                log_prob = action_dist.log_prob(action_tensor)
 
         action = action_tensor.item()
-        # Ensure last_action is always a 1D tensor of shape (1,) for consistency.
         self.last_action = action_tensor.reshape(1)
         action_time = time.time() - start_time
+        epsilon = self._get_epsilon() # Recalculate for logging
+
         return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time
 
     def _get_epsilon(self):
@@ -504,6 +614,24 @@ class ChimeraAgent:
         internal_reward += novelty_reward_weight * novelty_signal
 
         return internal_reward
+
+    def _update_running_stats(self, key, value, decay=0.99):
+        """Welford's online algorithm for running mean and std."""
+        stats = self.novelty_stats[key]
+        stats['count'] += 1
+
+        old_mean = stats['mean']
+        new_mean = old_mean + (value - old_mean) / stats['count']
+
+        # Using variance is more stable
+        old_var = stats['std']**2
+        new_var = old_var + (value - old_mean) * (value - new_mean)
+
+        stats['mean'] = new_mean
+        stats['std'] = np.sqrt(new_var / stats['count']) if stats['count'] > 1 else 1.0
+        # Add a small epsilon to prevent division by zero
+        stats['std'] = max(stats['std'], 1e-6)
+
 
     def record_experience(self, *args):
         """Pushes an experience to the replay buffer and updates subgoal counters."""
@@ -555,252 +683,303 @@ class ChimeraAgent:
 
         contrastive_loss_fn = ContrastiveLoss()
 
-        # For PER, we sample a single batch and use it for all models
-        batch, indices, weights = self.replay_buffer.sample(batch_size)
-        weights = torch.from_numpy(weights).float().to(self.device)
+        # For PER, we sample a single batch that will be used for calculating priorities
+        shared_batch, shared_indices, shared_weights_np = self.replay_buffer.sample(batch_size)
+        shared_weights = torch.from_numpy(shared_weights_np).float().to(self.device)
 
         total_wm_loss = 0
+        # Priorities are calculated based on the average loss on the shared_batch across the ensemble
         sequence_priorities = torch.zeros(batch_size, device=self.device)
 
         for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
-            # --- Prepare tensors ---
-            obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
-            action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
-            reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
-            goal_sequence = torch.from_numpy(batch['goal']).float().to(self.device)
 
-            # Process observations
-            if obs_sequence.dim() == 5:
-                batch_size, seq_len, h_dim, w_dim, c_dim = obs_sequence.shape
-                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, h_dim, w_dim, c_dim))
+            # --- Ensemble Diversity Logic ---
+            if i > 0 and random.random() < self.hyperparams.get('ensemble_diversity_prob', 0.5):
+                train_batch, _, _ = self.replay_buffer.sample(batch_size)
+                train_weights = torch.ones(batch_size, device=self.device) / batch_size
             else:
-                batch_size, seq_len, obs_dim = obs_sequence.shape
-                obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_dim))
-            obs_sequence_processed = obs_sequence_processed.view(batch_size, seq_len, -1)
+                train_batch, train_weights = shared_batch, shared_weights
 
-            # --- Sequence-based Forward Pass and Loss Calculation ---
-            h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-            z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
-
-            total_recon_loss, total_reward_loss, total_kl_loss = 0, 0, 0
-            hidden_states = []
-
-            for t in range(self.replay_buffer.sequence_length):
-                obs_t = obs_sequence_processed[:, t]
-                action_t = action_sequence[:, t]
-                reward_t = reward_sequence[:, t]
-
-                h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
-                hidden_states.append(h_t)
-
-                obs_recon = world_model.obs_decoder(z_t, h_t)
-                reward_pred = world_model.reward_model(torch.cat([z_t, h_t, goal_sequence[:, t]], dim=-1))
-
-                recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
-                reward_loss = torch.mean((reward_pred - reward_t.unsqueeze(-1))**2, dim=-1)
-
-                free_bits = self.hyperparams.get('free_bits', 1.0)
-                kl_loss = torch.clamp(kl_loss, min=free_bits)
-
-                total_recon_loss += recon_loss
-                total_reward_loss += reward_loss
-                total_kl_loss += kl_loss
-
-            hidden_states = torch.stack(hidden_states, dim=1) # (batch, seq_len, hidden_dim)
-
-            # --- Contrastive Loss Calculation ---
-            # Positive pairs are adjacent states in the sequence
-            anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
-            positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
-
-            # Negative pairs are all other states in the batch
-            # This is a simplification. A better approach would be to use a memory bank of negatives.
-            # For now, we'll just use other states in the same batch.
-            negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
-            contrastive_loss = contrastive_loss_fn(anchor, positive, negatives)
-
-            # --- Total Loss ---
-            world_model_loss = (
-                (total_recon_loss + total_reward_loss + total_kl_loss) / self.replay_buffer.sequence_length
+            # --- Main Training Pass on `train_batch` ---
+            # This is where the model parameters are updated
+            # (The detailed implementation of the forward pass and loss calculation is encapsulated in a helper)
+            world_model_loss, contrastive_loss, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
+                world_model, train_batch, cortex_id, train_weights
             )
 
-            # The priority is based on the reconstruction error
-            sequence_priorities += world_model_loss.detach()
-
-            # Weight the loss by the importance sampling weights
-            total_loss = (weights * world_model_loss).mean() + self.contrastive_loss_weight * contrastive_loss
-            total_wm_loss += total_loss.item()
-
-            # --- Backpropagation ---
             wm_optimizer.zero_grad()
-            total_loss.backward()
+            world_model_loss.backward()
             torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
             wm_optimizer.step()
+            total_wm_loss += world_model_loss.item()
+
+            # --- Priority Calculation Pass on `shared_batch` ---
+            # This pass is only for calculating the loss to be used as priority, so no gradients needed.
+            with torch.no_grad():
+                priority_loss, _, _, _ = self._calculate_world_model_loss(
+                    world_model, shared_batch, cortex_id, shared_weights
+                )
+                # The priority for an experience is the loss from the model that trained on it
+                sequence_priorities += priority_loss.detach()
+
+        # --- Update the contrastive queue ---
+        if self.contrastive_queue_size > 0:
+            keys_to_enqueue = last_hidden_states.view(-1, self.hidden_dim).detach()
+            self._dequeue_and_enqueue(keys_to_enqueue)
 
         # Average the priorities over the ensemble
         final_priorities = (sequence_priorities / self.num_ensemble_models).cpu().numpy()
 
-        # Learn reward weights
+        # Learn reward weights using the last batch from the loop
         with torch.no_grad():
-            # Use the last hidden state of the sequence to represent the state
-            last_h = hidden_states[:, -1]
+            last_h = last_hidden_states[:, -1]
             state_features = torch.matmul(last_h, self.sf_projection_matrix)
-
-            # Predict reward using current weights
             predicted_r = torch.einsum('bd,d->b', [state_features, self.reward_weights])
-
-            # Get the actual reward for the last step of the sequence
-            actual_r = reward_sequence[:, -1]
-
-            # LMS update rule
+            actual_r = torch.from_numpy(last_reward_seq).float().to(self.device)[:, -1]
             error = actual_r - predicted_r
             self.reward_weights += self.sf_learning_rate * torch.mean(error.unsqueeze(-1) * state_features, dim=0)
 
-        return {"wm_loss": total_wm_loss / self.num_ensemble_models, "contrastive_loss": contrastive_loss.item()}, indices, final_priorities
+        # --- Collect and return detailed statistics ---
+        # Note: These stats are from the last model's training batch, which is a simplification.
+        avg_wm_loss = total_wm_loss / self.num_ensemble_models
+        stats = { "wm_loss_total": avg_wm_loss }
+        return stats, shared_indices, final_priorities
+
+    def _calculate_world_model_loss(self, world_model, batch, cortex_id, weights):
+        """Helper function to calculate the world model loss for a given batch."""
+        # --- Prepare tensors ---
+        obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
+        action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
+        reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
+        goal_sequence = torch.from_numpy(batch['goal']).float().to(self.device)
+
+        # Process observations
+        batch_size = obs_sequence.size(0)
+        if obs_sequence.dim() == 5:
+            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, *obs_sequence.shape[2:]))
+        else:
+            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
+        obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
+
+        # --- Sequence-based Forward Pass and Loss Calculation ---
+        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
+
+        total_recon_loss, total_reward_loss, total_kl_loss = 0, 0, 0
+        hidden_states = []
+
+        for t in range(self.replay_buffer.sequence_length):
+            obs_t = obs_sequence_processed[:, t]
+            action_t = action_sequence[:, t]
+            h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
+            hidden_states.append(h_t)
+
+            obs_recon = world_model.obs_decoder(z_t, h_t)
+            reward_pred = world_model.reward_model(torch.cat([z_t, h_t, goal_sequence[:, t]], dim=-1))
+
+            recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
+            reward_loss = torch.mean((reward_pred - reward_sequence[:, t].unsqueeze(-1))**2, dim=-1)
+
+            if self.use_kl_balancing:
+                kl_loss_detached = kl_loss.detach()
+                error = kl_loss_detached - self.kl_target
+                self.kl_error_integral += error
+                derivative = error - self.kl_last_error
+                self.kl_last_error = error
+                pid_adjustment = self.pid_kp * error + self.pid_ki * self.kl_error_integral + self.pid_kd * derivative
+                self.kl_coeff = max(0.1, self.kl_coeff + pid_adjustment)
+            else:
+                kl_loss = torch.clamp(kl_loss, min=self.hyperparams.get('free_bits', 1.0))
+
+            total_recon_loss += recon_loss
+            total_reward_loss += reward_loss
+            total_kl_loss += kl_loss
+
+        hidden_states = torch.stack(hidden_states, dim=1)
+        world_model_kl_loss = self.kl_coeff * total_kl_loss if self.use_kl_balancing else total_kl_loss
+
+        # --- Contrastive Loss Calculation ---
+        anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
+        positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
+        if self.contrastive_queue_size > 0:
+            negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
+        else:
+            negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
+        contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
+
+        # --- Latent Consistency Loss ---
+        consistency_loss = 0
+        if self.hyperparams.get('latent_consistency_weight', 0.0) > 0:
+            # Create augmented observations (e.g., with noise)
+            obs_aug = obs_sequence + torch.randn_like(obs_sequence) * 0.1
+            if obs_sequence.dim() == 5:
+                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
+            else:
+                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
+            obs_aug_processed = obs_aug_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
+
+            # Get hidden states for augmented observations
+            h_t_aug, z_t_aug = torch.zeros_like(h_t), torch.zeros_like(z_t)
+            hidden_states_aug = []
+            for t in range(self.replay_buffer.sequence_length):
+                obs_t_aug = obs_aug_processed[:, t]
+                action_t = action_sequence[:, t]
+                h_t_aug, z_t_aug, _ = world_model.rssm(obs_t_aug, action_t, h_t_aug, z_t_aug)
+                hidden_states_aug.append(h_t_aug)
+            hidden_states_aug = torch.stack(hidden_states_aug, dim=1)
+
+            consistency_loss = F.mse_loss(hidden_states.detach(), hidden_states_aug)
+
+        # --- Total Loss ---
+        world_model_loss_per_item = (total_recon_loss + total_reward_loss + world_model_kl_loss) / self.replay_buffer.sequence_length
+        total_loss = (weights * world_model_loss_per_item).mean() + \
+                     self.contrastive_loss_weight * contrastive_loss + \
+                     self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
+
+        return total_loss, contrastive_loss, hidden_states, batch['reward']
+
 
     def train_policy_in_imagination(self):
         """
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
-        This is the second part of the "Sleep" phase.
+        This version implements policy distillation from a planner.
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
 
         # --- Calculate scheduled parameters ---
-        # Imagination Horizon
         progress = min(1.0, self.train_steps / self.imagination_horizon_schedule_steps)
         horizon = int(self.imagination_horizon_start + progress * (self.imagination_horizon_end - self.imagination_horizon_start))
 
-        # Entropy Coefficient
         progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
 
+        progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
+        lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
 
         # --- Sample starting states from real data ---
         batch, _, _ = self.replay_buffer.sample(batch_size)
-        # Squeeze the middle dimension, which is an artifact of how states are stored in the replay buffer.
         h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
         z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
 
-        # --- Imagine Trajectories ---
+        # --- Generate "teacher" plan from the latent planner ---
+        with torch.no_grad():
+            teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
+
+        # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
         imagined_h = [h_t]
         imagined_z = [z_t]
-        imagined_actions = []
-        imagined_stag_contexts = []
 
-        # --- Imagine Trajectories with Dynamic STAG Context ---
-        for _ in range(horizon):
-            # 1. Generate STAG context dynamically for the current imagined state h_t
-            # This part needs to have gradient tracking for the StagContextProcessor
-            stag_contexts = []
-            for i in range(h_t.size(0)): # Process each state in the batch
-                h_numpy = h_t[i].detach().numpy().flatten()
-                norm = np.linalg.norm(h_numpy)
-                h_normalized = h_numpy / norm if norm > 0 else h_numpy
+        policy_actions = []
+        policy_log_probs = []
+        policy_entropies = []
 
-                _, _, activation_path = self.skill_manager.find_terminal_node_and_path(self.active_skill_id, h_normalized)
+        for t in range(horizon):
+            norm_h = self.h_norm(h_t)
+            # Note: STAG context is not used in this simplified distillation loop for now.
+            stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
 
-                path_weights = []
-                if activation_path:
-                    active_stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                    for step in activation_path:
-                        level_gng = active_stag.level_map[step['level_id']]
-                        node_weight = level_gng.nodes[step['winner_id']]['weight']
-                        path_weights.append(torch.from_numpy(node_weight).float().to(self.device))
-
-                while len(path_weights) < self.max_stag_path_length:
-                    path_weights.append(torch.zeros(self.hidden_dim, device=self.device))
-
-                stag_contexts.append(self.stag_context_processor(path_weights))
-
-            stag_context_batch = torch.cat(stag_contexts, dim=0)
-
-            # If STAG is disabled for training OR we are in the pre-training phase,
-            # use a zero vector for the context.
-            if not self.use_stag_in_ac_loss or self.steps_done <= self.world_model_pretrain_steps:
-                stag_context_batch = torch.zeros_like(stag_context_batch)
-
-            # 2. Actor selects action based on h_t and the dynamically generated C_t
-            action_input = torch.cat([h_t, stag_context_batch], dim=-1)
+            action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
-            action = action_dist.sample()
 
-            # 3. World model predicts next state (do this without tracking gradients)
+            action = action_dist.sample()
+            policy_actions.append(action)
+            policy_log_probs.append(action_dist.log_prob(action))
+            policy_entropies.append(action_dist.entropy())
+
             with torch.no_grad():
                 h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
 
             imagined_h.append(h_t)
             imagined_z.append(z_t)
-            imagined_actions.append(action)
-            imagined_stag_contexts.append(stag_context_batch)
 
-        imagined_h = torch.stack(imagined_h) # Shape: [horizon+1, batch, hidden_dim]
-        imagined_z = torch.stack(imagined_z) # Shape: [horizon+1, batch, latent_dim]
-        imagined_actions = torch.stack(imagined_actions) # Shape: [horizon, batch]
-        imagined_stag_contexts = torch.stack(imagined_stag_contexts) # Shape: [horizon, batch, context_dim]
+        imagined_h = torch.stack(imagined_h)
+        imagined_z = torch.stack(imagined_z)
+        policy_actions = torch.stack(policy_actions)
+        policy_log_probs = torch.stack(policy_log_probs)
+        policy_entropies = torch.stack(policy_entropies)
 
+        # --- Predict Rewards and Values for the policy's imagined trajectory ---
+        norm_imagined_h = self.h_norm(imagined_h)
+        norm_imagined_z = self.z_norm(imagined_z)
+        goal_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
 
-        # --- Predict Rewards and Values for Imagined Trajectory ---
-        # For simplicity, we assume the goal is constant for the whole trajectory
-        goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
-        imagined_rewards = self.world_models[0].reward_model(torch.cat([imagined_z, imagined_h, goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)], dim=-1)).squeeze(-1)
+        imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_expanded], dim=-1)).squeeze(-1)
+        imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded], dim=-1)).squeeze(-1)
 
-        # Expand goal for value prediction
-        goal_sequence_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
-        imagined_values = self.value_head(torch.cat([imagined_h, imagined_z, goal_sequence_expanded], dim=-1)).squeeze(-1)
-
-        # --- Calculate Value Targets (Lambda-Return) ---
+        # --- Calculate Value Targets (Lambda-Return) for the RL loss ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
         returns = torch.zeros_like(imagined_values[-1])
         lambda_returns = []
         for t in reversed(range(horizon)):
-            # V_target = r_t + gamma * ( (1-lambda) * V(s_{t+1}) + lambda * V_target_{t+1} )
             returns = imagined_rewards[t] + self.gamma * ((1 - lambda_) * imagined_values[t+1].detach() + lambda_ * returns)
             lambda_returns.append(returns)
         lambda_returns = torch.stack(list(reversed(lambda_returns)))
 
-        # --- Actor-Critic Loss Calculation (ℒ_AC) ---
-        # Actor Loss
+        # --- Calculate Losses ---
+        # 1. RL Policy Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
-        # Normalize advantages to stabilize training
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-        action_input = torch.cat([imagined_h[:-1], imagined_stag_contexts], dim=-1)
-        log_probs = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).log_prob(imagined_actions)
-        policy_loss = -(log_probs * advantage).mean()
+        policy_loss = -(policy_log_probs * advantage).mean()
 
-        # Critic Loss
-        critic_loss = torch.nn.functional.mse_loss(imagined_values[:-1], lambda_returns.detach())
+        # 2. RL Critic Loss
+        critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
-        # Entropy Bonus
-        entropy = self.action_head(action_input, goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).entropy().mean()
+        # 3. Behavioral Cloning (BC) Loss
+        # The teacher plan has shape (horizon, batch, action_dim)
+        # We need the policy's logits for the states it visited
+        policy_logits = self.action_head(torch.cat([norm_imagined_h[:-1], torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)], dim=-1), goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).logits
+        bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
-        # --- Total AC Loss and Backpropagation ---
-        w_policy = self.hyperparams.get('w_policy', 1.0)
-        w_critic = self.hyperparams.get('w_critic', 0.5)
+        # 4. Entropy Bonus
+        entropy_loss = -entropy_coef * policy_entropies.mean()
 
-        ac_loss = w_policy * policy_loss + w_critic * critic_loss - entropy_coef * entropy
+        # --- Total Loss and Backpropagation ---
+        total_loss = policy_loss + critic_loss + lambda_bc * bc_loss + entropy_loss
 
         ac_optimizer = torch.optim.Adam(
             list(self.action_head.parameters()) + list(self.value_head.parameters()),
             lr=self.hyperparams.get('actor_critic_lr', 0.0003)
         )
         ac_optimizer.zero_grad()
-        ac_loss.backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.action_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
         ac_optimizer.step()
 
         return {
-            "ac_loss": ac_loss.item(),
+            "ac_loss": total_loss.item(),
             "policy_loss": policy_loss.item(),
             "critic_loss": critic_loss.item(),
-            "entropy": entropy.item(),
+            "bc_loss": bc_loss.item(),
+            "entropy": -entropy_loss.item() / entropy_coef if entropy_coef > 0 else 0,
+            "lambda_bc": lambda_bc,
             "horizon": horizon,
             "entropy_coef": entropy_coef
         }
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, keys):
+        """Update the MoCo queue with a batch of keys."""
+        batch_size = keys.shape[0]
+        ptr = int(self.contrastive_queue_ptr)
+
+        # Ensure the keys fit in the queue
+        if ptr + batch_size > self.contrastive_queue_size:
+            # If they don't, wrap around
+            remaining = self.contrastive_queue_size - ptr
+            self.contrastive_queue[ptr:] = keys[:remaining]
+            self.contrastive_queue[:batch_size - remaining] = keys[remaining:]
+            ptr = batch_size - remaining
+        else:
+            self.contrastive_queue[ptr:ptr + batch_size] = keys
+            ptr = (ptr + batch_size) % self.contrastive_queue_size
+
+        self.contrastive_queue_ptr[0] = ptr
+
 
     def get_graph_structure(self, skill_id=None):
         """

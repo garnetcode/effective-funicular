@@ -13,7 +13,7 @@ agent_history:
   base_snapshot_interval: 10 # How often to save a full "base" snapshot.
 
 # Main training settings
-episodes_per_env: 20 # How many episodes each parallel agent should run
+max_training_steps: 2000000 # The total number of environment steps to train for.
 
 # Agent architecture and hyperparameters
 agent_config:

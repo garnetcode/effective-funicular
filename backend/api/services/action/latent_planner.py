@@ -85,4 +85,4 @@ class LatentPlanner(nn.Module):
             action_mean = top_actions.mean(dim=2)
             action_std = top_actions.std(dim=2) + 1e-6
 
-        return action_mean[0]
+        return action_mean

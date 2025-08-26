@@ -1,0 +1,34 @@
+# Configuration for Phase 4: Hierarchical Control
+
+imports:
+  - base.yaml
+
+training:
+  phase: 4
+  episodes_per_env: 100 # Corresponds to ~500k steps for this phase
+
+agent_config:
+  hyperparams:
+    # --- Phase 4 Specific Settings ---
+    # Use the planner, but now in a hierarchical way
+    use_planner: true
+
+    # Hierarchical Control settings
+    hierarchical_control:
+      h_step_interval: 50 # Re-plan with GraphPlanner every 50 steps
+      goal_curriculum:
+        enabled: true
+        initial_max_graph_dist: 2
+        max_graph_dist_end: 10
+        schedule_steps: 400000
+
+    # De-emphasize distillation and let the policy learn more on its own
+    policy_distillation:
+      lambda_bc_start: 0.1
+      lambda_bc_end: 0.0
+      lambda_bc_schedule_steps: 100000
+
+    # Lower epsilon as the policy should be more reliable
+    epsilon_start: 0.1
+    epsilon_end: 0.01
+    epsilon_decay_steps: 200000

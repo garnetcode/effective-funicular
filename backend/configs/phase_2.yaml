@@ -1,0 +1,28 @@
+# Configuration for Phase 2: Intrinsic Exploration + STAG Bootstrapping
+
+imports:
+  - base.yaml
+
+training:
+  phase: 2
+  episodes_per_env: 40 # Corresponds to ~200k steps for this phase
+
+agent_config:
+  hyperparams:
+    # --- Phase 2 Specific Settings ---
+    # Activate policy and STAG updates (by not being in phase 1)
+    # Use a simple entropy-driven policy initially
+    entropy_coef_start: 0.01
+
+    # Adaptive Reward Mixing (Intrinsic vs. Extrinsic)
+    reward_mixing:
+      schedule_steps: 200000
+      intrinsic_start_weight: 1.0
+      intrinsic_end_weight: 0.2
+
+    # Multi-timescale GNG error for novelty
+    gng_error_decay_fast: 0.01
+    gng_error_decay_slow: 0.001
+
+    # Use internal rewards
+    use_internal_reward: true

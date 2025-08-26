@@ -1,0 +1,32 @@
+# Configuration for Phase 3: Planner Warm-up & Distillation
+
+imports:
+  - base.yaml
+
+training:
+  phase: 3
+  episodes_per_env: 60 # Corresponds to ~300k steps for this phase
+
+agent_config:
+  hyperparams:
+    # --- Phase 3 Specific Settings ---
+    # Activate the planner
+    use_planner: true
+
+    # Latent Planner (CEM) settings for this phase
+    cem_plan_horizon: 15 # Scheduled from 12 to 20
+    cem_num_samples: 512
+    cem_top_k: 15
+    cem_iterations: 5
+    uncertainty_penalty_weight: 0.5 # Increase penalty
+
+    # Policy Distillation (Behavioral Cloning from Planner)
+    policy_distillation:
+      lambda_bc_start: 1.0
+      lambda_bc_end: 0.1
+      lambda_bc_schedule_steps: 300000
+
+    # On-policy refresh settings
+    on_policy_refresh_interval: 20000 # every N env steps
+    on_policy_refresh_duration: 2000  # collect N steps
+    on_policy_epsilon: 0.1 # Small epsilon for planner-guided collection

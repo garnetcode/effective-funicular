@@ -61,6 +61,11 @@ class SkillManager:
         stag = self._get_or_create_stag(skill_id)
         return stag.get_flattened_structure()
 
+    def find_k_nearest_neighbors(self, skill_id, vector, k=5):
+        """Delegates the k-NN search to the appropriate STAG instance."""
+        stag = self._get_or_create_stag(skill_id)
+        return stag.find_k_nearest_in_terminal_gng(vector, k)
+
     def update_option_model(self, skill_id, from_node, to_node, reward, duration):
         """Updates the option model for a transition between two nodes."""
         if skill_id not in self.option_models:
