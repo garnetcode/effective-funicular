@@ -260,6 +260,9 @@ class ChimeraAgent:
         self.h_step_interval = self.h_control_params.get('h_step_interval', 50)
         self.h_step_counter = 0
 
+        # This will be populated by load_state so the training script can access it
+        self.loaded_snapshot_data = None
+
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
@@ -278,38 +281,77 @@ class ChimeraAgent:
         )
 
     def save_state(self, version_info={}):
-        """Saves the agent's core models to a new version snapshot."""
-        learnable_params = {
-            'world_model_state_dicts': [wm.state_dict() for wm in self.world_models],
+        """Saves the complete state of the agent for resumable training."""
+        agent_state = {
+            # --- Model States ---
+            'world_models_state_dicts': [wm.state_dict() for wm in self.world_models],
             'action_head_state_dict': self.action_head.state_dict(),
             'value_head_state_dict': self.value_head.state_dict(),
             'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
-            'skill_manager_state': self.skill_manager.get_serializable_structure()
+
+            # --- Optimizer States ---
+            'world_model_optimizers_state_dicts': [opt.state_dict() for opt in self.world_model_optimizers],
+            # Note: AC optimizer is re-created in train_policy_in_imagination, so no need to save.
+
+            # --- Agent Internal State ---
+            'steps_done': self.steps_done,
+            'train_steps': self.train_steps,
+            'novelty_stats': self.novelty_stats,
+            'skill_manager_state': self.skill_manager.get_serializable_structure(),
+
+            # --- Learning Mechanism States ---
+            'kl_coeff': self.kl_coeff,
+            'kl_error_integral': self.kl_error_integral,
+            'kl_last_error': self.kl_last_error,
+            'contrastive_queue': self.contrastive_queue,
+            'contrastive_queue_ptr': self.contrastive_queue_ptr,
         }
-        self.history_manager.save_snapshot(learnable_params, version_info)
+
+        # Combine with any additional info provided
+        full_state_package = {**agent_state, **version_info}
+        self.history_manager.save_snapshot(full_state_package, version_info)
 
     def load_state(self, version='latest'):
-        """Loads the agent's core models from a version snapshot."""
-        learnable_params = self.history_manager.load_snapshot(version)
-        if learnable_params:
-            if 'world_model_state_dicts' in learnable_params:
-                for i, state_dict in enumerate(learnable_params['world_model_state_dicts']):
-                    if i < len(self.world_models):
-                        self.world_models[i].load_state_dict(state_dict)
-            elif 'world_model_state_dict' in learnable_params:
-                # Handle old single-model checkpoints
-                self.world_models[0].load_state_dict(learnable_params['world_model_state_dict'])
-
-            self.action_head.load_state_dict(learnable_params['action_head_state_dict'])
-            self.value_head.load_state_dict(learnable_params['value_head_state_dict'])
-            self.stag_context_processor.load_state_dict(learnable_params.get('stag_context_processor_state_dict'))
-
-            if 'skill_manager_state' in learnable_params:
-                self.skill_manager = SkillManager.from_serializable_structure(
-                    learnable_params['skill_manager_state'], **self.hyperparams
-                )
-        else:
+        """Loads the complete state of the agent for resumable training."""
+        state_dict = self.history_manager.load_snapshot(version)
+        if not state_dict:
             print("Warning: No state to load.")
+            return
+
+        # Store the loaded data so the training script can access it
+        self.loaded_snapshot_data = state_dict
+
+        # --- Load Model States ---
+        if 'world_models_state_dicts' in state_dict:
+            for i, sd in enumerate(state_dict['world_models_state_dicts']):
+                if i < len(self.world_models): self.world_models[i].load_state_dict(sd)
+
+        self.action_head.load_state_dict(state_dict['action_head_state_dict'])
+        self.value_head.load_state_dict(state_dict['value_head_state_dict'])
+        self.stag_context_processor.load_state_dict(state_dict.get('stag_context_processor_state_dict'))
+
+        # --- Load Optimizer States ---
+        if 'world_model_optimizers_state_dicts' in state_dict:
+            for i, sd in enumerate(state_dict['world_model_optimizers_state_dicts']):
+                if i < len(self.world_model_optimizers): self.world_model_optimizers[i].load_state_dict(sd)
+
+        # --- Load Agent Internal State ---
+        self.steps_done = state_dict.get('steps_done', 0)
+        self.train_steps = state_dict.get('train_steps', 0)
+        self.novelty_stats = state_dict.get('novelty_stats', self.novelty_stats)
+        if 'skill_manager_state' in state_dict:
+            self.skill_manager = SkillManager.from_serializable_structure(
+                state_dict['skill_manager_state'], **self.hyperparams
+            )
+
+        # --- Load Learning Mechanism States ---
+        self.kl_coeff = state_dict.get('kl_coeff', self.kl_coeff)
+        self.kl_error_integral = state_dict.get('kl_error_integral', 0)
+        self.kl_last_error = state_dict.get('kl_last_error', 0)
+        if 'contrastive_queue' in state_dict: self.contrastive_queue.copy_(state_dict['contrastive_queue'])
+        if 'contrastive_queue_ptr' in state_dict: self.contrastive_queue_ptr.copy_(state_dict['contrastive_queue_ptr'])
+
+        logger.info(f"Agent state loaded from version '{version}'. Resuming from step {self.steps_done}.")
 
     def set_active_skill(self, skill_id):
         """Sets the currently active skill/environment for the agent."""
