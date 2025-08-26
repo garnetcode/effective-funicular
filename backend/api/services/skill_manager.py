@@ -124,9 +124,15 @@ class SkillManager:
         kwargs.pop('dimensions', None)
         manager = cls(dimensions, **kwargs)
 
+        # Ensure the dimensions are passed down to the STAG frameworks.
+        # This is critical for deserializing older save files where individual
+        # STAG structures might not have the 'dimensions' key.
+        downstream_kwargs = kwargs.copy()
+        downstream_kwargs['dimensions'] = dimensions
+
         # Load skill graphs
         for skill_id, stag_data in structure.get('skill_graphs', {}).items():
-            manager.skill_graphs[skill_id] = STAG_Framework.from_serializable_structure(stag_data, **kwargs)
+            manager.skill_graphs[skill_id] = STAG_Framework.from_serializable_structure(stag_data, **downstream_kwargs)
 
         # Load option models
         for skill_id, options_data in structure.get('option_models', {}).items():
