@@ -261,11 +261,15 @@ class Command(BaseCommand):
                     train_stats = agent.train(cortex_id=cortex_id)
                     logger.info(f"[STAGE] Agent Training: {time.time() - start_time:.4f}s")
 
+                    # --- Post-Episode Statistics and Logging ---
+                    total_rewards.append(episode_reward)
+                    avg_reward = np.mean(total_rewards[-100:]) if total_rewards else 0
+
                     # --- Send data for visualization ---
                     agent_data = {
                         'episode': episode + 1,
                         'reward': episode_reward,
-                        'avg_reward': np.mean(total_rewards[-100:]),
+                        'avg_reward': avg_reward,
                         'epsilon': epsilon,
                         'energy': agent.energy,
                         'integrity': agent.integrity,
@@ -275,12 +279,9 @@ class Command(BaseCommand):
                     }
                     agent_data_signal.send(sender=self.__class__, data=agent_data)
 
-
                     if (episode + 1) % 1000 == 0:
                         agent.save_state(version_info=train_stats)
-                    total_rewards.append(episode_reward)
 
-                    avg_reward = np.mean(total_rewards[-100:])
                     pbar.set_postfix({
                         "Reward": f"{episode_reward:.2f}",
                         "Avg Rwd": f"{avg_reward:.2f}",
