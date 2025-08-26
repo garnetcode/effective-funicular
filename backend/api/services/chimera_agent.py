@@ -485,12 +485,14 @@ class ChimeraAgent:
             # The GNG's utility update is driven by the environmental reward
             terminal_node['gng'].process_input(h_normalized, reward=r_env)
 
-    def select_action(self, actual_action_dim, activation_path):
+    def select_action(self, actual_action_dim, activation_path, evaluation_mode=False):
         """
         Selects an action using the hierarchical planning and control system.
+        In evaluation_mode, it disables exploration (e.g., epsilon-greedy).
         """
         start_time = time.time()
-        self.steps_done += 1
+        if not evaluation_mode:
+            self.steps_done += 1
         self.h_step_counter += 1
         decision_maker = "policy" # Default
         log_prob = torch.tensor(0.0) # Default
@@ -504,7 +506,7 @@ class ChimeraAgent:
             if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
                 # --- Goal Curriculum Logic ---
                 curriculum_params = self.h_control_params.get('goal_curriculum', {})
-                if curriculum_params.get('enabled', False):
+                if curriculum_params.get('enabled', False) and not evaluation_mode:
                     # Calculate current max distance
                     schedule_steps = curriculum_params.get('schedule_steps', 1)
                     progress = min(1.0, self.train_steps / schedule_steps)
@@ -516,7 +518,7 @@ class ChimeraAgent:
                     distances = self.graph_planner.bfs_distances(self.last_stag_node_id, stag_graph)
                     possible_goals = [nid for nid, dist in distances.items() if 1 <= dist <= max_dist]
                 else:
-                    # Fallback to original logic if curriculum is disabled
+                    # Fallback to original logic if curriculum is disabled or in eval mode
                     possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
 
                 if possible_goals:
@@ -588,7 +590,7 @@ class ChimeraAgent:
                 action_dist = Categorical(logits=masked_logits)
 
                 epsilon = self._get_epsilon()
-                if np.random.rand() < epsilon:
+                if not evaluation_mode and np.random.rand() < epsilon:
                     action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
                     decision_maker = "random"
                 else:
@@ -599,7 +601,7 @@ class ChimeraAgent:
         action = action_tensor.item()
         self.last_action = action_tensor.reshape(1)
         action_time = time.time() - start_time
-        epsilon = self._get_epsilon() # Recalculate for logging
+        epsilon = self._get_epsilon() if not evaluation_mode else 0.0 # Recalculate for logging
 
         return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time
 
