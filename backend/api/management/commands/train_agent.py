@@ -180,6 +180,10 @@ class Command(BaseCommand):
         last_checkpoint_step = 0
         last_refresh_step = 0
         training_config = config.get('training', {})
+        dr_config = hyperparams.get('domain_randomization', {})
+        obs_noise_level = dr_config.get('obs_noise_level', 0.0)
+        action_delay_prob = dr_config.get('action_delay_prob', 0.0)
+        last_sent_action = 0
         checkpoint_interval = training_config.get('checkpoint_every_n_steps', 50000)
         save_on_best = training_config.get('save_on_best_return', True)
 
@@ -240,12 +244,25 @@ class Command(BaseCommand):
 
                     # --- Gameplay Loop for one episode ---
                     while not done:
-                        # 1. Perceive and Select Action
-                        _, _, _, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                        # 1. Domain Randomization (Observation)
+                        obs_to_perceive = current_obs
+                        if obs_noise_level > 0:
+                            noise = np.random.normal(0, obs_noise_level, size=current_obs.shape)
+                            obs_to_perceive = current_obs + noise
+
+                        # 2. Perceive and Select Action
+                        _, _, _, activation_path, novelty = agent.perceive_and_update_state(cortex_id, obs_to_perceive)
                         action, log_prob, stag_context, decision_maker, epsilon, action_time = agent.select_action(actual_action_dim, activation_path)
 
-                        # 2. Step the environment
-                        await connector.send_action(action)
+                        # 3. Domain Randomization (Action)
+                        if random.random() < action_delay_prob:
+                            action_to_send = last_sent_action
+                        else:
+                            action_to_send = action
+                        last_sent_action = action_to_send
+
+                        # 4. Step the environment
+                        await connector.send_action(action_to_send)
                         msg = await connector.receive_message()
 
                         if not msg:

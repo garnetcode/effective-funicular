@@ -765,9 +765,34 @@ class ChimeraAgent:
             negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
         contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
 
+        # --- Latent Consistency Loss ---
+        consistency_loss = 0
+        if self.hyperparams.get('latent_consistency_weight', 0.0) > 0:
+            # Create augmented observations (e.g., with noise)
+            obs_aug = obs_sequence + torch.randn_like(obs_sequence) * 0.1
+            if obs_sequence.dim() == 5:
+                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
+            else:
+                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
+            obs_aug_processed = obs_aug_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
+
+            # Get hidden states for augmented observations
+            h_t_aug, z_t_aug = torch.zeros_like(h_t), torch.zeros_like(z_t)
+            hidden_states_aug = []
+            for t in range(self.replay_buffer.sequence_length):
+                obs_t_aug = obs_aug_processed[:, t]
+                action_t = action_sequence[:, t]
+                h_t_aug, z_t_aug, _ = world_model.rssm(obs_t_aug, action_t, h_t_aug, z_t_aug)
+                hidden_states_aug.append(h_t_aug)
+            hidden_states_aug = torch.stack(hidden_states_aug, dim=1)
+
+            consistency_loss = F.mse_loss(hidden_states.detach(), hidden_states_aug)
+
         # --- Total Loss ---
         world_model_loss_per_item = (total_recon_loss + total_reward_loss + world_model_kl_loss) / self.replay_buffer.sequence_length
-        total_loss = (weights * world_model_loss_per_item).mean() + self.contrastive_loss_weight * contrastive_loss
+        total_loss = (weights * world_model_loss_per_item).mean() + \
+                     self.contrastive_loss_weight * contrastive_loss + \
+                     self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
 
         return total_loss, contrastive_loss, hidden_states, batch['reward']
 

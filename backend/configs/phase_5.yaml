@@ -1,0 +1,25 @@
+# Configuration for Phase 5: Fine-Tuning & Generalization
+
+imports:
+  - base.yaml
+
+training:
+  phase: 5
+  episodes_per_env: 100 # Adjust as needed for fine-tuning
+
+agent_config:
+  hyperparams:
+    # --- Phase 5 Specific Settings ---
+    # Domain Randomization
+    domain_randomization:
+      obs_noise_level: 0.01 # Add small noise to observations
+      action_delay_prob: 0.05 # 5% chance of repeating the previous action
+
+    # Latent Regularizer
+    latent_consistency_weight: 0.1
+
+    # Final policy fine-tuning
+    lambda_bc: 0.0 # Turn off distillation
+    epsilon_start: 0.05
+    epsilon_end: 0.01
+    epsilon_decay_steps: 100000
