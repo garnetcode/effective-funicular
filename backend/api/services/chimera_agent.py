@@ -228,9 +228,9 @@ class ChimeraAgent:
         # MoCo-style queue for contrastive learning
         self.contrastive_queue_size = self.hyperparams.get('contrastive_queue_size', 4096)
         if self.contrastive_queue_size > 0:
-            self.register_buffer("contrastive_queue", torch.randn(self.contrastive_queue_size, self.hidden_dim))
+            self.contrastive_queue = torch.randn(self.contrastive_queue_size, self.hidden_dim, device=self.device)
             self.contrastive_queue = F.normalize(self.contrastive_queue, dim=1)
-            self.register_buffer("contrastive_queue_ptr", torch.zeros(1, dtype=torch.long))
+            self.contrastive_queue_ptr = torch.zeros(1, dtype=torch.long, device=self.device)
 
         # KL Balancing
         self.use_kl_balancing = self.hyperparams.get('kl_balancing', True)
