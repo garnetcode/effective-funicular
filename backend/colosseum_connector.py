@@ -106,21 +106,27 @@ class ColosseumConnector:
             return None
 
     async def send_action(self, action):
-        """Sends an agent action to the server."""
-        if not self.websocket:
-            logger.error("Cannot send action, WebSocket is not connected.")
-            return
-        try:
-            action_message = {
-                "type": "agent.action",
-                "action": int(action),
-                "agent_tag": self.agent_tag
-            }
-            await self.websocket.send(json.dumps(action_message))
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Cannot send action, connection is closed.")
-        except Exception as e:
-            logger.error(f"Failed to send action: {e}", exc_info=True)
+        """Sends an agent action to the server, with reconnection logic."""
+        action_message_str = json.dumps({
+            "type": "agent.action",
+            "action": int(action),
+            "agent_tag": self.agent_tag
+        })
+
+        for attempt in range(2):  # Try once, then reconnect and try again
+            if self.websocket and not self.websocket.closed:
+                try:
+                    await self.websocket.send(action_message_str)
+                    return  # Success
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning(f"Connection closed on send_action (attempt {attempt + 1}).")
+
+            if attempt == 0:
+                if not await self.reconnect():
+                    logger.error("Cannot send action, reconnection failed.")
+                    break  # Break the loop if reconnect fails
+            else:
+                logger.error("Failed to send action after reconnecting.")
 
     async def reset_environment(self):
         """
@@ -163,43 +169,89 @@ class ColosseumConnector:
     async def receive_message(self):
         """
         Receives, parses, and returns a single message from the WebSocket,
-        ignoring broadcast messages of the agent's own actions.
+        with reconnection logic. It ignores broadcasts of the agent's own actions.
         """
-        if not self.websocket:
-            logger.warning("Cannot receive message, WebSocket is not connected.")
-            return None
+        while True:  # Loop to ignore self-action broadcasts and find a relevant message
+            message_data = await self._receive_one_message_with_retry()
+            if message_data is None:
+                return None  # Return None if receiving fails permanently
 
-        while True: # Loop until a relevant message is received
+            # Check if the message is a reflection of our own action
+            is_own_action = (
+                message_data.get("type") == "action.taken" and
+                message_data.get("agent_tag") == self.agent_tag
+            )
+
+            if is_own_action:
+                # This is a broadcast of our own action. We process it because it contains
+                # the environment's response (obs, reward, done). In other protocols,
+                # we might ignore this and wait for a direct response.
+                return message_data
+            else:
+                # If it's not our action, it's a relevant message.
+                return message_data
+
+    async def _receive_one_message_with_retry(self):
+        """Helper that attempts to receive a single message, with one retry after reconnecting."""
+        for attempt in range(2):  # Try once, then reconnect and try again
+            if self.websocket and not self.websocket.closed:
+                try:
+                    message = await self.websocket.recv()
+                    logger.debug(f"Raw message received: {message}")
+                    return json.loads(message)
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning(f"Connection closed on receive (attempt {attempt + 1}).")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON from message: {e}")
+                    return None  # Don't retry on malformed data
+                except Exception as e:
+                    logger.error(f"An unexpected error occurred in receive_message: {e}")
+                    break  # Break on other unexpected errors
+
+            if attempt == 0:
+                if not await self.reconnect():
+                    logger.error("Cannot receive message, reconnection failed.")
+                    break  # Break the loop if reconnect fails
+            else:
+                logger.error("Failed to receive message after reconnecting.")
+
+        return None
+
+    async def reconnect(self, max_retries=3, delay=1):
+        """
+        Attempts to close the existing connection and re-establish a new one.
+        Includes retries with exponential backoff.
+        """
+        logger.info("Connection lost. Attempting to reconnect...")
+        await self.close()  # Close the old connection gracefully
+
+        for i in range(max_retries):
+            logger.info(f"Reconnection attempt {i + 1}/{max_retries}...")
             try:
-                message = await self.websocket.recv()
-                logger.debug(f"Raw message received: {message}")
-                data = json.loads(message)
+                if await self.connect_websocket():
+                    logger.info("WebSocket reconnected. Attempting to re-join session...")
+                    # Re-joining is crucial for the server to recognize the new connection.
+                    if await self.join_session():
+                        logger.info("Successfully re-joined session.")
+                        return True
+                    else:
+                        logger.warning("Reconnected to WebSocket, but failed to re-join session.")
+                        # Close the new connection as it's not usable without joining
+                        await self.close()
 
-                # Check if the message is a reflection of our own action
-                is_own_action = (
-                    data.get("type") == "action.taken" and
-                    data.get("agent_tag") == self.agent_tag
-                )
+                # If connect_websocket or join_session fails, wait before retrying
+                sleep_time = delay * (2 ** i)
+                logger.info(f"Reconnection attempt failed. Retrying in {sleep_time} seconds...")
+                await asyncio.sleep(sleep_time)
 
-                if is_own_action:
-                    # In a more complex scenario, the server might send a direct confirmation
-                    # in addition to a broadcast. For now, we assume the broadcast is the
-                    # only response, so we must process it. If the protocol changes,
-                    # this is where we would 'continue' to ignore it.
-                    # logger.info(f"Received own action broadcast: {data}")
-                    pass # For now, we still need this message for obs, reward, done.
-
-                return data # Return the first message received
-
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("Connection closed while waiting for message.")
-                return None
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON from message: {e}")
-                return None
             except Exception as e:
-                logger.error(f"An unexpected error occurred in receive_message: {e}")
-                return None
+                logger.error(f"An unexpected error occurred during reconnection attempt {i + 1}: {e}", exc_info=True)
+                sleep_time = delay * (2 ** i)
+                logger.info(f"Retrying in {sleep_time} seconds...")
+                await asyncio.sleep(sleep_time)
+
+        logger.error("Failed to reconnect after multiple attempts.")
+        return False
 
     async def close(self):
         """Closes the WebSocket connection."""
