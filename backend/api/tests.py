@@ -59,7 +59,9 @@ class GNG_EngineTests(TestCase):
         self.gng.n_iter_before_neuron_added = 1
 
         # Find nodes with highest error to predict insertion point
-        q_id = max(self.gng.nodes, key=lambda nid: self.gng.nodes[nid]['error'])
+        # AGENT_FIX: The GNG now uses 'error_fast' and 'error_slow'. The test
+        # should reflect this change. Using 'error_slow' as it's used for insertion logic.
+        q_id = max(self.gng.nodes, key=lambda nid: self.gng.nodes[nid]['error_slow'])
         q_neighbors = self.gng._get_neighbors(q_id)
         # Manually create a neighbor if one doesn't exist for the test
         if not q_neighbors:
@@ -67,7 +69,7 @@ class GNG_EngineTests(TestCase):
             self.gng.edges.add(tuple(sorted((q_id, other_node_id))) + (0,))
             q_neighbors = self.gng._get_neighbors(q_id)
 
-        f_id = max(q_neighbors, key=lambda nid: self.gng.nodes[nid]['error'])
+        f_id = max(q_neighbors, key=lambda nid: self.gng.nodes[nid]['error_slow'])
 
         # Set known utilities for parents
         self.gng.nodes[q_id]['utility'] = 10.0
@@ -248,7 +250,8 @@ class ChimeraAgentTests(TestCase):
     #     # on a single step, as individual batches can have noisy gradients.
     #     self.assertLess(final_loss, initial_loss)
 
-    def test_world_model_weight_decay(self):
+    @patch('api.services.state_history_manager.StateHistoryManager.save_snapshot')
+    def test_world_model_weight_decay(self, mock_save_snapshot):
         """Tests that the weight_decay hyperparameter is correctly passed to the optimizer."""
         decay_value = 0.01
 

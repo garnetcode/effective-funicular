@@ -50,14 +50,9 @@ class StagContextProcessor(nn.Module):
         super().__init__()
         self.processor = nn.Linear(input_dim, output_dim)
 
-    def forward(self, activation_path_weights):
-        # activation_path_weights is a list of weight vectors.
-        # We concatenate them to form a single input vector.
-        if not activation_path_weights:
-            return torch.zeros(1, self.processor.out_features) # Return a zero vector if path is empty
-
-        concatenated_weights = torch.cat(activation_path_weights, dim=0)
-        return self.processor(concatenated_weights.unsqueeze(0))
+    def forward(self, flat_path_tensor):
+        # The input is now a pre-processed tensor of shape (N, input_dim).
+        return self.processor(flat_path_tensor)
 
 
 def _initialize_cortexes(configs, output_dim, device):
@@ -576,8 +571,8 @@ class ChimeraAgent:
             # Fallback to learned policy
             with torch.no_grad():
                 h_normalized = self.h_norm(self.hidden_state)
-                # STAG context is not fully integrated into this hierarchical loop yet
-                stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device)
+                # AGENT_FIX: Properly process the activation path to get the STAG context vector.
+                stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
 
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
@@ -604,6 +599,41 @@ class ChimeraAgent:
         epsilon = self._get_epsilon() if not evaluation_mode else 0.0 # Recalculate for logging
 
         return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time
+
+    def _prepare_stag_context(self, activation_path):
+        """
+        Prepares the STAG context vector from an activation path.
+        This involves fetching node weights, padding/truncating, and processing.
+        """
+        if not self.use_stag_in_ac_loss or not activation_path:
+            return torch.zeros(1, self.stag_context_dim, device=self.device)
+
+        stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+        if not stag:
+            return torch.zeros(1, self.stag_context_dim, device=self.device)
+
+        path_tensors = []
+        for step in activation_path:
+            level = step.get('level')
+            node_id = step.get('node_id')
+            if level is not None and node_id is not None and \
+               level in stag.level_map and node_id in stag.level_map[level]['gng'].nodes:
+                weight = stag.level_map[level]['gng'].nodes[node_id]['weight']
+                path_tensors.append(torch.from_numpy(weight).float().to(self.device))
+
+        if not path_tensors:
+            return torch.zeros(1, self.stag_context_dim, device=self.device)
+
+        # Pad or truncate the list of tensors to the required path length
+        padded_path_tensors = path_tensors[:self.max_stag_path_length]
+        while len(padded_path_tensors) < self.max_stag_path_length:
+            padded_path_tensors.append(torch.zeros(self.hidden_dim, device=self.device))
+
+        # Concatenate into a single flat tensor and add a batch dimension
+        flat_path_tensor = torch.cat(padded_path_tensors, dim=0).unsqueeze(0)
+
+        # Process with the context processor
+        return self.stag_context_processor(flat_path_tensor)
 
     def _get_epsilon(self):
         epsilon_start = self.hyperparams.get('epsilon_start', 0.9)
