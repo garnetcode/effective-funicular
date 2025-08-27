@@ -47,8 +47,8 @@ agent_config:
     use_internal_reward: false
     use_stag_in_ac_loss: true # If true, the STAG context vector is used in the actor-critic loss.
     # Phased Training for STAG
-    world_model_pretrain_steps: 5000 # Number of steps to train WM before STAG activates.
-    stag_update_frequency: 10 # Update STAG every N steps.
+    world_model_pretrain_steps: 1000 # Reduced to engage STAG earlier.
+    stag_update_frequency: 50 # Increased to allow STAG to stabilize.
     # STAG Graph Growth Management
     gng_pruning_frequency: 1000 # Prune low-utility nodes every N training steps.
     gng_min_utility_threshold: 0.1 # Prune nodes with utility below this threshold.

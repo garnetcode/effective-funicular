@@ -24,6 +24,8 @@ class WorldModel(nn.Module):
         self.reward_model = nn.Sequential(
             nn.Linear(latent_dim + hidden_dim + goal_dim, 400),
             nn.ReLU(),
+            nn.Linear(400, 400),
+            nn.ReLU(),
             nn.Linear(400, 1)
         )
 
