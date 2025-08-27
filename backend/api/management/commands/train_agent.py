@@ -28,7 +28,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--config", type=str, default="configs/base.yaml", help="Path to the main configuration file.")
-        parser.add_argument("--env-curriculum", type=str, default="CartPole-v1", help="A single env name or a comma-separated list of env names for curriculum learning.")
+        parser.add_argument("--env-curriculum", type=str, default="MountainCar-v0", help="A single env name or a comma-separated list of env names for curriculum learning.")
         parser.add_argument("--total-steps", type=int, default=50000, help="Total number of steps to train for across all environments.")
         parser.add_argument("--steps-per-env", type=int, default=50000, help="Number of steps to train on each environment in the curriculum.")
 
@@ -36,7 +36,7 @@ class Command(BaseCommand):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
         # --- Load Configuration ---
-        config_path = os.path.join('backend', options['config'])
+        config_path = os.path.join('', options['config'])
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
