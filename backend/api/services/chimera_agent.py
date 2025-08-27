@@ -902,10 +902,11 @@ class ChimeraAgent:
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
 
-        # --- Calculate scheduled parameters ---
-        progress = min(1.0, self.train_steps / self.imagination_horizon_schedule_steps)
-        horizon = int(self.imagination_horizon_start + progress * (self.imagination_horizon_end - self.imagination_horizon_start))
+        # AGENT_FIX: The policy's imagination horizon should match the planner's
+        # horizon for the behavioral cloning loss to be calculated correctly.
+        horizon = self.planner.plan_horizon
 
+        # --- Calculate scheduled parameters ---
         progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
 
@@ -984,9 +985,23 @@ class ChimeraAgent:
         critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
         # 3. Behavioral Cloning (BC) Loss
-        # The teacher plan has shape (horizon, batch, action_dim)
-        # We need the policy's logits for the states it visited
-        policy_logits = self.action_head(torch.cat([norm_imagined_h[:-1], torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)], dim=-1), goal_sequence.unsqueeze(0).expand(horizon, -1, -1)).logits
+        # The teacher plan has shape (horizon, batch, action_dim).
+        # We need the policy's logits for the states it visited.
+        # We process the whole trajectory at once by reshaping.
+        imagined_states = norm_imagined_h[:-1]
+        stag_context_bc = torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)
+        goal_bc = goal_sequence.unsqueeze(0).expand(horizon, -1, -1)
+
+        # Flatten the horizon and batch dimensions to treat the sequence as a single batch
+        imagined_states_flat = imagined_states.reshape(-1, self.hidden_dim)
+        stag_context_bc_flat = stag_context_bc.reshape(-1, self.stag_context_dim)
+        goal_bc_flat = goal_bc.reshape(-1, self.goal_dim)
+
+        combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat], dim=-1)
+        policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
+
+        # Reshape the output logits back to (horizon, batch, action_dim)
+        policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
         bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
         # 4. Entropy Bonus
