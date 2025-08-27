@@ -118,9 +118,10 @@ class Command(BaseCommand):
             return
 
         try:
+            # Initialize current_obs from the join_response, which is more reliable
+            current_obs = np.array(join_response.get("observation"))
             for i in range(num_episodes):
                 logger.info(f"--- Starting Episode {i+1}/{num_episodes} ---")
-                current_obs = np.array(session_data.get("observation"))
                 episode_reward = 0
                 done = False
 
