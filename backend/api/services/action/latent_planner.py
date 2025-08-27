@@ -39,12 +39,12 @@ class LatentPlanner(nn.Module):
                     for t in range(self.plan_horizon):
                         action_t_samples = actions[t]
 
-                        h_sim_flat = h_sim.view(-1, h_sim.size(-1))
-                        z_sim_flat = z_sim.view(-1, z_sim.size(-1))
+                        h_sim_flat = h_sim.reshape(-1, h_sim.size(-1))
+                        z_sim_flat = z_sim.reshape(-1, z_sim.size(-1))
 
                         # Convert continuous actions to discrete for the transition model
                         action_t_discrete = torch.argmax(action_t_samples, dim=-1)
-                        action_t_flat = action_t_discrete.view(-1, 1)
+                        action_t_flat = action_t_discrete.reshape(-1, 1)
 
                         h_sim_flat, prior_mean, prior_std = world_model.rssm.transition_model(z_sim_flat, action_t_flat, h_sim_flat)
                         z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
@@ -55,15 +55,17 @@ class LatentPlanner(nn.Module):
                             reward_pred = -dist_to_subgoal
                         elif current_goal is not None:
                             # If an observation-space goal is provided, use the reward model
-                            goal_expanded = torch.from_numpy(current_goal).float().to(device).unsqueeze(0).expand(h_sim_flat.size(0), -1)
+                            goal_tensor = torch.from_numpy(current_goal).float().to(device)
+                            goal_expanded = goal_tensor.unsqueeze(1).expand(-1, self.num_samples, -1)
+                            goal_expanded = goal_expanded.reshape(-1, goal_tensor.size(-1))
                             reward_pred = world_model.reward_model(torch.cat([z_sim_flat, h_sim_flat, goal_expanded], dim=-1)).squeeze(-1)
                         else:
                             # Default to zero reward if no goal is provided
                             reward_pred = torch.zeros(h_sim_flat.size(0), device=device)
 
-                        h_sim = h_sim_flat.view(batch_size, self.num_samples, -1)
-                        z_sim = z_sim_flat.view(batch_size, self.num_samples, -1)
-                        all_model_returns[i] += reward_pred.view(batch_size, self.num_samples)
+                        h_sim = h_sim_flat.reshape(batch_size, self.num_samples, -1)
+                        z_sim = z_sim_flat.reshape(batch_size, self.num_samples, -1)
+                        all_model_returns[i] += reward_pred.reshape(batch_size, self.num_samples)
 
             # Calculate mean reward and uncertainty penalty
             mean_returns = all_model_returns.mean(dim=0)

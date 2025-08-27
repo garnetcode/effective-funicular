@@ -108,53 +108,44 @@ def main(args):
             _, cortex_id = create_cortex_configs_from_observation_space(env.observation_space)
 
             steps_in_current_env = 0
+            # AGENT_FIX: The wake-sleep cycle is inefficient. This has been refactored
+            # into a more standard online learning loop.
             while steps_in_current_env < args.steps_per_env and total_steps < args.total_steps:
-                # --- Wake Phase: Collect Experience ---
-                print(f"\n--- Wake Phase: Collecting experience ---")
-                steps_collected = 0
-                while steps_collected < 100 and steps_in_current_env < args.steps_per_env:
-                    episode_num += 1
-                    print(f"--- Episode {episode_num} ---")
-                    episode_reward = 0
-                    state, _ = env.reset()
-                    agent.hidden_state, agent.latent_state = agent.world_models[0].get_initial_state()
-                    agent.last_action = torch.tensor([0], device=agent.device)
-                    terminated, truncated = False, False
+                episode_num += 1
+                print(f"--- Episode {episode_num} ---")
+                episode_reward = 0
+                state, _ = env.reset()
+                agent.hidden_state, agent.latent_state = agent.world_models[0].get_initial_state()
+                agent.last_action = torch.tensor([0], device=agent.device)
+                terminated, truncated = False, False
 
-                    while not (terminated or truncated):
-                        h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
-                        action, log_prob, _, _, _ = agent.select_action(actual_action_dim, activation_path)
-                        next_state, env_reward, terminated, truncated, _ = env.step(action)
-                        agent.update_stag(h_normalized, env_reward)
-                        internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
-                        total_reward = env_reward + internal_reward
-                        agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, total_reward, next_state, terminated)
-                        state = next_state
-                        episode_reward += env_reward
-                        steps_collected += 1
-                        total_steps += 1
-                        steps_in_current_env += 1
+                while not (terminated or truncated):
+                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
+                    action, log_prob, _, _, _, _ = agent.select_action(actual_action_dim, activation_path)
+                    next_state, env_reward, terminated, truncated, _ = env.step(action)
+                    agent.update_stag(h_normalized, env_reward)
+                    internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
+                    total_reward = env_reward + internal_reward
+                    agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, total_reward, next_state, terminated)
+                    state = next_state
+                    episode_reward += env_reward
+                    total_steps += 1
+                    steps_in_current_env += 1
 
-                        if terminated or truncated:
-                            print(f"Episode finished. Reward: {episode_reward:.2f}, Total Steps: {total_steps}")
-                            break
-
-                # --- Sleep Phase: Train on Collected Data ---
-                if len(agent.replay_buffer) > args.batch_size:
-                    print(f"\n--- Sleep Phase: Training ---")
-                    for _ in range(10):
-                        # The train method now encapsulates both WM and AC training
+                    # --- Online Training ---
+                    policy_train_frequency = hyperparams.get('policy_train_frequency', 10)
+                    if total_steps > hyperparams.get('burnin_steps', 1000) and \
+                       total_steps % policy_train_frequency == 0 and \
+                       len(agent.replay_buffer) > args.batch_size:
                         stats = agent.train(cortex_id)
                         if stats:
-                            wm_loss = stats.get('wm_loss', -1)
+                            wm_loss = stats.get('wm_loss_total', -1)
                             ac_loss = stats.get('ac_loss', -1)
-                            horizon = stats.get('horizon', -1)
-                            entropy_coef = stats.get('entropy_coef', -1)
-                            contrastive_loss = stats.get('contrastive_loss', -1)
-                            reward_weights_norm = torch.norm(agent.reward_weights).item()
-                            print(f"  Train Step {agent.train_steps} | WM Loss: {wm_loss:.4f} | AC Loss: {ac_loss:.4f} | Horizon: {horizon} | Entropy Coef: {entropy_coef:.4f} | Contrastive Loss: {contrastive_loss:.4f} | RW Norm: {reward_weights_norm:.4f}")
-                else:
-                    print("Not enough data to enter sleep phase, continuing collection.")
+                            print(f"  Train Step {agent.train_steps} | WM Loss: {wm_loss:.4f} | AC Loss: {ac_loss:.4f}")
+
+                    if terminated or truncated:
+                        print(f"Episode finished. Reward: {episode_reward:.2f}, Total Steps: {total_steps}")
+                        break
 
             env.close()
             print(f"--- Finished Curriculum Stage {i+1}/{len(env_names)}: {env_name} ---")
