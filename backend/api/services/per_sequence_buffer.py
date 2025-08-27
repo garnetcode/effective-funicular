@@ -47,9 +47,10 @@ class SegmentTree:
         return self.tree[0]
 
 class PERSequenceBuffer:
-    def __init__(self, capacity, sequence_length=50, alpha=0.6, beta_start=0.4, beta_frames=100000, her_replay_strategy='future', her_replay_k=4):
+    def __init__(self, capacity, sequence_length=50, alpha=0.6, beta_start=0.4, beta_frames=100000, her_replay_strategy='future', her_replay_k=4, goal_dim=512):
         self.capacity = capacity
         self.sequence_length = sequence_length
+        self.goal_dim = goal_dim
         self.alpha = alpha
         self.beta_start = beta_start
         self.beta_frames = beta_frames
@@ -113,13 +114,23 @@ class PERSequenceBuffer:
             else: # 'final'
                 new_goal = sequence[-1].next_obs
 
+            # AGENT_FIX: Pad the goal if its dimension does not match the required goal_dim.
+            # This handles cases where HER uses environment observations as goals.
+            goal_for_reward = new_goal
+            padded_goal = new_goal
+            if new_goal.shape[0] < self.goal_dim:
+                padded_goal = np.zeros(self.goal_dim)
+                padded_goal[:new_goal.shape[0]] = new_goal
+
+
             # Relabel the sequence with the new goal and recalculate rewards
             new_sequence = []
             for exp in sequence:
                 # The new reward is the negative distance to the new goal
-                # We assume the goal is in the observation space for simplicity
-                new_reward = -np.linalg.norm(exp.obs - new_goal)
-                new_exp = exp._replace(goal=new_goal, reward=new_reward)
+                # We use the un-padded goal for reward calculation.
+                new_reward = -np.linalg.norm(exp.obs - goal_for_reward)
+                # We store the padded goal in the experience.
+                new_exp = exp._replace(goal=padded_goal, reward=new_reward)
                 new_sequence.append(new_exp)
             batch[i] = new_sequence
 
