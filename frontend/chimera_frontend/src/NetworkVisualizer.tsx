@@ -3,9 +3,13 @@ import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Bounds, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { forceSimulation, forceLink, forceManyBody, forceCenter, Simulation, SimulationNodeDatum, SimulationLinkDatum } from 'd3-force';
-import { GraphData } from './api';
 
-// --- Type Definitions for d3-force ---
+// --- Type Definitions ---
+
+export interface GraphData {
+  nodes: any[];
+  edges: any[];
+}
 
 interface NodeDatum extends SimulationNodeDatum {
   id: number;
