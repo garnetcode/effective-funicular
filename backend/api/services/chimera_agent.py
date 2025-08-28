@@ -108,9 +108,8 @@ def sanitize_state_dict(state):
     return state
 
 class ChimeraAgent:
-    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=128, hidden_dim=512, cortex_configs=None, load_from_storage=True, enable_saving=True, hyperparams=None, history_config=None, **kwargs):
+    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=128, hidden_dim=512, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
         self.agent_id = agent_id
-        self.enable_saving = enable_saving
         self.embedding_dim = embedding_dim
         self.max_action_dim = max_action_dim
         self.latent_dim = latent_dim
@@ -280,8 +279,7 @@ class ChimeraAgent:
         if load_from_storage and self.history_manager._read_history():
             self.load_state()
         else:
-            if self.enable_saving:
-                self.save_state(version_info={"message": "Initial state."})
+            self.save_state(version_info={"message": "Initial state."})
 
         buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
         sequence_length = self.hyperparams.get('sequence_length', 50)
@@ -292,8 +290,7 @@ class ChimeraAgent:
             beta_start=self.hyperparams.get('per_beta_start', 0.4),
             beta_frames=self.hyperparams.get('per_beta_frames', 100000),
             her_replay_strategy=self.her_replay_strategy,
-            her_replay_k=self.her_replay_k,
-            goal_dim=self.goal_dim
+            her_replay_k=self.her_replay_k
         )
 
     def save_state(self, version_info={}):

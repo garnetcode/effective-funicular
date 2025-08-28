@@ -131,8 +131,17 @@ class SkillManager:
         downstream_kwargs['dimensions'] = dimensions
 
         # Load skill graphs
+        sf_dimension = kwargs.get('sf_dimension', 64) # Default from ChimeraAgent
         for skill_id, stag_data in structure.get('skill_graphs', {}).items():
-            manager.skill_graphs[skill_id] = STAG_Framework.from_serializable_structure(stag_data, **downstream_kwargs)
+            stag = STAG_Framework.from_serializable_structure(stag_data, **downstream_kwargs)
+            # AGENT_FIX: Add backward compatibility for 'psi' key in GNG nodes
+            if max(stag.level_map.keys()) in stag.level_map:
+                terminal_gng = stag.level_map[max(stag.level_map.keys())]
+                for node_id, node_data in terminal_gng['gng'].nodes.items():
+                    if 'psi' not in node_data:
+                        node_data['psi'] = np.zeros(sf_dimension)
+            manager.skill_graphs[skill_id] = stag
+
 
         # Load option models
         for skill_id, options_data in structure.get('option_models', {}).items():
