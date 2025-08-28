@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from './api';
-import { Agent, Environment, GraphData } from './api';
+import { Environment, GraphData } from './api';
 import NetworkVisualizer from './NetworkVisualizer';
 import PerformanceChart from './PerformanceChart';
 import './App.css';
@@ -14,24 +14,14 @@ interface TrainingMetric {
 }
 
 function App() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const AGENT_ID = "Kymera-local-train"; // Hardcoded agent ID
+
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [selectedEnv, setSelectedEnv] = useState<string>('');
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [textInput, setTextInput] = useState<string>('');
   const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([]);
   const [statusMessage, setStatusMessage] = useState('Welcome to Project Chimera!');
-
-  const fetchAgents = useCallback(async () => {
-    try {
-      const response = await api.getAgents();
-      setAgents(response.data);
-    } catch (error) {
-      console.error("Failed to fetch agents:", error);
-      setStatusMessage('Error: Could not connect to backend.');
-    }
-  }, []);
 
   const fetchEnvironments = useCallback(async () => {
     try {
@@ -47,87 +37,45 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fetchAgents();
+    // Fetch initial data on component mount
     fetchEnvironments();
-  }, [fetchAgents, fetchEnvironments]);
 
-  useEffect(() => {
-    if (selectedAgent) {
-      setStatusMessage(`Fetching structure for ${selectedAgent}...`);
-      api.getAgentStructure(selectedAgent)
-        .then(response => {
-          setGraphData(response.data);
-          setStatusMessage(`Visualizing agent: ${selectedAgent}`);
-        })
-        .catch(error => {
-          console.error("Failed to fetch graph structure:", error);
-          setStatusMessage('Failed to fetch graph structure.');
-        });
-    } else {
-      setGraphData(null);
-    }
-  }, [selectedAgent]);
-
-  const handleCreateAgent = async () => {
-    try {
-      setStatusMessage('Creating new agent...');
-      // CORRECTED: Request a TextCortex for handling raw text input.
-      const config = {
-        dimensions: 32,
-        cortex_configs: {
-            "text_input": { "type": "TextCortex" }
-        }
-      };
-      const response = await api.createAgent(config);
-      setStatusMessage(`New agent created: ${response.data.id}`);
-      await fetchAgents();
-      setSelectedAgent(response.data.id);
-    } catch (error) {
-      console.error("Failed to create agent:", error);
-      setStatusMessage('Failed to create agent.');
-    }
-  };
+    setStatusMessage(`Fetching structure for ${AGENT_ID}...`);
+    api.getAgentStructure(AGENT_ID)
+      .then(response => {
+        setGraphData(response.data);
+        setStatusMessage(`Visualizing agent: ${AGENT_ID}`);
+      })
+      .catch(error => {
+        console.error("Failed to fetch graph structure:", error);
+        setStatusMessage('Failed to fetch graph structure.');
+      });
+  }, [fetchEnvironments, AGENT_ID]); // AGENT_ID is a constant, but including it makes dependencies explicit
 
   const handleLearn = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!selectedAgent || !textInput) return;
+    if (!textInput) return;
     try {
       setStatusMessage(`Agent is learning pattern: \"${textInput}\"...`);
       // CORRECTED: Use the updated learnWithAgent function.
-      await api.learnWithAgent(selectedAgent, textInput);
+      await api.learnWithAgent(AGENT_ID, textInput);
       setTextInput('');
       setStatusMessage('Learning complete. Refreshing structure...');
 
-      const response = await api.getAgentStructure(selectedAgent);
+      const response = await api.getAgentStructure(AGENT_ID);
       setGraphData(response.data);
-      setStatusMessage(`Visualizing agent: ${selectedAgent}`);
+      setStatusMessage(`Visualizing agent: ${AGENT_ID}`);
     } catch (error) {
       console.error("Failed to learn pattern:", error);
       setStatusMessage('Failed to learn pattern.');
     }
   };
 
-  const handleDeleteAgent = async () => {
-    if (!selectedAgent) return;
-    if (window.confirm(`Are you sure you want to delete agent ${selectedAgent}?`)) {
-      try {
-        setStatusMessage(`Deleting agent ${selectedAgent}...`);
-        await api.deleteAgent(selectedAgent);
-        setStatusMessage(`Agent ${selectedAgent} deleted.`);
-        setSelectedAgent(null);
-        await fetchAgents();
-      } catch (error) {
-        console.error("Failed to delete agent:", error);
-        setStatusMessage('Failed to delete agent.');
-      }
-    }
-  };
-
   const handleStartTraining = async () => {
-    if (!selectedAgent || !selectedEnv) return;
+    if (!selectedEnv) return;
     try {
-      setStatusMessage(`Starting training for ${selectedAgent} in ${selectedEnv}...`);
-      await api.startTraining(selectedAgent, selectedEnv);
+      setStatusMessage(`Starting training for ${AGENT_ID} in ${selectedEnv}...`);
+      await api.startTraining(AGENT_ID, selectedEnv);
       setStatusMessage(`Training started. Waiting for metrics...`);
       setTrainingMetrics([]); // Clear previous metrics
     } catch (error) {
@@ -181,26 +129,9 @@ function App() {
       </header>
       <div className="main-content">
         <div className="left-panel">
-          <div className="control-group">
-            <h4>Agent Management</h4>
-            <div className="network-selector">
-              <select onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSelectedAgent(e.target.value)} value={selectedAgent || ''}>
-                <option value="" disabled>Select an Agent</option>
-                {agents.map(agent => (
-                  <option key={agent.id} value={agent.id}>{agent.id}</option>
-                ))}
-              </select>
-              <button onClick={handleCreateAgent}>Create New Agent</button>
-              <button onClick={handleDeleteAgent} disabled={!selectedAgent} className="delete-button">
-                Delete Selected
-              </button>
-            </div>
-          </div>
-
-          {selectedAgent && (
             <div className="actions">
               <div className="control-group">
-                <h4>Cognitive Learning</h4>
+                <h4>Cognitive Learning (Agent: {AGENT_ID})</h4>
                 <form onSubmit={handleLearn}>
                   <input
                     type="text"
@@ -223,7 +154,6 @@ function App() {
                 </button>
               </div>
             </div>
-          )}
         </div>
 
         <main className="visualizer-container">
