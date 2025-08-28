@@ -241,3 +241,18 @@ class STAG_Framework:
 
         terminal_gng = self.level_map[max(self.level_map.keys())]
         return terminal_gng.find_k_nearest_neighbors(vector, k)
+
+    def generate_prediction(self, current_node_id):
+        """
+        Generates a top-down prediction from the STAG's terminal GNG.
+        """
+        if not self.level_map:
+            return None
+
+        terminal_gng = self.level_map[max(self.level_map.keys())]
+        if current_node_id not in terminal_gng.nodes:
+            return None # Current node not found
+
+        predicted_node = terminal_gng.predict(current_node_id)
+        # Return the latent representation (weight vector) of the predicted node
+        return predicted_node['weight']
