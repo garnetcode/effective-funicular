@@ -52,10 +52,19 @@ function App() {
           setStatusMessage(`Graph structure updated for ${AGENT_ID}.`);
           break;
         case 'training_metrics':
+          // Ensure all expected keys have a default value to prevent chart errors
+          // Ensure all expected keys have a default value to prevent chart errors
+          const newMetric: TrainingMetric = {
+            episode: payload.episode ?? (trainingMetrics[trainingMetrics.length - 1]?.episode ?? 0),
+            reward: payload.reward ?? 0,
+            avg_reward: payload.avg_reward ?? 0,
+            epsilon: payload.epsilon ?? 0,
+            policy_loss: payload.policy_loss ?? 0, // Default to 0 if undefined
+            total_steps: payload.total_steps ?? 0,
+          };
           setTrainingMetrics(prevMetrics => {
-            const newMetrics = [...prevMetrics, payload];
-            // Keep the last 100 metrics for a smoother chart
-            return newMetrics.slice(-100);
+            const newMetrics = [...prevMetrics, newMetric];
+            return newMetrics.slice(-100); // Keep the last 100 metrics
           });
           break;
         default:
