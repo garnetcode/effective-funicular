@@ -499,6 +499,7 @@ class ChimeraAgent:
         """
         Selects an action using the hierarchical planning and control system.
         In evaluation_mode, it disables exploration (e.g., epsilon-greedy).
+        Also returns the probability distribution over actions.
         """
         start_time = time.time()
         if not evaluation_mode:
@@ -507,6 +508,7 @@ class ChimeraAgent:
         decision_maker = "policy" # Default
         log_prob = torch.tensor(0.0) # Default
         stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device) # Default
+        action_probs = torch.zeros(self.max_action_dim, device=self.device) # Default probabilities
 
         # --- Hierarchical Planning Logic ---
         # 1. High-Level Planner (GraphPlanner)
@@ -577,16 +579,16 @@ class ChimeraAgent:
         # 3. Low-Level Execution (Plan Following or Policy)
         if self.action_plan is not None and len(self.action_plan) > 0:
             action_continuous = self.action_plan[0]
-            # The planner might return a sequence of means, not one-hot vectors.
-            # We take the argmax to get the discrete action.
             action_tensor = torch.argmax(action_continuous, dim=-1)
             self.action_plan = self.action_plan[1:]
             decision_maker = "planner"
+            with torch.no_grad():
+                probs = F.softmax(action_continuous, dim=-1).squeeze()
+                action_probs[:probs.shape[0]] = probs
         else:
             # Fallback to learned policy
             with torch.no_grad():
                 h_normalized = self.h_norm(self.hidden_state)
-                # AGENT_FIX: Properly process the activation path to get the STAG context vector.
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
 
@@ -599,10 +601,16 @@ class ChimeraAgent:
                 masked_logits = action_dist.logits + mask
                 action_dist = Categorical(logits=masked_logits)
 
+                # Store probabilities from the policy
+                action_probs[:actual_action_dim] = action_dist.probs.squeeze()
+
                 epsilon = self._get_epsilon()
                 if not evaluation_mode and np.random.rand() < epsilon:
                     action_tensor = torch.tensor([np.random.randint(0, actual_action_dim)], device=self.device)
                     decision_maker = "random"
+                    # For random action, show a uniform distribution
+                    action_probs.fill_(0.0)
+                    action_probs[:actual_action_dim] = 1.0 / actual_action_dim
                 else:
                     action_tensor = action_dist.sample()
                     decision_maker = "policy"
@@ -613,7 +621,7 @@ class ChimeraAgent:
         action_time = time.time() - start_time
         epsilon = self._get_epsilon() if not evaluation_mode else 0.0 # Recalculate for logging
 
-        return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time
+        return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time, action_probs.cpu().numpy()
 
     def _prepare_stag_context(self, activation_path):
         """

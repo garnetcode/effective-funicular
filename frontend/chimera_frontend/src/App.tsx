@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import NetworkVisualizer, { GraphData } from './NetworkVisualizer';
 import PerformanceChart from './PerformanceChart';
+import ActionVisualizer from './ActionVisualizer';
 import './App.css';
 
 // --- Type Definitions ---
@@ -26,6 +27,7 @@ function App() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([]);
   const [statusMessage, setStatusMessage] = useState('Connecting to backend...');
+  const [actionProbs, setActionProbs] = useState<number[]>([]);
 
   useEffect(() => {
     const ws_scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -42,6 +44,7 @@ function App() {
       const message = JSON.parse(event.data);
       const { type, payload } = message;
 
+
       switch (type) {
         case 'environments_update':
           setEnvironments(payload);
@@ -52,21 +55,22 @@ function App() {
           setStatusMessage(`Graph structure updated for ${AGENT_ID}.`);
           break;
         case 'training_metrics':
-          // Ensure all expected keys have a default value to prevent chart errors
-          // Ensure all expected keys have a default value to prevent chart errors
           const newMetric: TrainingMetric = {
             episode: payload.episode ?? (trainingMetrics[trainingMetrics.length - 1]?.episode ?? 0),
             reward: payload.reward ?? 0,
             avg_reward: payload.avg_reward ?? 0,
             epsilon: payload.epsilon ?? 0,
-            policy_loss: payload.policy_loss ?? 0, // Default to 0 if undefined
+            policy_loss: payload.policy_loss ?? 0,
             total_steps: payload.total_steps ?? 0,
           };
           setTrainingMetrics(prevMetrics => {
             const newMetrics = [...prevMetrics, newMetric];
-            return newMetrics.slice(-100); // Keep the last 100 metrics
+            return newMetrics.slice(-100);
           });
           break;
+        case 'action_update':
+            setActionProbs(payload.probabilities);
+            break;
         default:
           console.warn("Received unknown message type:", type);
       }
@@ -82,45 +86,34 @@ function App() {
       setStatusMessage("WebSocket connection error.");
     };
 
-    // Cleanup on component unmount
     return () => {
       socket.close();
     };
-  }, []); // Empty dependency array ensures this runs only once
+  }, []);
 
   return (
     <div className="App">
       <header className="App-header">
         <h1>Project Chimera: Real-time Monitor</h1>
-      </header>
-      <div className="main-content">
-        <div className="left-panel">
-          <div className="control-group">
-            <h4>Agent</h4>
-            <p>{AGENT_ID}</p>
-          </div>
-          <div className="control-group">
-            <h4>Environments</h4>
-            {environments.length > 0 ? (
-              <ul>
-                {environments.map(env => <li key={env.id}>{env.name}</li>)}
-              </ul>
-            ) : (
-              <p>Waiting for environment data...</p>
-            )}
-          </div>
+        <div className="status-bar">
+          {statusMessage}
         </div>
-
-        <main className="visualizer-container">
-          <NetworkVisualizer graphData={graphData} />
-          <div className="status-bar">
-            {statusMessage}
+      </header>
+      <div className="main-content-grid">
+        <div className="top-row">
+          <div className="network-visualizer-container">
+            <h3>STAG Graph</h3>
+            <NetworkVisualizer graphData={graphData} />
           </div>
-          <div className="metrics-container">
+          <div className="performance-chart-container">
             <h3>Performance Dashboard</h3>
             <PerformanceChart data={trainingMetrics} />
           </div>
-        </main>
+        </div>
+        <div className="bottom-row">
+          <h3>Action Probabilities</h3>
+          <ActionVisualizer probabilities={actionProbs} />
+        </div>
       </div>
     </div>
   );
