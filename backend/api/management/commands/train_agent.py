@@ -149,8 +149,9 @@ class Command(BaseCommand):
                             h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
                             action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                            # Broadcast action probabilities for UI visualization
-                            broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()})
+                            # Broadcast action probabilities for UI visualization (throttled)
+                            if total_steps % 100 == 0:
+                                broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()})
 
                             next_state, reward, done, truncated, info = env.step(action)
 
