@@ -12,7 +12,7 @@ export interface GraphData {
 }
 
 interface NodeDatum extends SimulationNodeDatum {
-  id: number;
+  id: string;
   error: number;
   utility: number;
   weight?: number[];
@@ -118,7 +118,7 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
       // Initialize position from weight vector for stable layout, falling back to random
       const [x, y, z] = data.weight ? new THREE.Vector3(...data.weight).multiplyScalar(5).toArray() : [Math.random(), Math.random(), Math.random()];
       return {
-        id: parseInt(id, 10),
+        id: id, // Keep id as a string from the Object.entries key
         error: data.error || 0,
         utility: data.utility || 0,
         weight: data.weight,
@@ -131,8 +131,8 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
     // d3-force expects links to reference node objects or ids.
     // We use IDs and tell the forceLink to look up nodes by their 'id' field.
     const edgeArray = gngEdges.map(([source, target]) => ({
-      source: source,
-      target: target,
+      source: String(source), // Ensure edge source ID is a string
+      target: String(target), // Ensure edge target ID is a string
     }));
 
     setNodes(nodeArray);
