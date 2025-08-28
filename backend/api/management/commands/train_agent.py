@@ -135,10 +135,12 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    pbar.set_postfix({
-                                        "AC Loss": f"{train_stats.get('ac_loss', 'N/A'):.4f}",
-                                        "WM Loss": f"{train_stats.get('wm_loss_total', 'N/A'):.4f}"
-                                    })
+                                    postfix_stats = {
+                                        "WM Loss": f"{train_stats.get('wm_loss_total', 0):.4f}"
+                                    }
+                                    if 'ac_loss' in train_stats:
+                                        postfix_stats["AC Loss"] = f"{train_stats['ac_loss']:.4f}"
+                                    pbar.set_postfix(postfix_stats)
 
                         logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")
 

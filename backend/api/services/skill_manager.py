@@ -135,9 +135,9 @@ class SkillManager:
         for skill_id, stag_data in structure.get('skill_graphs', {}).items():
             stag = STAG_Framework.from_serializable_structure(stag_data, **downstream_kwargs)
             # AGENT_FIX: Add backward compatibility for 'psi' key in GNG nodes
-            if max(stag.level_map.keys()) in stag.level_map:
+            if stag.level_map: # Check if there are any levels
                 terminal_gng = stag.level_map[max(stag.level_map.keys())]
-                for node_id, node_data in terminal_gng['gng'].nodes.items():
+                for node_id, node_data in terminal_gng.nodes.items():
                     if 'psi' not in node_data:
                         node_data['psi'] = np.zeros(sf_dimension)
             manager.skill_graphs[skill_id] = stag
