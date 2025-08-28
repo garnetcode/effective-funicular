@@ -111,8 +111,8 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
   const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum> | null>(null);
 
   useEffect(() => {
-    const gngNodes = graphData?.gng_state?.nodes || {};
-    const gngEdges: [number, number][] = graphData?.gng_state?.edges || [];
+    const gngNodes = graphData?.nodes || {};
+    const gngEdges: [number, number][] = graphData?.edges || [];
 
     const nodeArray: NodeDatum[] = Object.entries(gngNodes).map(([id, data]: [string, any]) => {
       // Initialize position from weight vector for stable layout, falling back to random
@@ -173,7 +173,7 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
 
 
 const NetworkVisualizer: React.FC<NetworkVisualizerProps> = ({ graphData }) => {
-  if (!graphData || !graphData.gng_state) {
+  if (!graphData || !graphData.nodes) {
     return <div style={{ color: 'white', margin: '20px' }}>Loading graph data or no data available...</div>;
   }
 
