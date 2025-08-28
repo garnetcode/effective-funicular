@@ -112,7 +112,8 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
 
   useEffect(() => {
     const gngNodes = graphData?.nodes || {};
-    const gngEdges: [number, number][] = graphData?.edges || [];
+    // Edges are now objects like {source: "id1", target: "id2"}
+    const gngEdges: { source: string; target: string }[] = graphData?.edges || [];
 
     const nodeArray: NodeDatum[] = Object.entries(gngNodes).map(([id, data]: [string, any]) => {
       // Initialize position from weight vector for stable layout, falling back to random
@@ -130,9 +131,9 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
 
     // d3-force expects links to reference node objects or ids.
     // We use IDs and tell the forceLink to look up nodes by their 'id' field.
-    const edgeArray = gngEdges.map(([source, target]) => ({
-      source: String(source), // Ensure edge source ID is a string
-      target: String(target), // Ensure edge target ID is a string
+    const edgeArray = gngEdges.map(edge => ({
+      source: edge.source, // The backend now sends string IDs directly
+      target: edge.target,
     }));
 
     setNodes(nodeArray);
