@@ -11,23 +11,9 @@ const client = axios.create({
 
 // --- Type Definitions ---
 
-export interface Agent {
-  id: string;
-  // Add other agent properties as needed
-}
-
 export interface Environment {
   id: string;
   name: string;
-}
-
-export interface AgentConfig {
-  dimensions: number;
-  cortex_configs: {
-    [key: string]: {
-      type: string;
-    }
-  };
 }
 
 export interface GraphData {
@@ -39,11 +25,7 @@ export interface GraphData {
 
 // --- API Functions ---
 
-export const getAgents = (): Promise<AxiosResponse<Agent[]>> => client.get('/agents/');
-
 export const getEnvironments = (): Promise<AxiosResponse<Environment[]>> => client.get('/environments/');
-
-export const createAgent = (config: AgentConfig): Promise<AxiosResponse<{ id: string }>> => client.post('/agents/', config);
 
 export const getAgentStructure = (agentId: string): Promise<AxiosResponse<GraphData>> => client.get(`/agents/${agentId}/structure/`);
 
@@ -69,7 +51,5 @@ export const learnWithAgent = async (agentId: string, text: string): Promise<Axi
 
     return organizeResponse;
 };
-
-export const deleteAgent = (agentId: string): Promise<AxiosResponse<any>> => client.delete(`/agents/${agentId}/`);
 
 export const startTraining = (agentId: string, envId: string): Promise<AxiosResponse<any>> => client.post(`/agents/${agentId}/start_training/`, { env_id: envId });
