@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import NetworkVisualizer from './NetworkVisualizer';
+import NetworkVisualizer, { GraphData } from './NetworkVisualizer';
 import PerformanceChart from './PerformanceChart';
 import './App.css';
 
@@ -8,11 +8,6 @@ import './App.css';
 interface Environment {
   id: string;
   name: string;
-}
-
-interface GraphData {
-  nodes: any[];
-  edges: any[];
 }
 
 interface TrainingMetric {
