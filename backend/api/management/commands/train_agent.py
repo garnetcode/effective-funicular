@@ -47,12 +47,11 @@ class Command(BaseCommand):
         logger.info(f"Loaded configuration from {config_path}")
 
         agent_config = config.get('agent_config', {})
-        training_config = config.get('training', {})
         hyperparams = agent_config.get('hyperparams', {})
         history_config = config.get('agent_history', {})
 
         # --- Set Seed for Reproducibility ---
-        seed = training_config.get('seed')
+        seed = config.get('training', {}).get('seed')
         if seed is not None:
             logger.info(f"Setting random seed to {seed}")
             seed_all(seed)
@@ -85,15 +84,12 @@ class Command(BaseCommand):
         agent_id = agent_config.get('default_agent_id_prefix', 'Kymera-') + "local-train"
         embedding_dim = agent_config.get('embedding_dim', 512)
 
-        save_weights = training_config.get('save_weights', True)
-
         agent = ChimeraAgent(
             agent_id=agent_id,
             embedding_dim=embedding_dim,
             max_action_dim=max_action_dim,
             cortex_configs=master_cortex_configs,
-            load_from_storage=save_weights,
-            enable_saving=save_weights,
+            load_from_storage=not config.get('force_new_agent', False),
             hyperparams=hyperparams,
             history_config=history_config
         )
@@ -139,12 +135,10 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    postfix_stats = {
-                                        "WM Loss": f"{train_stats.get('wm_loss_total', 0):.4f}"
-                                    }
-                                    if 'ac_loss' in train_stats:
-                                        postfix_stats["AC Loss"] = f"{train_stats['ac_loss']:.4f}"
-                                    pbar.set_postfix(postfix_stats)
+                                    pbar.set_postfix({
+                                        "AC Loss": f"{train_stats.get('ac_loss', 'N/A'):.4f}",
+                                        "WM Loss": f"{train_stats.get('wm_loss_total', 'N/A'):.4f}"
+                                    })
 
                         logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")
 
@@ -153,8 +147,5 @@ class Command(BaseCommand):
         except KeyboardInterrupt:
             logger.info("Training interrupted by user.")
         finally:
-            if save_weights:
-                agent.save_state(version_info={"message": "Local training stopped."})
-                logger.info("Training finished and agent state saved.")
-            else:
-                logger.info("Training finished. Agent state not saved as per config.")
+            agent.save_state(version_info={"message": "Local training stopped."})
+            logger.info("Training finished and agent state saved.")
