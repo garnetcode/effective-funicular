@@ -10,8 +10,30 @@ from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 import gymnasium as gym
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+import time
 
 logger = logging.getLogger(__name__)
+
+def broadcast_to_brain_monitoring(message_type, data):
+    """Helper function to broadcast a message to the brain_monitoring group."""
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer is not None:
+            async_to_sync(channel_layer.group_send)(
+                'brain_monitoring',
+                {
+                    'type': 'training_update', # This is the handler method name in the consumer
+                    'data': {
+                        'type': message_type,
+                        'payload': data,
+                        'timestamp': time.time()
+                    }
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Failed to broadcast message of type {message_type}: {e}")
 
 def seed_all(s):
     """Sets the seed for all random number generators."""
@@ -80,6 +102,10 @@ class Command(BaseCommand):
         logger.info(f"Master cortex configuration will include: {list(master_cortex_configs.keys())}")
         logger.info(f"Max action dimension across all environments: {max_action_dim}")
 
+        # Broadcast environment list to the UI
+        env_list_for_ui = [{'id': name, 'name': name} for name in env_names]
+        broadcast_to_brain_monitoring('environments_update', env_list_for_ui)
+
         # --- Initialize a single, generalist agent ---
         agent_id = agent_config.get('default_agent_id_prefix', 'Kymera-') + "local-train"
         embedding_dim = agent_config.get('embedding_dim', 512)
@@ -94,6 +120,11 @@ class Command(BaseCommand):
             history_config=history_config
         )
         logger.info(f"Initialized Generalist Agent '{agent_id}'")
+
+        # Broadcast initial graph structure
+        initial_graph = agent.get_graph_structure()
+        broadcast_to_brain_monitoring('graph_update', initial_graph)
+
 
         # --- Training Loop ---
         total_steps = 0
@@ -135,14 +166,20 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    postfix_stats = {
-                                        "WM Loss": f"{train_stats.get('wm_loss_total', 0):.4f}"
-                                    }
-                                    if 'ac_loss' in train_stats:
-                                        postfix_stats["AC Loss"] = f"{train_stats['ac_loss']:.4f}"
-                                    pbar.set_postfix(postfix_stats)
+                                    broadcast_to_brain_monitoring('training_metrics', train_stats)
+
+                            # Periodically update the graph structure for the UI
+                            if total_steps % 500 == 0: # Broadcast every 500 steps
+                                updated_graph = agent.get_graph_structure()
+                                broadcast_to_brain_monitoring('graph_update', updated_graph)
+
 
                         logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")
+                        broadcast_to_brain_monitoring('training_metrics', {
+                            'episode': episode_num,
+                            'reward': episode_reward,
+                            'total_steps': total_steps
+                        })
 
                 env.close()
 
