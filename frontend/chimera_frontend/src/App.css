@@ -20,6 +20,14 @@ body {
   color: var(--primary-text-color);
 }
 
+h3 {
+  color: var(--accent-color);
+  font-weight: 500;
+  margin: 0 0 10px 0;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
 /* --- Main App Layout --- */
 .App {
   display: flex;
@@ -32,7 +40,9 @@ body {
   background-color: var(--surface-color);
   padding: 10px 20px;
   border-bottom: 1px solid var(--border-color);
-  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .App-header h1 {
@@ -43,117 +53,55 @@ body {
   letter-spacing: 1px;
 }
 
-/* --- Main Content Layout --- */
-.main-content {
-  display: flex;
-  flex-grow: 1;
-  overflow: hidden;
-}
-
-.left-panel {
-  width: 350px;
-  background-color: var(--surface-color);
-  border-right: 1px solid var(--border-color);
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  overflow-y: auto;
-}
-
-.visualizer-container {
-  flex-grow: 1;
-  position: relative; /* For positioning overlays */
-}
-
-/* --- Controls Styling --- */
-.control-group {
-  background-color: var(--background-color);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 15px;
-}
-
-.control-group h4 {
-  margin-top: 0;
-  color: var(--accent-color);
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 10px;
-  margin-bottom: 15px;
-}
-
-select, input, button {
-  width: 100%;
-  padding: 10px;
-  border-radius: 5px;
-  border: 1px solid var(--border-color);
-  background-color: var(--background-color);
-  color: var(--primary-text-color);
-  font-size: 0.95em;
-  box-sizing: border-box; /* Important for width: 100% */
-  margin-top: 5px;
-}
-
-button {
-  cursor: pointer;
-  background-color: var(--accent-color);
-  color: black;
-  font-weight: bold;
-  border: none;
-  transition: background-color 0.2s ease;
-}
-
-button:hover:not(:disabled) {
-  background-color: var(--accent-hover-color);
-}
-
-button:disabled {
-  background-color: #21262d;
-  color: var(--secondary-text-color);
-  cursor: not-allowed;
-}
-
-.network-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.actions {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* --- Status Bar --- */
 .status-bar {
-  position: absolute;
-  bottom: 10px;
-  left: 10px;
   background-color: rgba(0, 0, 0, 0.5);
   padding: 8px 15px;
   border-radius: 5px;
   color: var(--accent-color);
   font-size: 0.9em;
-  z-index: 10;
 }
 
-/* --- Metrics Visualization --- */
-.metrics-container {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 400px;
-  background-color: rgba(22, 27, 34, 0.8);
+/* --- New Grid Layout --- */
+.main-content-grid {
+  display: grid;
+  grid-template-rows: 1fr 1fr; /* 2 equal rows */
+  flex-grow: 1;
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.top-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr; /* 2 equal columns */
+  gap: 10px;
+  overflow: hidden;
+}
+
+.bottom-row {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--surface-color);
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  padding: 10px;
-  z-index: 10;
-  backdrop-filter: blur(5px);
+  padding: 15px;
 }
 
-.metrics-container h3 {
-  margin: 0 0 10px 0;
-  text-align: center;
-  color: var(--accent-color);
+.network-visualizer-container,
+.performance-chart-container {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 15px;
+}
+
+/* Ensure canvas/chart takes up available space */
+.network-visualizer-container > div,
+.performance-chart-container > div,
+.bottom-row > div {
+  flex-grow: 1;
 }

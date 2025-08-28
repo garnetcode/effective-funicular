@@ -51,8 +51,16 @@ const GNGNode: React.FC<GNGNodeProps> = ({ node }) => {
 
   const scale = useMemo(() => 0.1 + Math.min(node.utility * 0.5, 0.4), [node.utility]);
   const color = useMemo(() => {
-    const utilityNormalized = Math.min(node.utility / 10, 1); // Normalize utility
-    return new THREE.Color().setHSL(0.6, 1.0, 0.5 + utilityNormalized * 0.4); // Blue to Cyan/White
+    // Normalize utility to a 0-1 range. Let's assume a max utility of ~20 for a good spread.
+    const utilityNormalized = Math.min(node.utility / 20, 1);
+
+    // Interpolate hue from Purple (0.75) to Lime (0.33)
+    // As utility increases, hue decreases, moving from purple -> blue -> cyan -> lime
+    const hue = 0.75 - (utilityNormalized * (0.75 - 0.33));
+    const saturation = 0.9; // Keep saturation high for vibrant colors
+    const lightness = 0.6;   // Keep lightness consistent and bright
+
+    return new THREE.Color().setHSL(hue, saturation, lightness);
   }, [node.utility]);
 
   // The node object from d3-force has x, y, and z properties.
