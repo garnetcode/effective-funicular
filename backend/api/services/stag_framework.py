@@ -147,7 +147,7 @@ class STAG_Framework:
                     'error': node_data.get('error', 0.0),
                     'utility': node_data.get('utility', 0.0)
                 }
-                final_nodes[global_id] = serializable_node
+                final_nodes[str(global_id)] = serializable_node
                 node_id_counter += 1
 
             # Add intra-level edges
@@ -155,7 +155,7 @@ class STAG_Framework:
                 if (level_id, u) in global_id_map and (level_id, v) in global_id_map:
                     global_u = global_id_map[(level_id, u)]
                     global_v = global_id_map[(level_id, v)]
-                    final_edges.append({'source': global_u, 'target': global_v, 'type': 'intra-level', 'age': age})
+                    final_edges.append({'source': str(global_u), 'target': str(global_v), 'type': 'intra-level', 'age': age})
 
             # Add inter-level edges (from parent to child)
             if parent_global_id is not None:
@@ -169,7 +169,7 @@ class STAG_Framework:
                     if (level_id, child_winner_id) in global_id_map:
                         child_global_id = global_id_map[(level_id, child_winner_id)]
                         parent_mapped_id = global_id_map[(parent_global_id['level_id'], parent_global_id['gng_node_id'])]
-                        final_edges.append({'source': parent_mapped_id, 'target': child_global_id, 'type': 'inter-level'})
+                        final_edges.append({'source': str(parent_mapped_id), 'target': str(child_global_id), 'type': 'inter-level'})
 
             # Recurse through children
             for child_node in level_node['children']:
@@ -179,7 +179,7 @@ class STAG_Framework:
         traverse(self.tree)
 
         # Create adjacency list for efficient lookups
-        adj_list = {node_id: [] for node_id in final_nodes}
+        adj_list = {node_id: [] for node_id in final_nodes.keys()}
         for edge in final_edges:
             adj_list[edge['source']].append(edge['target'])
             adj_list[edge['target']].append(edge['source'])
