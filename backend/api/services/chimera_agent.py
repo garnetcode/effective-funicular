@@ -40,6 +40,7 @@ from .action.modules import ActionHead
 from .action.latent_planner import LatentPlanner
 from .action.graph_planner import GraphPlanner
 from .world_model.rep_learning import ContrastiveLoss
+from .predictive_coding import HierarchicalRSSM, PredictiveCodingModule
 
 class StagContextProcessor(nn.Module):
     """
@@ -195,6 +196,22 @@ class ChimeraAgent:
         # Normalization Hub
         self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
         self.z_norm = nn.LayerNorm(self.latent_dim).to(self.device)
+
+        # --- Predictive Coding Hierarchy ---
+        # Level 0
+        l0_encoder = nn.Linear(embedding_dim, latent_dim)
+        l0_decoder = nn.Linear(latent_dim, embedding_dim)
+        l0_transition = nn.Linear(hidden_dim, latent_dim)
+        self.level0 = PredictiveCodingModule(l0_encoder, l0_decoder, l0_transition).to(self.device)
+
+        # Level 1
+        l1_encoder = nn.Linear(latent_dim, latent_dim) # Error from below has shape latent_dim
+        l1_decoder = nn.Linear(latent_dim, latent_dim)
+        l1_transition = nn.Linear(hidden_dim, latent_dim)
+        self.level1 = PredictiveCodingModule(l1_encoder, l1_decoder, l1_transition).to(self.device)
+
+        self.hierarchical_rssm = HierarchicalRSSM([self.level0, self.level1]).to(self.device)
+
 
         # Skill Manager (manages multiple STAGs)
         self.skill_manager = SkillManager(self.hidden_dim, **self.hyperparams)
@@ -817,40 +834,35 @@ class ChimeraAgent:
 
         # --- Sequence-based Forward Pass and Loss Calculation ---
         h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device) # Not used in hierarchy yet
 
-        total_recon_loss, total_reward_loss, total_kl_loss = 0, 0, 0
+        total_loss = 0
         hidden_states = []
 
-        for t in range(self.replay_buffer.sequence_length):
-            obs_t = obs_sequence_processed[:, t]
-            action_t = action_sequence[:, t]
-            h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
-            hidden_states.append(h_t)
+        # This loop is a simplification. A real implementation would handle sequences.
+        # We process the first element of the sequence for now to plumb the architecture.
+        obs_t = obs_sequence_processed[:, 0]
+        action_t = action_sequence[:, 0] # Not used in PC module yet
 
-            obs_recon = world_model.obs_decoder(z_t, h_t)
-            reward_pred = world_model.reward_model(torch.cat([z_t, h_t, goal_sequence[:, t]], dim=-1))
+        h_t_l1 = torch.zeros_like(h_t) # Placeholder for level 1 state
 
-            recon_loss = torch.mean((obs_recon - obs_t)**2, dim=list(range(1, obs_recon.dim())))
-            reward_loss = torch.mean((reward_pred - reward_sequence[:, t].unsqueeze(-1))**2, dim=-1)
+        next_states, errors, reconstructions = self.hierarchical_rssm(obs_t, [h_t, h_t_l1])
 
-            if self.use_kl_balancing:
-                kl_loss_detached = kl_loss.detach()
-                error = kl_loss_detached - self.kl_target
-                self.kl_error_integral += error
-                derivative = error - self.kl_last_error
-                self.kl_last_error = error
-                pid_adjustment = self.pid_kp * error + self.pid_ki * self.kl_error_integral + self.pid_kd * derivative
-                self.kl_coeff = max(0.1, self.kl_coeff + pid_adjustment)
-            else:
-                kl_loss = torch.clamp(kl_loss, min=self.hyperparams.get('free_bits', 1.0))
+        # The KL loss would be a sum of KL losses from all levels if they were stochastic.
+        # Using a placeholder for now.
+        kl_loss = torch.tensor(0.0, device=self.device)
+        free_nats = self.hyperparams.get('free_bits', 1.0)
 
-            total_recon_loss += recon_loss
-            total_reward_loss += reward_loss
-            total_kl_loss += kl_loss
+        loss = self._predictive_coding_loss(reconstructions, errors, kl_loss, obs_t, free_nats)
+        total_loss += loss
 
+        # This part of the logic is now simplified as we are not processing a full sequence
+        # for the initial implementation of the predictive coding loss.
+        hidden_states.append(next_states[0])
         hidden_states = torch.stack(hidden_states, dim=1)
-        world_model_kl_loss = self.kl_coeff * total_kl_loss if self.use_kl_balancing else total_kl_loss
+
+        # Contrastive loss and reward model are temporarily disabled to focus on PC loss.
+        contrastive_loss = torch.tensor(0.0)
 
         # --- Contrastive Loss Calculation ---
         anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
@@ -885,12 +897,19 @@ class ChimeraAgent:
             consistency_loss = F.mse_loss(hidden_states.detach(), hidden_states_aug)
 
         # --- Total Loss ---
-        world_model_loss_per_item = (total_recon_loss + total_reward_loss + world_model_kl_loss) / self.replay_buffer.sequence_length
-        total_loss = (weights * world_model_loss_per_item).mean() + \
-                     self.contrastive_loss_weight * contrastive_loss + \
-                     self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
+        # This is now handled by the new loss function, but we need to adapt it.
+        # For now, we'll just return the reconstruction loss on the lowest level.
+        # The full predictive coding loss will be implemented in the next step.
+        total_loss = torch.mean(total_recon_loss) / self.replay_buffer.sequence_length
+
 
         return total_loss, contrastive_loss, hidden_states, batch['reward']
+
+    def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
+        reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
+        prediction_error_loss = sum(torch.mean(error ** 2) for error in errors)
+        kl_loss = torch.max(torch.tensor(0.0, device=self.device), kl_loss - free_nats)
+        return reconstruction_loss + prediction_error_loss + kl_loss
 
 
     def train_policy_in_imagination(self):

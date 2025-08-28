@@ -277,6 +277,78 @@ class ChimeraAgentTests(TestCase):
             shutil.rmtree(history_dir)
 
 
+class PredictiveCodingTests(TestCase):
+    def setUp(self):
+        self.embedding_dim = 64
+        self.latent_dim = 32
+        self.hidden_dim = 128
+        self.batch_size = 4
+
+        # Mock models
+        self.encoder = torch.nn.Linear(self.embedding_dim, self.latent_dim)
+        self.decoder = torch.nn.Linear(self.latent_dim, self.embedding_dim)
+        self.transition = torch.nn.Linear(self.hidden_dim, self.latent_dim)
+
+    def test_predictive_coding_module_forward_pass(self):
+        """Tests the forward pass of a single PredictiveCodingModule."""
+        from .services.predictive_coding import PredictiveCodingModule
+        pc_module = PredictiveCodingModule(self.encoder, self.decoder, self.transition)
+
+        # Dummy data
+        x = torch.rand(self.batch_size, self.embedding_dim)
+        state = torch.rand(self.batch_size, self.hidden_dim)
+
+        prediction, error, reconstruction = pc_module(x, state)
+
+        self.assertEqual(prediction.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(error.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(reconstruction.shape, (self.batch_size, self.embedding_dim))
+
+    def test_hierarchical_rssm_forward_pass(self):
+        """Tests the forward pass of the HierarchicalRSSM."""
+        from .services.predictive_coding import PredictiveCodingModule, HierarchicalRSSM
+
+        # Level 0
+        l0_encoder = torch.nn.Linear(self.embedding_dim, self.latent_dim)
+        l0_decoder = torch.nn.Linear(self.latent_dim, self.embedding_dim)
+        l0_transition = torch.nn.Linear(self.hidden_dim, self.latent_dim)
+        level0 = PredictiveCodingModule(l0_encoder, l0_decoder, l0_transition)
+
+        # Level 1 (takes error from level 0 as input)
+        l1_encoder = torch.nn.Linear(self.latent_dim, self.latent_dim)
+        l1_decoder = torch.nn.Linear(self.latent_dim, self.latent_dim)
+        l1_transition = torch.nn.Linear(self.hidden_dim, self.latent_dim)
+        level1 = PredictiveCodingModule(l1_encoder, l1_decoder, l1_transition)
+
+        h_rssm = HierarchicalRSSM([level0, level1])
+
+        # Dummy data
+        x = torch.rand(self.batch_size, self.embedding_dim)
+        states = [
+            torch.rand(self.batch_size, self.hidden_dim), # State for level 0
+            torch.rand(self.batch_size, self.hidden_dim)  # State for level 1
+        ]
+
+        next_states, errors, reconstructions = h_rssm(x, states)
+
+        self.assertIsInstance(next_states, list)
+        self.assertIsInstance(errors, list)
+        self.assertIsInstance(reconstructions, list)
+        self.assertEqual(len(next_states), 2)
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(reconstructions), 2)
+
+        # Check shapes of level 0 outputs
+        self.assertEqual(next_states[0].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(errors[0].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(reconstructions[0].shape, (self.batch_size, self.embedding_dim))
+
+        # Check shapes of level 1 outputs
+        self.assertEqual(next_states[1].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(errors[1].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(reconstructions[1].shape, (self.batch_size, self.latent_dim))
+
+
 class StateHistoryManagerTests(TestCase):
     def setUp(self):
         self.agent_id = "test-history-agent"

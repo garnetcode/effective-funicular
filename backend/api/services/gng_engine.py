@@ -365,3 +365,17 @@ class GNG_Engine:
         # If any nodes were pruned, the FAISS index is now invalid.
         if nodes_to_prune:
             self.faiss_index = None
+
+    def predict(self, current_node_id):
+        """
+        Predicts the next node based on the utility of the neighbors
+        of the current node.
+        """
+        neighbors = self._get_neighbors(current_node_id)
+        if not neighbors:
+            # If no neighbors, the best prediction is the current node itself
+            return self.nodes[current_node_id]
+
+        # Find the neighbor with the highest utility
+        best_neighbor_id = max(neighbors, key=lambda nid: self.nodes[nid]['utility'])
+        return self.nodes[best_neighbor_id]
