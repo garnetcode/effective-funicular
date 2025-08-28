@@ -1,16 +1,26 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from './api';
+import { Agent, Environment, GraphData } from './api';
 import NetworkVisualizer from './NetworkVisualizer';
+import PerformanceChart from './PerformanceChart';
 import './App.css';
 
+interface TrainingMetric {
+  episode: number;
+  reward: number;
+  avg_reward: number;
+  epsilon: number;
+  policy_loss: number;
+}
+
 function App() {
-  const [agents, setAgents] = useState([]);
-  const [selectedAgent, setSelectedAgent] = useState(null);
-  const [environments, setEnvironments] = useState([]);
-  const [selectedEnv, setSelectedEnv] = useState('');
-  const [graphData, setGraphData] = useState(null);
-  const [textInput, setTextInput] = useState('');
-  const [trainingMetrics, setTrainingMetrics] = useState([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [environments, setEnvironments] = useState<Environment[]>([]);
+  const [selectedEnv, setSelectedEnv] = useState<string>('');
+  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [textInput, setTextInput] = useState<string>('');
+  const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([]);
   const [statusMessage, setStatusMessage] = useState('Welcome to Project Chimera!');
 
   const fetchAgents = useCallback(async () => {
@@ -78,7 +88,7 @@ function App() {
     }
   };
 
-  const handleLearn = async (e) => {
+  const handleLearn = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!selectedAgent || !textInput) return;
     try {
@@ -162,71 +172,72 @@ function App() {
   }, []); // Empty dependency array ensures this runs only once
 
 
+  const [activeTab, setActiveTab] = useState('performance');
+
   return (
     <div className="App">
       <header className="App-header">
         <h1>Project Chimera</h1>
       </header>
-      <div className="controls">
-        <div className="network-selector">
-          <select onChange={(e) => setSelectedAgent(e.target.value)} value={selectedAgent || ''}>
-            <option value="" disabled>Select an Agent</option>
-            {agents.map(agent => (
-              <option key={agent.id} value={agent.id}>{agent.id}</option>
-            ))}
-          </select>
-          <button onClick={handleCreateAgent}>Create New Agent</button>
-          <button onClick={handleDeleteAgent} disabled={!selectedAgent} className="delete-button">
-            Delete Selected Agent
-          </button>
-        </div>
-        {selectedAgent && (
-          <div className="actions">
-            <div className="action-item">
-              <h4>Cognitive Learning</h4>
-              <form onSubmit={handleLearn}>
-                <input
-                  type="text"
-                  value={textInput}
-                  onChange={(e) => setTextInput(e.target.value)}
-                  placeholder="Enter a pattern to learn"
-                />
-                <button type="submit">Learn & Organize</button>
-              </form>
-            </div>
-            <div className="action-item">
-              <h4>Reinforcement Learning</h4>
-              <select onChange={(e) => setSelectedEnv(e.target.value)} value={selectedEnv}>
-                {environments.map(env => (
-                  <option key={env.id} value={env.id}>{env.name}</option>
+      <div className="main-content">
+        <div className="left-panel">
+          <div className="control-group">
+            <h4>Agent Management</h4>
+            <div className="network-selector">
+              <select onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSelectedAgent(e.target.value)} value={selectedAgent || ''}>
+                <option value="" disabled>Select an Agent</option>
+                {agents.map(agent => (
+                  <option key={agent.id} value={agent.id}>{agent.id}</option>
                 ))}
               </select>
-              <button onClick={handleStartTraining} disabled={!selectedEnv}>
-                Start Training
+              <button onClick={handleCreateAgent}>Create New Agent</button>
+              <button onClick={handleDeleteAgent} disabled={!selectedAgent} className="delete-button">
+                Delete Selected
               </button>
-              <div className="metrics-display">
-                {/* Metrics will be displayed here */}
-              </div>
             </div>
           </div>
-        )}
-        <div className="status-bar">
-          {statusMessage}
+
+          {selectedAgent && (
+            <div className="actions">
+              <div className="control-group">
+                <h4>Cognitive Learning</h4>
+                <form onSubmit={handleLearn}>
+                  <input
+                    type="text"
+                    value={textInput}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTextInput(e.target.value)}
+                    placeholder="Enter a pattern to learn"
+                  />
+                  <button type="submit">Learn & Organize</button>
+                </form>
+              </div>
+              <div className="control-group">
+                <h4>Reinforcement Learning</h4>
+                <select onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSelectedEnv(e.target.value)} value={selectedEnv}>
+                  {environments.map(env => (
+                    <option key={env.id} value={env.id}>{env.name}</option>
+                  ))}
+                </select>
+                <button onClick={handleStartTraining} disabled={!selectedEnv}>
+                  Start Training
+                </button>
+              </div>
+            </div>
+          )}
         </div>
+
+        <main className="visualizer-container">
+          <NetworkVisualizer graphData={graphData} />
+          <div className="status-bar">
+            {statusMessage}
+          </div>
+          <div className="metrics-container">
+            {/* Tab buttons would go here */}
+            <h3>Performance Dashboard</h3>
+            <PerformanceChart data={trainingMetrics} />
+          </div>
+        </main>
       </div>
-      <main className="visualizer-container">
-        <NetworkVisualizer graphData={graphData} />
-        <div className="metrics-container">
-          <h3>Training Metrics</h3>
-          <ul className="metrics-list">
-            {trainingMetrics.map((metric, index) => (
-              <li key={index}>
-                Ep: {metric.episode} | R: {metric.reward?.toFixed(2)} | AvgR: {metric.avg_reward?.toFixed(2)} | ε: {metric.epsilon?.toFixed(2)} | Loss: {metric.policy_loss?.toFixed(4)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </main>
     </div>
   );
 }
