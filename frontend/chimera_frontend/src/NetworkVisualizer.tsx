@@ -12,10 +12,14 @@ interface NodeDatum extends SimulationNodeDatum {
   error: number;
   utility: number;
   weight?: number[];
+  x?: number;
+  y?: number;
+  z?: number;
 }
 
 interface EdgeDatum extends SimulationLinkDatum<NodeDatum> {
-  // source and target are provided by d3-force
+  // source and target can be string | number | NodeDatum
+  // We will narrow it down in the component
 }
 
 // --- Prop Type Definitions ---
@@ -79,9 +83,12 @@ const GNGNode: React.FC<GNGNodeProps> = ({ node }) => {
 };
 
 const GNGEdge: React.FC<GNGEdgeProps> = ({ edge }) => {
+  const sourceNode = edge.source as NodeDatum;
+  const targetNode = edge.target as NodeDatum;
+
   // The edge object from d3-force has source and target properties, which are node objects.
-  const start = useMemo(() => new THREE.Vector3(edge.source.x, edge.source.y, edge.source.z), [edge.source.x, edge.source.y, edge.source.z]);
-  const end = useMemo(() => new THREE.Vector3(edge.target.x, edge.target.y, edge.target.z), [edge.target.x, edge.target.y, edge.target.z]);
+  const start = useMemo(() => new THREE.Vector3(sourceNode.x, sourceNode.y, sourceNode.z), [sourceNode.x, sourceNode.y, sourceNode.z]);
+  const end = useMemo(() => new THREE.Vector3(targetNode.x, targetNode.y, targetNode.z), [targetNode.x, targetNode.y, targetNode.z]);
 
   return (
     <Line
@@ -97,18 +104,20 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
   const [nodes, setNodes] = useState<NodeDatum[]>([]);
   const [edges, setEdges] = useState<EdgeDatum[]>([]);
 
-  const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum>>();
+  const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum> | null>(null);
 
   useEffect(() => {
     const gngNodes = graphData?.gng_state?.nodes || {};
-    const gngEdges = graphData?.gng_state?.edges || [];
+    const gngEdges: [number, number][] = graphData?.gng_state?.edges || [];
 
-    const nodeArray = Object.entries(gngNodes).map(([id, data]) => {
+    const nodeArray: NodeDatum[] = Object.entries(gngNodes).map(([id, data]: [string, any]) => {
       // Initialize position from weight vector for stable layout, falling back to random
       const [x, y, z] = data.weight ? new THREE.Vector3(...data.weight).multiplyScalar(5).toArray() : [Math.random(), Math.random(), Math.random()];
       return {
         id: parseInt(id, 10),
-        ...data,
+        error: data.error || 0,
+        utility: data.utility || 0,
+        weight: data.weight,
         x,
         y,
         z,
@@ -118,15 +127,15 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
     // d3-force expects links to reference node objects or ids.
     // We use IDs and tell the forceLink to look up nodes by their 'id' field.
     const edgeArray = gngEdges.map(([source, target]) => ({
-      source: parseInt(source, 10),
-      target: parseInt(target, 10),
+      source: source,
+      target: target,
     }));
 
     setNodes(nodeArray);
     setEdges(edgeArray);
 
     if (nodeArray.length > 0) {
-      simulationRef.current = forceSimulation(nodeArray, 3) // Create a 3D simulation
+      simulationRef.current = forceSimulation(nodeArray)
         .force("link", forceLink<NodeDatum, EdgeDatum>(edgeArray).id(d => d.id).distance(1).strength(0.1))
         .force("charge", forceManyBody().strength(-10))
         .force("center", forceCenter());

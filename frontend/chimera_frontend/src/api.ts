@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosResponse } from 'axios';
 
 const API_BASE_URL = 'http://127.0.0.1:8000/api';
 
@@ -8,8 +8,6 @@ const client = axios.create({
         'Content-Type': 'application/json',
     },
 });
-
-import { AxiosResponse } from 'axios';
 
 // --- Type Definitions ---
 
