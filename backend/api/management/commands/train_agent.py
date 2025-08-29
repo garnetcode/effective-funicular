@@ -183,9 +183,11 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    # Update postfix with training stats
-                                    postfix_data["WM Loss"] = f"{train_stats.get('wm_loss_total', 'N/A'):.4f}"
-                                    postfix_data["AC Loss"] = f"{train_stats.get('ac_loss', 'N/A'):.4f}"
+                                    # Update postfix with training stats, checking for type before formatting
+                                    wm_loss = train_stats.get('wm_loss_total')
+                                    ac_loss = train_stats.get('ac_loss')
+                                    postfix_data["WM Loss"] = f"{wm_loss:.4f}" if isinstance(wm_loss, (int, float)) else "N/A"
+                                    postfix_data["AC Loss"] = f"{ac_loss:.4f}" if isinstance(ac_loss, (int, float)) else "N/A"
 
                                     # Update UI State in Redis after training step
                                     update_ui_state_in_redis('chimera_training_metrics', train_stats)
