@@ -168,9 +168,6 @@ class Command(BaseCommand):
 
                 elif msg.get("type") == "game.over":
                     done = True
-                elif msg.get("type") == "pong":
-                    logger.info("Received pong from server.")
-                    continue
                 else:
                     logger.warning(f"Unexpected message type received: {msg.get('type')}")
 

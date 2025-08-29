@@ -843,30 +843,41 @@ class ChimeraAgent:
         z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
         total_loss = 0
 
-        # This simplified loop trains only the first level of the hierarchy for verification.
-        # It iterates through the sequence to correctly update the hidden state.
+        # --- Sequence-based Forward Pass through the full hierarchy ---
+        # Initialize hidden and latent states for each level
+        prev_states = [
+            (torch.zeros(batch_size, self.hidden_dim, device=self.device),
+             torch.zeros(batch_size, self.latent_dim, device=self.device))
+            for _ in self.hierarchical_rssm.levels
+        ]
+
+        total_loss = 0
+        all_hidden_states_level0 = []
+
         for t in range(self.replay_buffer.sequence_length):
             obs_t = obs_sequence_processed[:, t]
             action_t = action_sequence[:, t]
 
-            # Call level0 directly, bypassing the full hierarchy
-            h_t, z_t, _, error, reconstruction = self.level0(obs_t, action_t, h_t, z_t)
+            # Forward pass through the hierarchy
+            hs, zs, preds, errors, recons = self.hierarchical_rssm(obs_t, action_t, prev_states)
 
             # The KL loss and free_nats are placeholders for now.
             kl_loss = torch.tensor(0.0, device=self.device)
             free_nats = self.hyperparams.get('free_bits', 1.0)
 
-            loss = self._predictive_coding_loss([reconstruction], [error], kl_loss, obs_t, free_nats)
+            # Loss includes all errors from all levels and the final reconstruction
+            loss = self._predictive_coding_loss(recons, errors, kl_loss, obs_t, free_nats)
             total_loss += loss
+
+            # Update prev_states for the next timestep
+            prev_states = list(zip(hs, zs))
+            all_hidden_states_level0.append(hs[0]) # Store h from the first level for other parts of the agent
 
         # Divide by sequence length to get average loss per step
         total_loss /= self.replay_buffer.sequence_length
 
-        # For compatibility with the rest of the function, we create placeholder
-        # return values. The important part is that `total_loss` is calculated
-        # based on our isolated level0 module.
-        hidden_states = torch.stack([h_t], dim=1) # Use the final hidden state
-        contrastive_loss = torch.tensor(0.0)
+        hidden_states = torch.stack(all_hidden_states_level0, dim=1)
+        contrastive_loss = torch.tensor(0.0) # Placeholder, will be calculated next
 
         # --- Contrastive Loss Calculation ---
         anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
@@ -907,8 +918,10 @@ class ChimeraAgent:
         return total_loss, contrastive_loss, hidden_states, batch['reward']
 
     def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
+        # The main reconstruction loss is from the lowest level of the hierarchy
         reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
-        prediction_error_loss = sum(torch.mean(error ** 2) for error in errors)
+        # The prediction error loss is the sum of errors from all levels
+        prediction_error_loss = sum(torch.mean(error.pow(2)) for error in errors)
         kl_loss = torch.max(torch.tensor(0.0, device=self.device), kl_loss - free_nats)
         return reconstruction_loss + prediction_error_loss + kl_loss
 
