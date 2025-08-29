@@ -115,26 +115,25 @@ class ColosseumConnector:
 
     async def send_action(self, action):
         """Sends an agent action to the server, with reconnection logic."""
+        if not self.websocket:
+            logger.error("Cannot send action, WebSocket is not connected.")
+            return
+
         action_message_str = json.dumps({
             "type": "agent.action",
             "action": int(action),
             "agent_tag": self.agent_tag
         })
 
-        for attempt in range(2):  # Try once, then reconnect and try again
-            if self.websocket and not self.websocket.closed:
-                try:
-                    await self.websocket.send(action_message_str)
-                    return  # Success
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning(f"Connection closed on send_action (attempt {attempt + 1}).")
-
-            if attempt == 0:
-                if not await self.reconnect():
-                    logger.error("Cannot send action, reconnection failed.")
-                    break  # Break the loop if reconnect fails
+        try:
+            await self.websocket.send(action_message_str)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Connection closed on send_action. Attempting to reconnect...")
+            if await self.reconnect():
+                logger.info("Reconnected successfully. Retrying send_action.")
+                await self.websocket.send(action_message_str) # Retry once after reconnect
             else:
-                logger.error("Failed to send action after reconnecting.")
+                logger.error("Cannot send action, reconnection failed.")
 
     async def reset_environment(self):
         """
@@ -201,29 +200,31 @@ class ColosseumConnector:
 
     async def _receive_one_message_with_retry(self):
         """Helper that attempts to receive a single message, with one retry after reconnecting."""
-        for attempt in range(2):  # Try once, then reconnect and try again
-            if self.websocket and not self.websocket.closed:
+        if not self.websocket:
+            logger.error("Cannot receive message, WebSocket is not connected.")
+            if not await self.reconnect():
+                return None # If reconnect fails, give up
+
+        try:
+            message = await self.websocket.recv()
+            logger.debug(f"Raw message received: {message}")
+            return json.loads(message)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Connection closed on receive. Attempting to reconnect...")
+            if await self.reconnect():
+                logger.info("Reconnected successfully. Retrying receive.")
                 try:
                     message = await self.websocket.recv()
-                    logger.debug(f"Raw message received: {message}")
                     return json.loads(message)
                 except websockets.exceptions.ConnectionClosed:
-                    logger.warning(f"Connection closed on receive (attempt {attempt + 1}).")
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON from message: {e}")
-                    return None  # Don't retry on malformed data
-                except Exception as e:
-                    logger.error(f"An unexpected error occurred in receive_message: {e}")
-                    break  # Break on other unexpected errors
-
-            if attempt == 0:
-                if not await self.reconnect():
-                    logger.error("Cannot receive message, reconnection failed.")
-                    break  # Break the loop if reconnect fails
+                    logger.error("Connection closed again immediately after reconnect.")
+                    return None
             else:
-                logger.error("Failed to receive message after reconnecting.")
-
-        return None
+                logger.error("Cannot receive message, reconnection failed.")
+                return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from message: {e}")
+            return None
 
     async def reconnect(self, max_retries=3, delay=1):
         """
