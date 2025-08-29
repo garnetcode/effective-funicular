@@ -51,7 +51,6 @@ class Command(BaseCommand):
         parser.add_argument("--episodes", type=int, default=500, help="Total number of episodes to train for.")
         parser.add_argument("--agent-tag", type=str, default=None, help="A unique tag for the agent.")
         parser.add_argument("--port", type=int, default=8002, help="The port of the Colosseum server.")
-        parser.add_argument("--verbosity", type=int, default=0, choices=[0, 1], help="Set verbosity level (0 for quiet, 1 for detailed).")
 
     def handle(self, *args, **options):
         """Synchronous entry point that runs the async handler."""
