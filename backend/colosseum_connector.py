@@ -21,18 +21,14 @@ class ColosseumConnector:
         self.keep_alive_task = None
 
     async def _keep_alive(self):
-        """Sends a ping message every 20 seconds to keep the connection alive."""
+        """Sends an application-level ping message every 20 seconds to keep the connection alive."""
         while True:
             try:
                 await asyncio.sleep(20)
                 if self.websocket:
-                    # Rely on exception handling rather than a proactive check like .open or .closed
-                    try:
-                        await self.websocket.ping()
-                        logger.debug("Sent WebSocket ping")
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.warning("Keep-alive ping failed: connection is closed. Exiting keep-alive task.")
-                        break  # Exit the keep-alive loop
+                    # Send a data message instead of a low-level ping frame for compatibility.
+                    await self.send_message({"type": "ping"})
+                    logger.debug("Sent application-level keep-alive ping.")
             except asyncio.CancelledError:
                 logger.info("Keep-alive task cancelled.")
                 break
