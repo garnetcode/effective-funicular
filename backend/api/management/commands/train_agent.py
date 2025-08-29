@@ -167,7 +167,8 @@ class Command(BaseCommand):
                             if agent.steps_done > hyperparams.get('burnin_steps', 1000) and \
                                agent.steps_done % hyperparams.get('policy_train_frequency', 10) == 0 and \
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
-                                train_stats = agent.train(cortex_id=cortex_id)
+                                # Run the synchronous, CPU-bound training step in a separate thread
+                                train_stats = await asyncio.to_thread(agent.train, cortex_id=cortex_id)
                                 if train_stats:
                                     update_ui_state_in_redis('chimera_training_metrics', train_stats)
                                     updated_graph = agent.get_graph_structure()
