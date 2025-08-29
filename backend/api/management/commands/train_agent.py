@@ -2,9 +2,6 @@ import asyncio
 import logging
 import yaml
 import numpy as np
-import torch
-import websockets
-import random
 from tqdm import tqdm
 
 from django.core.management.base import BaseCommand
@@ -64,138 +61,153 @@ class Command(BaseCommand):
         except Exception as e:
             logger.error(f"An unexpected error occurred in async_handle: {e}", exc_info=True)
 
-    async def async_handle(self, *args, **options):
-        """The main asynchronous logic for training the agent."""
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
+    async def _setup(self, options):
+        """Sets up the agent, connector, and environment."""
         env_id = options['env_id']
-        agent_tag = options['agent_tag'] or f"chimera-agent-{random.randint(1000, 9999)}"
+        agent_tag = options['agent_tag'] or f"chimera-agent-{int(time.time())}"
         config_path = options['config']
-        episodes = options['episodes']
         port = options['port']
 
         logger.info(f"Starting Chimera agent '{agent_tag}' for environment: {env_id} on port {port}")
 
-        # --- Load Configuration ---
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
             logger.info(f"Loaded configuration from {config_path}")
         except FileNotFoundError:
             logger.error(f"Config file not found at: {config_path}")
-            return
+            return None, None, None, None
 
-        agent_config = config.get('agent_config', {})
-        hyperparams = agent_config.get('hyperparams', {})
-        history_config = config.get('agent_history', {})
-
-        # --- Colosseum Connection ---
         connector = ColosseumConnector(env_id, agent_tag, http_port=port, ws_port=port)
+        session_info = await connector.create_session()
+        if not session_info:
+            logger.error("Could not create session. Exiting.")
+            return None, None, None, None
 
-        try:
-            session_info = await connector.create_session()
-            if not session_info:
-                logger.error("Could not create session. Exiting.")
-                return
+        env_specs = session_info['environment']
+        obs_space_info = env_specs['observation_space']
+        action_space_info = env_specs['action_space']
 
-            # --- Environment and Agent Setup (Post-Session-Creation) ---
-            env_specs = session_info['environment']
-            obs_space_info = env_specs['observation_space']
-            action_space_info = env_specs['action_space']
-
-            observation_space = gym.spaces.Box(
+        cortex_configs, cortex_id = create_cortex_configs_from_observation_space(
+            gym.spaces.Box(
                 low=np.array(obs_space_info['low']),
                 high=np.array(obs_space_info['high']),
                 shape=obs_space_info['shape'],
                 dtype=np.dtype(obs_space_info['dtype'])
             )
-            cortex_configs, cortex_id = create_cortex_configs_from_observation_space(observation_space)
-            actual_action_dim = action_space_info['n']
+        )
+        actual_action_dim = action_space_info['n']
 
-            agent = ChimeraAgent(
-                agent_id=agent_tag,
-                embedding_dim=agent_config.get('embedding_dim', 512),
-                max_action_dim=actual_action_dim,
-                cortex_configs=cortex_configs,
-                load_from_storage=not config.get('force_new_agent', False),
-                hyperparams=hyperparams,
-                history_config=history_config
-            )
-            agent.set_active_skill(env_id)
-            logger.info(f"Initialized Chimera Agent '{agent_tag}' for {env_id}")
+        agent = ChimeraAgent(
+            agent_id=agent_tag,
+            embedding_dim=config['agent_config'].get('embedding_dim', 512),
+            max_action_dim=actual_action_dim,
+            cortex_configs=cortex_configs,
+            load_from_storage=not config.get('force_new_agent', False),
+            hyperparams=config['agent_config'].get('hyperparams', {}),
+            history_config=config.get('agent_history', {})
+        )
+        agent.set_active_skill(env_id)
+        logger.info(f"Initialized Chimera Agent '{agent_tag}' for {env_id}")
 
-            # --- Connect and Join Session ---
-            if not await connector.connect_websocket():
-                logger.error("Could not connect to WebSocket. Exiting.")
-                return
+        if not await connector.connect_websocket() or not await connector.join_session():
+            logger.error("Could not connect to WebSocket or join session. Exiting.")
+            await connector.close()
+            return None, None, None, None
 
-            join_response = await connector.join_session()
-            if not join_response:
-                logger.error("Could not join session. Exiting.")
-                await connector.close()
-                return
+        return agent, connector, session_info, cortex_id
 
-            # --- Main Training Loop ---
-            with tqdm(total=episodes, desc=f"Training on {env_id}") as pbar:
-                current_obs = np.array(session_info.get("observation"))
-                for episode in range(1, episodes + 1):
-                    done = False
-                    episode_reward = 0
+    async def _run_episode(self, episode_num, agent, connector, initial_obs, cortex_id):
+        """Runs a single episode of the training loop."""
+        done = False
+        episode_reward = 0
+        current_obs = initial_obs
+        hyperparams = agent.hyperparams
+        actual_action_dim = agent.max_action_dim
 
-                    while not done:
-                        h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
-                        action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+        while not done:
+            try:
+                # Agent logic
+                h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+                update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
 
-                        update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
+                # Network interaction
+                await connector.send_action(int(action))
+                msg = await connector.receive_message()
 
-                        await connector.send_action(int(action))
-                        msg = await connector.receive_message()
+                if not msg:
+                    logger.warning("Did not receive state from server. Ending episode.")
+                    return "CONNECTION_ERROR", episode_reward, agent.steps_done
 
-                        if not msg:
-                            logger.warning("Did not receive state, might be reconnecting. Ending episode.")
-                            break
+                if msg.get("type") == "action.taken":
+                    next_obs = np.array(msg.get("observation"))
+                    reward = msg.get("reward", 0)
+                    done = msg.get("done", False)
+                    episode_reward += reward
 
-                        if msg.get("type") == "action.taken":
-                            next_obs = np.array(msg.get("observation"))
-                            reward = msg.get("reward", 0)
-                            done = msg.get("done", False)
-                            episode_reward += reward
+                    agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+                    current_obs = next_obs
 
-                            agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
-                            current_obs = next_obs
+                    # Potentially blocking training call
+                    if agent.steps_done > hyperparams.get('burnin_steps', 1000) and \
+                       agent.steps_done % hyperparams.get('policy_train_frequency', 10) == 0 and \
+                       len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
+                        train_stats = await asyncio.to_thread(agent.train, cortex_id=cortex_id)
+                        if train_stats:
+                            update_ui_state_in_redis('chimera_training_metrics', train_stats)
+                            updated_graph = agent.get_graph_structure()
+                            update_ui_state_in_redis('chimera_graph_state', updated_graph)
 
-                            if agent.steps_done > hyperparams.get('burnin_steps', 1000) and \
-                               agent.steps_done % hyperparams.get('policy_train_frequency', 10) == 0 and \
-                               len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
-                                # Run the synchronous, CPU-bound training step in a separate thread
-                                train_stats = await asyncio.to_thread(agent.train, cortex_id=cortex_id)
-                                if train_stats:
-                                    update_ui_state_in_redis('chimera_training_metrics', train_stats)
-                                    updated_graph = agent.get_graph_structure()
-                                    update_ui_state_in_redis('chimera_graph_state', updated_graph)
+                elif msg.get("type") == "game.over":
+                    done = True
+                else:
+                    logger.warning(f"Unexpected message type received: {msg.get('type')}")
 
-                        elif msg.get("type") == "game.over":
-                            done = True
-                        else:
-                            logger.warning(f"Unexpected message type received: {msg.get('type')}")
+            except Exception as e:
+                logger.error(f"Error during episode {episode_num}: {e}", exc_info=True)
+                return "EPISODE_ERROR", episode_reward, agent.steps_done
 
-                    pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": agent.steps_done})
-                    pbar.update(1)
+        return "SUCCESS", episode_reward, agent.steps_done
 
-                    episode_stats = { 'episode': episode, 'reward': episode_reward, 'total_steps': agent.steps_done }
-                    update_ui_state_in_redis('chimera_episode_metrics', episode_stats)
+    async def _run_training_loop(self, agent, connector, session_info, cortex_id, episodes):
+        """Runs the main training loop over all episodes."""
+        initial_obs = np.array(session_info.get("observation"))
+        with tqdm(total=episodes, desc=f"Training on {connector.environment_id}") as pbar:
+            for episode in range(1, episodes + 1):
+                status, episode_reward, total_steps = await self._run_episode(episode, agent, connector, initial_obs, cortex_id)
 
-                    if episode < episodes:
-                        reset_response = await connector.reset_environment()
-                        if reset_response:
-                            # The reset response should contain the new initial observation
-                            current_obs = np.array(reset_response.get("observation"))
-                        else:
-                            logger.error("Failed to reset environment. Exiting.")
-                            break
+                if status != "SUCCESS":
+                    logger.error(f"Episode {episode} failed with status: {status}. Aborting training.")
+                    break
 
+                pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": total_steps})
+                pbar.update(1)
+
+                episode_stats = {'episode': episode, 'reward': episode_reward, 'total_steps': total_steps}
+                update_ui_state_in_redis('chimera_episode_metrics', episode_stats)
+
+                if episode < episodes:
+                    reset_response = await connector.reset_environment()
+                    if reset_response:
+                        initial_obs = np.array(reset_response.get("observation"))
+                    else:
+                        logger.error("Failed to reset environment. Exiting training loop.")
+                        break
+
+    async def async_handle(self, *args, **options):
+        """The main asynchronous logic for training the agent."""
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        agent, connector, session_info, cortex_id = await self._setup(options)
+
+        if not all([agent, connector, session_info, cortex_id]):
+            logger.error("Setup failed. Aborting training.")
+            return
+
+        try:
+            await self._run_training_loop(agent, connector, session_info, cortex_id, options['episodes'])
         finally:
             logger.info("Closing connection and saving agent state.")
             await connector.close()
-            if 'agent' in locals():
-                agent.save_state(version_info={"message": f"Colosseum training on {env_id} stopped."})
+            agent.save_state(version_info={"message": f"Colosseum training on {connector.environment_id} stopped."})
