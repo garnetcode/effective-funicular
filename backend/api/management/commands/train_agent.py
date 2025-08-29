@@ -121,7 +121,7 @@ class Command(BaseCommand):
                 hyperparams=hyperparams,
                 history_config=history_config
             )
-            agent.set_active_skill(env_id, actual_action_dim)
+            agent.set_active_skill(env_id)
             logger.info(f"Initialized Chimera Agent '{agent_tag}' for {env_id}")
 
             # --- Connect and Join Session ---
