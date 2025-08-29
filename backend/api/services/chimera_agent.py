@@ -222,15 +222,10 @@ class ChimeraAgent:
             output_dim=self.stag_context_dim
         ).to(self.device)
 
-        # Actor-Critic Planner
-        # Actor (Policy Head)
-        self.action_head = ActionHead(
-            input_dim=self.hidden_dim + self.stag_context_dim,
-            n_actions=self.max_action_dim,
-            goal_dim=self.goal_dim,
-            learning_rate=self.learning_rate
-        ).to(self.device)
-        # Critic (Value Head)
+        # --- Multi-Head Actor-Critic Architecture ---
+        # A dictionary to hold a separate action head for each skill/environment
+        self.action_heads = nn.ModuleDict()
+        # A single, shared value head
         self.value_head = nn.Sequential(
             nn.Linear(self.hidden_dim + self.latent_dim + self.goal_dim, 400),
             nn.ReLU(),
@@ -313,7 +308,7 @@ class ChimeraAgent:
         agent_state = {
             # --- Model States ---
             'world_models_state_dicts': [wm.state_dict() for wm in self.world_models],
-            'action_head_state_dict': self.action_head.state_dict(),
+            'action_heads_state_dict': self.action_heads.state_dict(), # Changed
             'value_head_state_dict': self.value_head.state_dict(),
             'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
 
@@ -355,7 +350,11 @@ class ChimeraAgent:
             for i, sd in enumerate(state_dict['world_models_state_dicts']):
                 if i < len(self.world_models): self.world_models[i].load_state_dict(sd)
 
-        self.action_head.load_state_dict(state_dict['action_head_state_dict'])
+        # The action_heads ModuleDict is loaded directly.
+        # The structure of the dict (which heads exist) is restored, and then their states are loaded.
+        if 'action_heads_state_dict' in state_dict:
+            self.action_heads.load_state_dict(state_dict['action_heads_state_dict'])
+
         self.value_head.load_state_dict(state_dict['value_head_state_dict'])
         self.stag_context_processor.load_state_dict(state_dict.get('stag_context_processor_state_dict'))
 
@@ -385,10 +384,21 @@ class ChimeraAgent:
 
         logger.info(f"Agent state loaded from version '{version}'. Resuming from step {self.steps_done}.")
 
-    def set_active_skill(self, skill_id):
-        """Sets the currently active skill/environment for the agent."""
-        logger.info(f"Agent active skill set to: {skill_id}")
+    def set_active_skill(self, skill_id, action_dim):
+        """Sets the currently active skill and ensures an action head exists for it."""
+        logger.info(f"Agent active skill set to: {skill_id} with action_dim: {action_dim}")
         self.active_skill_id = skill_id
+
+        # If an action head for this skill doesn't exist, create it.
+        if skill_id not in self.action_heads:
+            logger.info(f"Creating new action head for skill '{skill_id}'.")
+            new_head = ActionHead(
+                input_dim=self.hidden_dim + self.stag_context_dim,
+                n_actions=action_dim,
+                goal_dim=self.goal_dim,
+                learning_rate=self.learning_rate
+            ).to(self.device)
+            self.action_heads[skill_id] = new_head
 
     def set_goal(self, goal):
         """Sets the current goal for the agent."""
@@ -594,7 +604,10 @@ class ChimeraAgent:
 
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
                 goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
-                action_dist = self.action_head(combined_input, goal_tensor_expanded)
+
+                # Use the skill-specific action head
+                active_head = self.action_heads[self.active_skill_id]
+                action_dist = active_head(combined_input, goal_tensor_expanded)
 
                 mask = torch.full(action_dist.logits.shape, -float('inf'), device=self.device)
                 mask[0, :actual_action_dim] = 0
@@ -838,42 +851,26 @@ class ChimeraAgent:
             obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
         obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
 
-        # --- Sequence-based Forward Pass and Loss Calculation ---
-        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
-        total_loss = 0
+        # --- Sequence-based Forward Pass through Hierarchical RSSM ---
+        h_states, z_states, z_dists, reconstructions, errors = self.hierarchical_rssm.forward_sequence(obs_sequence_processed, action_sequence)
 
-        # This simplified loop trains only the first level of the hierarchy for verification.
-        # It iterates through the sequence to correctly update the hidden state.
-        for t in range(self.replay_buffer.sequence_length):
-            obs_t = obs_sequence_processed[:, t]
-            action_t = action_sequence[:, t]
+        # --- Loss Calculation ---
+        kl_loss, free_nats = self.hierarchical_rssm.calculate_kl_loss(z_dists, free_bits=self.hyperparams.get('free_bits', 1.0))
 
-            # Call level0 directly, bypassing the full hierarchy
-            h_t, z_t, _, error, reconstruction = self.level0(obs_t, action_t, h_t, z_t)
-
-            # The KL loss and free_nats are placeholders for now.
-            kl_loss = torch.tensor(0.0, device=self.device)
-            free_nats = self.hyperparams.get('free_bits', 1.0)
-
-            loss = self._predictive_coding_loss([reconstruction], [error], kl_loss, obs_t, free_nats)
-            total_loss += loss
-
-        # Divide by sequence length to get average loss per step
-        total_loss /= self.replay_buffer.sequence_length
-
-        # For compatibility with the rest of the function, we create placeholder
-        # return values. The important part is that `total_loss` is calculated
-        # based on our isolated level0 module.
-        hidden_states = torch.stack([h_t], dim=1) # Use the final hidden state
-        contrastive_loss = torch.tensor(0.0)
+        # The reconstruction is from the lowest level of the hierarchy
+        bottom_level_recons = reconstructions[0]
+        # The error term in PC loss is the sum of squares of the error signals at each level
+        pc_loss = self._predictive_coding_loss(bottom_level_recons, errors, kl_loss, obs_sequence_processed, free_nats)
 
         # --- Contrastive Loss Calculation ---
-        anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
-        positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
+        # Use the hidden state from the final layer of the hierarchy as the representation
+        final_hidden_states = h_states[-1]
+        anchor = final_hidden_states[:, :-1].reshape(-1, self.hidden_dim)
+        positive = final_hidden_states[:, 1:].reshape(-1, self.hidden_dim)
         if self.contrastive_queue_size > 0:
             negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
         else:
+            # If queue is disabled, use other positives in the batch as negatives
             negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
         contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
 
@@ -883,33 +880,40 @@ class ChimeraAgent:
             # Create augmented observations (e.g., with noise)
             obs_aug = obs_sequence + torch.randn_like(obs_sequence) * 0.1
             if obs_sequence.dim() == 5:
-                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
+                obs_aug_processed_aug = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
             else:
-                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
-            obs_aug_processed = obs_aug_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
+                obs_aug_processed_aug = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
+            obs_aug_processed_aug = obs_aug_processed_aug.view(batch_size, self.replay_buffer.sequence_length, -1)
 
             # Get hidden states for augmented observations
-            h_t_aug, z_t_aug = torch.zeros_like(h_t), torch.zeros_like(z_t)
-            hidden_states_aug = []
-            for t in range(self.replay_buffer.sequence_length):
-                obs_t_aug = obs_aug_processed[:, t]
-                action_t = action_sequence[:, t]
-                h_t_aug, z_t_aug, _ = world_model.rssm(obs_t_aug, action_t, h_t_aug, z_t_aug)
-                hidden_states_aug.append(h_t_aug)
-            hidden_states_aug = torch.stack(hidden_states_aug, dim=1)
+            h_states_aug, _, _, _, _ = self.hierarchical_rssm.forward_sequence(obs_aug_processed_aug, action_sequence)
+            final_h_aug = h_states_aug[-1]
+            consistency_loss = F.mse_loss(final_hidden_states.detach(), final_h_aug)
 
-            consistency_loss = F.mse_loss(hidden_states.detach(), hidden_states_aug)
+        # --- Total Loss ---
+        total_loss = (
+            pc_loss +
+            self.contrastive_loss_weight * contrastive_loss +
+            self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
+        )
 
-        # The final loss is the one calculated by our new function.
-        # The contrastive loss part is temporarily disabled.
-        total_loss = loss
+        # Apply importance sampling weights from PER
+        weighted_loss = (total_loss * weights).mean()
 
-        return total_loss, contrastive_loss, hidden_states, batch['reward']
+        return weighted_loss, contrastive_loss, final_hidden_states, batch['reward']
 
-    def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
-        reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
-        prediction_error_loss = sum(torch.mean(error ** 2) for error in errors)
-        kl_loss = torch.max(torch.tensor(0.0, device=self.device), kl_loss - free_nats)
+    def _predictive_coding_loss(self, reconstruction, errors, kl_loss, target_observation, free_nats):
+        # Reconstruction loss is calculated only at the lowest level
+        reconstruction_loss = F.mse_loss(reconstruction, target_observation)
+
+        # Prediction error loss is the sum of squared errors from all levels
+        prediction_error_loss = 0
+        for level_errors in errors:
+            # level_errors is a list of tensors, one for each timestep
+            stacked_errors = torch.stack(level_errors, dim=1)
+            prediction_error_loss += torch.mean(stacked_errors ** 2)
+
+        # The kl_loss is already calculated and includes the free_nats part
         return reconstruction_loss + prediction_error_loss + kl_loss
 
 
@@ -943,6 +947,19 @@ class ChimeraAgent:
         with torch.no_grad():
             teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
 
+        active_head = self.action_heads[self.active_skill_id]
+
+        # --- Imagine Trajectories using the policy's actions ---
+        h_t, z_t = h_start, z_start
+        imagined_h = [h_t]
+        imagined_z = [z_t]
+
+        policy_actions = []
+        policy_log_probs = []
+        policy_entropies = []
+
+        active_head = self.action_heads[self.active_skill_id]
+
         # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
         imagined_h = [h_t]
@@ -958,7 +975,7 @@ class ChimeraAgent:
             stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
 
             action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
-            action_dist = self.action_head(action_input, goal_sequence)
+            action_dist = active_head(action_input, goal_sequence)
 
             action = action_dist.sample()
             policy_actions.append(action)
@@ -1005,22 +1022,17 @@ class ChimeraAgent:
         critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
         # 3. Behavioral Cloning (BC) Loss
-        # The teacher plan has shape (horizon, batch, action_dim).
-        # We need the policy's logits for the states it visited.
-        # We process the whole trajectory at once by reshaping.
         imagined_states = norm_imagined_h[:-1]
         stag_context_bc = torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)
         goal_bc = goal_sequence.unsqueeze(0).expand(horizon, -1, -1)
 
-        # Flatten the horizon and batch dimensions to treat the sequence as a single batch
         imagined_states_flat = imagined_states.reshape(-1, self.hidden_dim)
         stag_context_bc_flat = stag_context_bc.reshape(-1, self.stag_context_dim)
         goal_bc_flat = goal_bc.reshape(-1, self.goal_dim)
 
         combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat], dim=-1)
-        policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
+        policy_logits_flat = active_head(combined_input_flat, goal_bc_flat).logits
 
-        # Reshape the output logits back to (horizon, batch, action_dim)
         policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
         bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
@@ -1030,13 +1042,14 @@ class ChimeraAgent:
         # --- Total Loss and Backpropagation ---
         total_loss = policy_loss + critic_loss + lambda_bc * bc_loss + entropy_loss
 
+        # Optimizer trains the active action head and the shared value head
         ac_optimizer = torch.optim.Adam(
-            list(self.action_head.parameters()) + list(self.value_head.parameters()),
+            list(active_head.parameters()) + list(self.value_head.parameters()),
             lr=self.hyperparams.get('actor_critic_lr', 0.0003)
         )
         ac_optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(self.action_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(list(active_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
         ac_optimizer.step()
 
         return {

@@ -172,15 +172,24 @@ const NetworkVisualizer: React.FC<NetworkVisualizerProps> = ({ graphData }) => {
     return <div style={{ color: 'white', margin: '20px' }}>Loading graph data or no data available...</div>;
   }
 
+  const nodeCount = Object.keys(graphData.nodes).length;
+  const edgeCount = graphData.edges.length;
+
   return (
-    <Canvas camera={{ position: [0, 5, 15], fov: 50 }}>
-      <ambientLight intensity={0.5} />
-      <pointLight position={[10, 10, 10]} />
-      <Bounds fit clip observe>
-        <ForceGraph graphData={graphData} />
-      </Bounds>
-      <OrbitControls />
-    </Canvas>
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div className="graph-legend">
+        <div>Nodes: {nodeCount}</div>
+        <div>Edges: {edgeCount}</div>
+      </div>
+      <Canvas camera={{ position: [0, 5, 15], fov: 50 }}>
+        <ambientLight intensity={0.5} />
+        <pointLight position={[10, 10, 10]} />
+        <Bounds fit clip observe>
+          <ForceGraph graphData={graphData} />
+        </Bounds>
+        <OrbitControls />
+      </Canvas>
+    </div>
   );
 };
 

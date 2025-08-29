@@ -111,3 +111,16 @@ h3 {
 .action-visualizer-container > div {
   flex-grow: 1;
 }
+
+.graph-legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background-color: rgba(0, 0, 0, 0.6);
+  color: var(--secondary-text-color);
+  padding: 8px;
+  border-radius: 4px;
+  z-index: 10;
+  font-size: 0.8em;
+  pointer-events: none; /* Allows mouse events to pass through to the canvas */
+}

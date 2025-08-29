@@ -134,10 +134,10 @@ class Command(BaseCommand):
         try:
             for env_id in env_names:
                 logger.info(f"--- Starting Curriculum Stage: {env_id} ---")
-                agent.set_active_skill(env_id)
                 env = gym.make(env_id)
                 _, cortex_id = create_cortex_configs_from_observation_space(env.observation_space)
                 actual_action_dim = env.action_space.n
+                agent.set_active_skill(env_id, actual_action_dim)
 
                 steps_in_current_env = 0
                 with tqdm(total=steps_per_env, desc=f"Training on {env_id}") as pbar:
