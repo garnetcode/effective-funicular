@@ -78,7 +78,7 @@ class ColosseumConnector:
 
     async def send_message(self, message):
         """Sends a raw JSON message to the server, with reconnection logic."""
-        if not self.websocket or self.websocket.closed:
+        if not self.websocket or not self.websocket.open:
             logger.warning(f"WebSocket closed or not available when trying to send {message.get('type')}. Reconnecting.")
             if not await self.reconnect():
                 logger.error(f"Cannot send message of type {message.get('type')}, reconnection failed.")
