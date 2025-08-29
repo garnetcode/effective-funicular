@@ -3,29 +3,44 @@ import json
 import websockets
 import logging
 import aiohttp
+import random
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ColosseumConnector:
     """
     Manages communication with a Colosseum game server for a single session,
     handling both HTTP for session management and WebSockets for real-time gameplay.
+
+    This class is designed to be used by an AI agent to connect to and play in a
+    Colosseum environment.
     """
-    def __init__(self, environment_id, agent_tag, host="127.0.0.1", http_port=8000, ws_port=8000):
-        self.http_base_url = f"http://{host}:{http_port}/api"
-        self.ws_base_url = f"ws://{host}:{ws_port}/ws"
+    def __init__(self, environment_id, agent_tag, host="127.0.0.1", port=8002):
+        """
+        Initializes the connector.
+        Args:
+            environment_id (str): The ID of the gymnasium environment to play in (e.g., "CartPole-v1").
+            agent_tag (str): A unique identifier for the agent.
+            host (str): The hostname or IP address of the Colosseum server.
+            port (int): The port for both HTTP and WebSocket connections.
+        """
+        self.http_base_url = f"http://{host}:{port}/api"
+        self.ws_base_url = f"ws://{host}:{port}/ws"
         self.environment_id = environment_id
         self.agent_tag = agent_tag
         self.session_id = None
         self.websocket = None
+        self.is_reconnecting = False
+        self.reconnect_attempts = 0
 
     async def create_session(self):
         """Creates a new game session via the HTTP API."""
         url = f"{self.http_base_url}/sessions/create/"
         payload = {
             "environment_id": self.environment_id,
-            "agent_tag": self.agent_tag,
-            "agent_name": f"ChimeraAgent-{self.agent_tag}",
+            "agent_name": f"ConnectorAgent-{self.agent_tag}",
             "agent_type": "ai"
         }
         try:
@@ -33,12 +48,12 @@ class ColosseumConnector:
                 async with session.post(url, json=payload) as response:
                     response.raise_for_status()
                     data = await response.json()
-                    if data.get("success"):
-                        self.session_id = data.get("session_id")
-                        logger.debug(f"Successfully created session: {self.session_id}")
+                    if data.get("success") and data.get("session_id"):
+                        self.session_id = data["session_id"]
+                        logger.info(f"Successfully created session: {self.session_id}")
                         return data
                     else:
-                        logger.error(f"Failed to create session: {data}")
+                        logger.error(f"Failed to create session. Server response: {data}")
                         return None
         except aiohttp.ClientError as e:
             logger.error(f"HTTP error creating session: {e}")
@@ -52,36 +67,22 @@ class ColosseumConnector:
 
         uri = f"{self.ws_base_url}/session/{self.session_id}/"
         try:
+            # The Origin header is sometimes needed to bypass CORS checks, especially in local dev.
             self.websocket = await websockets.connect(
                 uri,
-                additional_headers={"Origin": "http://localhost:3000"}
+                extra_headers={"Origin": "http://localhost:3000"}
             )
-            logger.debug(f"Successfully connected to WebSocket: {uri}")
+            logger.info(f"Successfully connected to WebSocket: {uri}")
+            self.reconnect_attempts = 0 # Reset on successful connection
             return True
-        except websockets.exceptions.InvalidURI:
-            logger.error(f"Invalid WebSocket URI: {uri}")
+        except (websockets.exceptions.InvalidURI,
+                websockets.exceptions.ConnectionClosed,
+                OSError) as e: # OSError can happen if the server is not running
+            logger.error(f"Failed to connect to WebSocket at {uri}: {e}")
             return False
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.error(f"WebSocket connection closed unexpectedly: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during WebSocket connection: {e}", exc_info=True)
-            return False
-
-    async def send_message(self, message):
-        """Sends a raw JSON message to the server."""
-        if not self.websocket:
-            logger.error("Cannot send message, WebSocket is not connected.")
-            return
-        try:
-            await self.websocket.send(json.dumps(message))
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Cannot send message, connection is closed.")
-        except Exception as e:
-            logger.error(f"Failed to send message: {e}", exc_info=True)
 
     async def join_session(self):
-        """Sends the agent.join message to formally join the session."""
+        """Sends the agent.join message to formally join the session and receive the initial state."""
         if not self.websocket:
             logger.error("Cannot join session, WebSocket is not connected.")
             return None
@@ -91,11 +92,11 @@ class ColosseumConnector:
                 "agent_tag": self.agent_tag,
                 "environment_id": self.environment_id,
             }
-            await self.websocket.send(json.dumps(join_message))
+            await self.send_message(join_message)
             response = await self.receive_message()
 
             if response and response.get("type") == "agent.joined":
-                logger.debug(f"Agent {self.agent_tag} successfully joined session {self.session_id}")
+                logger.info(f"Agent '{self.agent_tag}' successfully joined session '{self.session_id}'")
                 return response
             else:
                 error_detail = response.get('message', 'No details provided') if response else "No response from server"
@@ -106,161 +107,179 @@ class ColosseumConnector:
             return None
 
     async def send_action(self, action):
-        """Sends an agent action to the server, with reconnection logic."""
-        action_message_str = json.dumps({
+        """
+        Sends an agent action to the server.
+        The action can be an integer, float, or list/tuple, depending on the environment's action space.
+        """
+        action_message = {
             "type": "agent.action",
-            "action": int(action),
+            "action": action, # No longer casting to int, allows for continuous actions
             "agent_tag": self.agent_tag
-        })
-
-        for attempt in range(2):  # Try once, then reconnect and try again
-            if self.websocket and not self.websocket.closed:
-                try:
-                    await self.websocket.send(action_message_str)
-                    return  # Success
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning(f"Connection closed on send_action (attempt {attempt + 1}).")
-
-            if attempt == 0:
-                if not await self.reconnect():
-                    logger.error("Cannot send action, reconnection failed.")
-                    break  # Break the loop if reconnect fails
-            else:
-                logger.error("Failed to send action after reconnecting.")
-
-    async def reset_environment(self):
-        """
-        Sends a reset message and waits for confirmation, ignoring any
-        other messages that may be in the buffer.
-        """
-        logger.debug("Sending agent.reset message.")
-        reset_message = {"type": "agent.reset"}
-        await self.send_message(reset_message)
-
-        # Wait for the 'environment.reset' confirmation, ignoring other messages.
-        start_time = asyncio.get_event_loop().time()
-        timeout = 30.0  # Increased timeout for slower environments
-        while asyncio.get_event_loop().time() - start_time < timeout:
-            try:
-                # Use a shorter timeout for each recv() call within the main loop
-                response = await asyncio.wait_for(self.receive_message(), timeout=1.0)
-
-                if response and response.get("type") == "environment.reset":
-                    logger.debug("Environment reset successfully.")
-                    return response
-                elif response:
-                    # Log other messages received while waiting
-                    logger.debug(f"Ignoring buffered message of type '{response.get('type')}' while waiting for reset confirmation. Content: {response}")
-                # If response is None (due to connection closed), the loop will continue and eventually time out.
-
-            except asyncio.TimeoutError:
-                # This is a timeout for a single receive, not the whole operation.
-                # It's okay, we just continue waiting for the confirmation.
-                logger.debug("Timeout waiting for a message, will try again...")
-                continue
-            except Exception as e:
-                logger.error(f"An unexpected error occurred while waiting for reset confirmation: {e}")
-                return None # Exit on other errors
-
-        # If the while loop finishes, it means the main timeout was exceeded
-        logger.error("Failed to reset environment: Did not receive 'environment.reset' confirmation within the total timeout.")
-        return None
+        }
+        await self.send_message(action_message)
 
     async def receive_message(self):
-        """
-        Receives, parses, and returns a single message from the WebSocket,
-        with reconnection logic. It ignores broadcasts of the agent's own actions.
-        """
-        while True:  # Loop to ignore self-action broadcasts and find a relevant message
-            message_data = await self._receive_one_message_with_retry()
-            if message_data is None:
-                return None  # Return None if receiving fails permanently
+        """Receives and parses a single message from the WebSocket, with reconnection logic."""
+        if not self.websocket or self.websocket.closed:
+            logger.warning("Cannot receive message, WebSocket is not connected or closed.")
+            await self.handle_reconnect()
+            return None
+        try:
+            message = await self.websocket.recv()
+            return json.loads(message)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Connection closed while waiting for message. Attempting to reconnect.")
+            await self.handle_reconnect()
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from message: {e}")
+            return None
 
-            # Check if the message is a reflection of our own action
-            is_own_action = (
-                message_data.get("type") == "action.taken" and
-                message_data.get("agent_tag") == self.agent_tag
-            )
-
-            if is_own_action:
-                # This is a broadcast of our own action. We process it because it contains
-                # the environment's response (obs, reward, done). In other protocols,
-                # we might ignore this and wait for a direct response.
-                return message_data
-            else:
-                # If it's not our action, it's a relevant message.
-                return message_data
-
-    async def _receive_one_message_with_retry(self):
-        """Helper that attempts to receive a single message, with one retry after reconnecting."""
-        for attempt in range(2):  # Try once, then reconnect and try again
+    async def send_message(self, message):
+        """Sends a raw JSON message to the server, with reconnection logic."""
+        if not self.websocket or self.websocket.closed:
+            logger.error("Cannot send message, WebSocket is not connected or closed.")
+            await self.handle_reconnect()
+            # After attempting to reconnect, try sending again if the connection is back.
             if self.websocket and not self.websocket.closed:
-                try:
-                    message = await self.websocket.recv()
-                    logger.debug(f"Raw message received: {message}")
-                    return json.loads(message)
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning(f"Connection closed on receive (attempt {attempt + 1}).")
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON from message: {e}")
-                    return None  # Don't retry on malformed data
-                except Exception as e:
-                    logger.error(f"An unexpected error occurred in receive_message: {e}")
-                    break  # Break on other unexpected errors
+                 await self.websocket.send(json.dumps(message))
+            return
 
-            if attempt == 0:
-                if not await self.reconnect():
-                    logger.error("Cannot receive message, reconnection failed.")
-                    break  # Break the loop if reconnect fails
+        try:
+            await self.websocket.send(json.dumps(message))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Cannot send message, connection is closed. Attempting to reconnect.")
+            await self.handle_reconnect()
+            if self.websocket and not self.websocket.closed:
+                await self.websocket.send(json.dumps(message))
+
+    async def handle_reconnect(self):
+        """Handles WebSocket reconnection with exponential backoff."""
+        if self.is_reconnecting:
+            return
+        self.is_reconnecting = True
+
+        await self.close()
+
+        self.reconnect_attempts += 1
+        wait_time = min(2 ** self.reconnect_attempts, 30)
+        logger.info(f"Connection lost. Attempting to reconnect in {wait_time} seconds (Attempt {self.reconnect_attempts})...")
+        await asyncio.sleep(wait_time)
+
+        try:
+            if await self.connect_websocket():
+                if await self.join_session():
+                    logger.info("Successfully reconnected and rejoined session.")
+                else:
+                    logger.error("Failed to rejoin session after reconnecting.")
             else:
-                logger.error("Failed to receive message after reconnecting.")
-
-        return None
-
-    async def reconnect(self, max_retries=3, delay=1):
-        """
-        Attempts to close the existing connection and re-establish a new one.
-        Includes retries with exponential backoff.
-        """
-        logger.info("Connection lost. Attempting to reconnect...")
-        await self.close()  # Close the old connection gracefully
-
-        for i in range(max_retries):
-            logger.info(f"Reconnection attempt {i + 1}/{max_retries}...")
-            try:
-                if await self.connect_websocket():
-                    logger.info("WebSocket reconnected. Attempting to re-join session...")
-                    # Re-joining is crucial for the server to recognize the new connection.
-                    if await self.join_session():
-                        logger.info("Successfully re-joined session.")
-                        return True
-                    else:
-                        logger.warning("Reconnected to WebSocket, but failed to re-join session.")
-                        # Close the new connection as it's not usable without joining
-                        await self.close()
-
-                # If connect_websocket or join_session fails, wait before retrying
-                sleep_time = delay * (2 ** i)
-                logger.info(f"Reconnection attempt failed. Retrying in {sleep_time} seconds...")
-                await asyncio.sleep(sleep_time)
-
-            except Exception as e:
-                logger.error(f"An unexpected error occurred during reconnection attempt {i + 1}: {e}", exc_info=True)
-                sleep_time = delay * (2 ** i)
-                logger.info(f"Retrying in {sleep_time} seconds...")
-                await asyncio.sleep(sleep_time)
-
-        logger.error("Failed to reconnect after multiple attempts.")
-        return False
+                logger.error("Failed to re-establish WebSocket connection.")
+        finally:
+            self.is_reconnecting = False
 
     async def close(self):
         """Closes the WebSocket connection."""
-        if self.websocket:
+        if self.websocket and not self.websocket.closed:
             try:
                 await self.websocket.close()
-                logger.debug("WebSocket connection closed.")
+                logger.info("WebSocket connection closed.")
             except websockets.exceptions.ConnectionClosed:
-                logger.debug("WebSocket connection was already closed.")
-            except Exception as e:
-                logger.error(f"Error while closing WebSocket: {e}", exc_info=True)
+                logger.info("WebSocket connection was already closed.")
         self.websocket = None
+
+async def run_random_agent(environment_id, agent_tag):
+    """
+    Example of how to use the ColosseumConnector to run an agent
+    that takes random actions in an environment.
+    """
+    logger.info(f"Starting random agent for environment: {environment_id}")
+    # Use port 8002 if you are running the backend server with `python manage.py runserver 0.0.0.0:8002`
+    connector = ColosseumConnector(environment_id, agent_tag, port=8000)
+
+    # 1. Create a session
+    session_info = await connector.create_session()
+    if not session_info:
+        logger.error("Could not create session. Exiting.")
+        return
+
+    # 2. Connect to the WebSocket
+    if not await connector.connect_websocket():
+        logger.error("Could not connect to WebSocket. Exiting.")
+        return
+
+    # 3. Join the session and get the initial state
+    initial_state = await connector.join_session()
+    if not initial_state:
+        logger.error("Could not join session. Exiting.")
+        await connector.close()
+        return
+
+    action_space_shape = initial_state.get("action_space_shape")
+    if not action_space_shape:
+        logger.error("Could not determine action space from initial state.")
+        await connector.close()
+        return
+
+    logger.info(f"Action space shape: {action_space_shape}")
+
+    # 4. Main game loop
+    try:
+        while True:
+            # For this example, we take a random action.
+            # A real agent would use the observation to decide on an action.
+            if isinstance(action_space_shape, int): # Discrete space
+                action = random.randint(0, action_space_shape - 1)
+            else: # Continuous space (like Pendulum) - send a random value in range [-2.0, 2.0]
+                action = [random.uniform(-2.0, 2.0)]
+
+            logger.info(f"Sending action: {action}")
+            await connector.send_action(action)
+
+            # Receive the result of the action
+            state = await connector.receive_message()
+            if not state:
+                logger.warning("Did not receive state, might be reconnecting. Skipping loop.")
+                continue
+
+            if state.get("type") == "error":
+                logger.error(f"Received error from server: {state.get('message')}")
+                break
+
+            if state.get("type") == "action.taken":
+                reward = state.get("reward", 0)
+                done = state.get("done", False)
+                total_reward = state.get("total_reward")
+                logger.info(f"Received state: Reward={reward:.2f}, Total Reward={total_reward:.2f}, Done={done}")
+
+                if done:
+                    logger.info("Game over!")
+                    if state.get("terminated"):
+                        logger.info(f"Agent reached the goal! Final Score: {total_reward:.2f}")
+                    elif state.get("truncated"):
+                         logger.info(f"Agent timed out. Final Score: {total_reward:.2f}")
+                    break
+
+            elif state.get("type") == "game.over": # Another way the game can end
+                total_reward = state.get('final_reward')
+                logger.info(f"Game over message received! Final Score: {total_reward:.2f}")
+                break
+
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user.")
+    finally:
+        # 5. Clean up
+        logger.info("Closing connection.")
+        await connector.close()
+
+if __name__ == "__main__":
+    # --- Configuration ---
+    # Change this to the environment you want to test
+    # ENV_ID = "CartPole-v1"
+    # ENV_ID = "MountainCar-v0"
+    ENV_ID = "Pendulum-v1"
+    AGENT_TAG = f"random-agent-{random.randint(1000, 9999)}"
+
+    try:
+        asyncio.run(run_random_agent(ENV_ID, AGENT_TAG))
+    except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError):
+        logger.error("\nConnection to the server failed. Please ensure the Colosseum backend is running.")
