@@ -167,9 +167,20 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
       {nodesRef.current.map((node) => (
         <GNGNode key={node.id} node={node} />
       ))}
-      {edgesRef.current.map((edge, index) => (
-        <GNGEdge key={`${(edge.source as NodeDatum).id}-${(edge.target as NodeDatum).id}`} edge={edge} />
-      ))}
+      {edgesRef.current.map((edge, index) => {
+        // Manually find the source and target nodes from our canonical nodesRef list
+        // This ensures we are always using the node objects that are being updated by the simulation
+        const sourceNode = nodesRef.current.find(node => node.id === (edge.source as NodeDatum).id);
+        const targetNode = nodesRef.current.find(node => node.id === (edge.target as NodeDatum).id);
+
+        if (!sourceNode || !targetNode) {
+          return null; // Don't render edge if nodes are not found
+        }
+
+        const edgeWithResolvedNodes = { source: sourceNode, target: targetNode };
+
+        return <GNGEdge key={`${sourceNode.id}-${targetNode.id}`} edge={edgeWithResolvedNodes} />
+      })}
     </>
   );
 };
