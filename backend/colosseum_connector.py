@@ -87,8 +87,8 @@ class ColosseumConnector:
         message_str = json.dumps(message)
         try:
             await self.websocket.send(message_str)
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning(f"Connection closed on send_message for type {message.get('type')}. Reconnecting.")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"Connection closed on send_message for type {message.get('type')}. Code: {e.code}, Reason: {e.reason}. Reconnecting.")
             if await self.reconnect():
                 logger.info("Reconnected successfully. Retrying send_message.")
                 await self.websocket.send(message_str)
@@ -136,8 +136,8 @@ class ColosseumConnector:
 
         try:
             await self.websocket.send(action_message_str)
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Connection closed on send_action. Attempting to reconnect...")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"Connection closed on send_action. Code: {e.code}, Reason: {e.reason}. Attempting to reconnect...")
             if await self.reconnect():
                 logger.info("Reconnected successfully. Retrying send_action.")
                 await self.websocket.send(action_message_str) # Retry once after reconnect
@@ -223,15 +223,15 @@ class ColosseumConnector:
             # Attempt a reconnect, as the connection might be stale
             asyncio.create_task(self.reconnect())
             return None # Return None to indicate failure
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Connection closed on receive. Attempting to reconnect...")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"Connection closed on receive. Code: {e.code}, Reason: {e.reason}. Attempting to reconnect...")
             if await self.reconnect():
                 logger.info("Reconnected successfully. Retrying receive.")
                 try:
                     message = await self.websocket.recv()
                     return json.loads(message)
-                except websockets.exceptions.ConnectionClosed:
-                    logger.error("Connection closed again immediately after reconnect.")
+                except websockets.exceptions.ConnectionClosed as e2:
+                    logger.error(f"Connection closed again immediately after reconnect. Code: {e2.code}, Reason: {e2.reason}.")
                     return None
             else:
                 logger.error("Cannot receive message, reconnection failed.")
