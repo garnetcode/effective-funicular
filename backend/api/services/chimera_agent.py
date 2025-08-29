@@ -170,9 +170,8 @@ class ChimeraAgent:
         self.last_stag_node_id = None
         self.subgoal_reward = 0
         self.subgoal_duration = 0
-        # h_t and z_t for the RSSM
-        self.hidden_state = torch.zeros(1, self.hidden_dim, device=self.device)
-        self.latent_state = torch.zeros(1, self.latent_dim, device=self.device)
+        # h_t and z_t for the RSSM, initialized for the hierarchy
+        self.hidden_state, self.latent_state = None, None # Will be initialized after world models
         self.last_action = torch.tensor([0], device=self.device)
         self.high_level_plan = None
         self.current_subgoal = None
@@ -195,6 +194,10 @@ class ChimeraAgent:
                 weight_decay=self.world_model_weight_decay
             ) for wm in self.world_models
         ]
+
+        # Initialize hidden and latent states as lists for the hierarchy
+        self.hidden_state, self.latent_state = self.world_models[0].get_initial_state(batch_size=1, device=self.device)
+
         # Normalization Hub
         self.h_norm = nn.LayerNorm(self.hidden_dim).to(self.device)
         self.z_norm = nn.LayerNorm(self.latent_dim).to(self.device)
@@ -402,11 +405,14 @@ class ChimeraAgent:
 
         # 3. Use the first world model in the ensemble to update the agent's internal state
         with torch.no_grad():
-            h_next, z_next, _ = self.world_models[0].rssm(obs_tensor, self.last_action, self.hidden_state, self.latent_state)
+            # The HierarchicalRSSM returns lists of states for each level
+            all_h_next, all_z_next, _, _, _ = self.world_models[0].rssm(
+                obs_tensor, self.last_action, self.hidden_state, self.latent_state
+            )
 
         # 4. Update the agent's internal state
-        self.hidden_state = h_next
-        self.latent_state = z_next
+        self.hidden_state = all_h_next
+        self.latent_state = all_z_next
 
         # 5. Conditionally engage the STAG framework
         h_normalized = None
@@ -414,7 +420,8 @@ class ChimeraAgent:
         novelty = 0
         # Only engage STAG if we are past the pre-training phase.
         if self.steps_done > self.world_model_pretrain_steps:
-            h_normalized = self.h_norm(self.hidden_state).detach().cpu().numpy().flatten()
+            # Use the top-level hidden state (most abstract) for the STAG
+            h_normalized = self.h_norm(self.hidden_state[0]).detach().cpu().numpy().flatten()
             # The vector is now normalized by LayerNorm and will be normalized again
             # by _safe_unit in the GNG engine for double safety.
 
