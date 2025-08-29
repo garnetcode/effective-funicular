@@ -2,7 +2,7 @@ import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Bounds, Line } from '@react-three/drei';
 import * as THREE from 'three';
-import { forceSimulation, forceLink, forceManyBody, forceCenter, Simulation, SimulationNodeDatum, SimulationLinkDatum } from 'd3-force';
+import { forceSimulation, forceLink, forceManyBody, forceCenter, Simulation, SimulationNodeDatum, SimulationLinkDatum, ForceLink } from 'd3-force';
 
 // --- Type Definitions ---
 
@@ -107,7 +107,7 @@ const GNGEdge: React.FC<GNGEdgeProps> = React.memo(({ edge }) => {
 
 const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
   const nodesRef = useRef<NodeDatum[]>([]);
-  const [renderTrigger, setRenderTrigger] = useState(0);
+  const [, setRenderTrigger] = useState(0);
 
   const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum>>(
     forceSimulation<NodeDatum, EdgeDatum>()
@@ -143,7 +143,7 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
 
     // Update simulation
     simulation.nodes(nodesRef.current);
-    simulation.force<forceLink<NodeDatum, EdgeDatum>>("link")?.links(newEdgesData);
+    (simulation.force("link") as ForceLink<NodeDatum, EdgeDatum>)?.links(newEdgesData);
     simulation.alpha(0.3).restart(); // Reheat the simulation
 
   }, [graphData]);
@@ -159,8 +159,8 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
       {nodesRef.current.map((node) => (
         <GNGNode key={node.id} node={node} />
       ))}
-      {nodesRef.current.length > 0 && simulationRef.current.force<forceLink<NodeDatum, EdgeDatum>>("link")?.links().map((edge, index) => (
-        <GNGEdge key={index} edge={edge as EdgeDatum} />
+      {nodesRef.current.length > 0 && (simulation.force("link") as ForceLink<NodeDatum, EdgeDatum>)?.links().map((edge: EdgeDatum, index: number) => (
+        <GNGEdge key={index} edge={edge} />
       ))}
     </>
   );
