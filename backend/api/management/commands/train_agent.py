@@ -140,32 +140,41 @@ class Command(BaseCommand):
                 agent.set_active_skill(env_id, actual_action_dim)
 
                 steps_in_current_env = 0
+                # Initialize the postfix dictionary for the progress bar
+                postfix_data = {
+                    "Ep": 0, "Reward": "N/A", "Epsilon": "N/A", "Decision": "N/A",
+                    "WM Loss": "N/A", "AC Loss": "N/A", "Nodes": 0, "Edges": 0
+                }
                 with tqdm(total=steps_per_env, desc=f"Training on {env_id}") as pbar:
                     while steps_in_current_env < steps_per_env and total_steps < total_training_steps:
                         state, _ = env.reset()
                         done, truncated = False, False
                         episode_reward = 0
                         episode_num += 1
+                        postfix_data["Ep"] = episode_num
 
-                        with tqdm(total=env._max_episode_steps, desc=f"Episode {episode_num}", leave=False) as episode_pbar:
-                            while not (done or truncated):
-                                h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
-                                action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+                        while not (done or truncated):
+                            h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
+                            action, log_prob, _, decision_maker, epsilon, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                                # Update action probabilities in Redis for UI visualization
-                                update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs.tolist()})
+                            # Update postfix data for real-time display
+                            postfix_data["Epsilon"] = f"{epsilon:.2f}"
+                            postfix_data["Decision"] = decision_maker
+                            pbar.set_postfix(postfix_data)
 
-                                next_state, reward, done, truncated, info = env.step(action)
+                            # Update action probabilities in Redis for UI visualization
+                            update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs.tolist()})
 
-                                agent.update_stag(h_normalized, reward)
-                                agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, reward, next_state, done or truncated)
+                            next_state, reward, done, truncated, info = env.step(action)
 
-                                state = next_state
-                                episode_reward += reward
-                                total_steps += 1
-                                steps_in_current_env += 1
-                                pbar.update(1)
-                                episode_pbar.update(1)
+                            agent.update_stag(h_normalized, reward)
+                            agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, reward, next_state, done or truncated)
+
+                            state = next_state
+                            episode_reward += reward
+                            total_steps += 1
+                            steps_in_current_env += 1
+                            pbar.update(1)
 
                             # Online Training
                             policy_train_frequency = hyperparams.get('policy_train_frequency', 10)
@@ -174,13 +183,24 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    # --- Update UI State in Redis after training step ---
+                                    # Update postfix with training stats
+                                    postfix_data["WM Loss"] = f"{train_stats.get('wm_loss_total', 'N/A'):.4f}"
+                                    postfix_data["AC Loss"] = f"{train_stats.get('ac_loss', 'N/A'):.4f}"
+
+                                    # Update UI State in Redis after training step
                                     update_ui_state_in_redis('chimera_training_metrics', train_stats)
                                     updated_graph = agent.get_graph_structure()
                                     update_ui_state_in_redis('chimera_graph_state', updated_graph)
 
+                                    # Update graph size in postfix
+                                    postfix_data["Nodes"] = len(updated_graph.get('nodes', []))
+                                    postfix_data["Edges"] = len(updated_graph.get('edges', []))
 
-                        logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")
+
+                        # End of episode
+                        postfix_data["Reward"] = f"{episode_reward:.2f}"
+                        pbar.set_postfix(postfix_data)
+
                         # Also update episode stats in Redis
                         episode_stats = {
                             'episode': episode_num,
