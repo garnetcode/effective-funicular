@@ -159,7 +159,7 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
       {nodesRef.current.map((node) => (
         <GNGNode key={node.id} node={node} />
       ))}
-      {nodesRef.current.length > 0 && (simulation.force("link") as ForceLink<NodeDatum, EdgeDatum>)?.links().map((edge: EdgeDatum, index: number) => (
+      {nodesRef.current.length > 0 && (simulationRef.current.force("link") as ForceLink<NodeDatum, EdgeDatum>)?.links().map((edge: EdgeDatum, index: number) => (
         <GNGEdge key={index} edge={edge} />
       ))}
     </>
