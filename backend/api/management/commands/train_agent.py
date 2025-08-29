@@ -79,6 +79,11 @@ class LearnerThread(threading.Thread):
                     if train_stats:
                         update_ui_state_in_redis('chimera_training_metrics', train_stats)
 
+                        # Log training stats periodically to the console
+                        if train_steps % 20 == 0: # Log every 20 training steps
+                            stats_str = ", ".join([f"{key}={value:.4f}" for key, value in train_stats.items() if isinstance(value, (int, float))])
+                            logger.info(f"Learner (train_step {train_steps}): {stats_str}")
+
                     if train_steps % hyperparams.get('actor_update_frequency', 100) == 0:
                         logger.info(f"Learner publishing new weights for actor at step {train_steps}.")
                         self.shared_weights.set_weights(self.agent.get_actor_state_dict())
@@ -214,6 +219,14 @@ class Command(BaseCommand):
                         episode_reward += reward
                         actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
                         current_obs = next_obs
+                    elif msg.get("type") == "game.over":
+                        logger.info("Game over message received. Ending episode.")
+                        # The final reward might be in this message, let's use it if available.
+                        reward = msg.get("reward", 0)
+                        episode_reward += reward
+                        done = True
+                        # Record the final experience. The 'next_obs' is the same as current_obs as there is no next state.
+                        actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, current_obs, done)
                     else:
                         logger.warning(f"Actor received unexpected message type: {msg.get('type')}")
 
