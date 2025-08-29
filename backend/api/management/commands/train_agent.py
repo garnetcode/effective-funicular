@@ -49,8 +49,8 @@ class Command(BaseCommand):
     help = 'Train a ChimeraAgent using a Colosseum server environment.'
 
     def add_arguments(self, parser):
-        parser.add_argument("--config", type=str, default="backend/configs/base.yaml", help="Path to the main configuration file.")
-        parser.add_argument("--env-id", type=str, default="LunarLander-v2", help="The Colosseum environment ID to train in.")
+        parser.add_argument("--config", type=str, default="configs/base.yaml", help="Path to the main configuration file.")
+        parser.add_argument("--env-id", type=str, default="LunarLander-v3", help="The Colosseum environment ID to train in.")
         parser.add_argument("--episodes", type=int, default=500, help="Total number of episodes to train for.")
         parser.add_argument("--agent-tag", type=str, default=None, help="A unique tag for the agent.")
         parser.add_argument("--port", type=int, default=8002, help="The port of the Colosseum server.")
@@ -90,7 +90,7 @@ class Command(BaseCommand):
         history_config = config.get('agent_history', {})
 
         # --- Colosseum Connection ---
-        connector = ColosseumConnector(env_id, agent_tag, port=port)
+        connector = ColosseumConnector(env_id, agent_tag, http_port=port, ws_port=port)
 
         try:
             session_info = await connector.create_session()
