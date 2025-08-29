@@ -107,6 +107,7 @@ const GNGEdge: React.FC<GNGEdgeProps> = React.memo(({ edge }) => {
 
 const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
   const nodesRef = useRef<NodeDatum[]>([]);
+  const edgesRef = useRef<EdgeDatum[]>([]);
   const [, setRenderTrigger] = useState(0);
 
   const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum>>(
@@ -128,12 +129,10 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
     Object.entries(newNodesData).forEach(([id, data]: [string, any]) => {
       const existingNode = existingNodesMap.get(id);
       if (existingNode) {
-        // Update existing node properties
         existingNode.utility = data.utility || 0;
         existingNode.error = data.error || 0;
         updatedNodes.push(existingNode);
       } else {
-        // Add new node
         const [x, y, z] = data.weight ? new THREE.Vector3(...data.weight).multiplyScalar(5).toArray() : [Math.random(), Math.random(), Math.random()];
         updatedNodes.push({ id, ...data, x, y, z });
       }
@@ -143,14 +142,19 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
 
     // Update simulation
     simulation.nodes(nodesRef.current);
-    (simulation.force("link") as ForceLink<NodeDatum, EdgeDatum>)?.links(newEdgesData);
+    const linkForce = simulation.force("link") as ForceLink<NodeDatum, EdgeDatum>;
+    linkForce.links(newEdgesData);
+
+    // Store the resolved links for rendering
+    edgesRef.current = linkForce.links();
+
     simulation.alpha(0.3).restart(); // Reheat the simulation
 
   }, [graphData]);
 
   useFrame(() => {
-    // The simulation runs continuously and modifies the node positions in the ref
-    // We just need to trigger a re-render to see the changes
+    // The simulation runs continuously, modifying node positions.
+    // We trigger a re-render to see the changes.
     setRenderTrigger(r => r + 1);
   });
 
@@ -159,7 +163,7 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
       {nodesRef.current.map((node) => (
         <GNGNode key={node.id} node={node} />
       ))}
-      {nodesRef.current.length > 0 && (simulationRef.current.force("link") as ForceLink<NodeDatum, EdgeDatum>)?.links().map((edge: EdgeDatum, index: number) => (
+      {edgesRef.current.map((edge, index) => (
         <GNGEdge key={`${(edge.source as NodeDatum).id}-${(edge.target as NodeDatum).id}`} edge={edge} />
       ))}
     </>
