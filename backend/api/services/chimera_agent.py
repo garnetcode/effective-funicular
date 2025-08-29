@@ -109,7 +109,7 @@ def sanitize_state_dict(state):
     return state
 
 class ChimeraAgent:
-    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=128, hidden_dim=512, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, **kwargs):
+    def __init__(self, agent_id, embedding_dim, max_action_dim, latent_dim=128, hidden_dim=512, cortex_configs=None, load_from_storage=True, hyperparams=None, history_config=None, replay_buffer=None, **kwargs):
         self.agent_id = agent_id
         self.embedding_dim = embedding_dim
         self.max_action_dim = max_action_dim
@@ -296,17 +296,20 @@ class ChimeraAgent:
         else:
             self.save_state(version_info={"message": "Initial state."})
 
-        buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
-        sequence_length = self.hyperparams.get('sequence_length', 50)
-        self.replay_buffer = PERSequenceBuffer(
-            capacity=buffer_capacity,
-            sequence_length=sequence_length,
-            alpha=self.hyperparams.get('per_alpha', 0.6),
-            beta_start=self.hyperparams.get('per_beta_start', 0.4),
-            beta_frames=self.hyperparams.get('per_beta_frames', 100000),
-            her_replay_strategy=self.her_replay_strategy,
-            her_replay_k=self.her_replay_k
-        )
+        if replay_buffer:
+            self.replay_buffer = replay_buffer
+        else:
+            buffer_capacity = self.hyperparams.get('buffer_capacity', 10000)
+            sequence_length = self.hyperparams.get('sequence_length', 50)
+            self.replay_buffer = PERSequenceBuffer(
+                capacity=buffer_capacity,
+                sequence_length=sequence_length,
+                alpha=self.hyperparams.get('per_alpha', 0.6),
+                beta_start=self.hyperparams.get('per_beta_start', 0.4),
+                beta_frames=self.hyperparams.get('per_beta_frames', 100000),
+                her_replay_strategy=self.her_replay_strategy,
+                her_replay_k=self.her_replay_k
+            )
 
     def save_state(self, version_info={}):
         """Saves the complete state of the agent for resumable training."""
