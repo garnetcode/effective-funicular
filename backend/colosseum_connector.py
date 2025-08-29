@@ -223,8 +223,20 @@ class ColosseumConnector:
                 logger.error("Cannot receive message, reconnection failed.")
                 return None
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from message: {e}")
-            return None
+            logger.warning(f"Failed to parse JSON from message: {e}. Attempting to re-parse for double-encoding.")
+            try:
+                # This handles cases where the message is a JSON string that itself contains a JSON string,
+                # e.g., '"{\\"type\\": \\"game.over\\"}"'
+                unwrapped_message = json.loads(message)
+                if isinstance(unwrapped_message, str):
+                    return json.loads(unwrapped_message)
+                else:
+                    # If the unwrapped message isn't a string, we can't parse it further.
+                    logger.error("Message unwrapped to a non-string type, cannot re-parse.")
+                    return None
+            except Exception as inner_e:
+                logger.error(f"Failed to re-parse double-encoded message: {inner_e}")
+                return None
 
     async def reconnect(self, max_retries=3, delay=1):
         """
