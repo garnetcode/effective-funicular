@@ -724,42 +724,26 @@ class ChimeraAgent:
         The main training loop that orchestrates the "sleep" phase of the agent,
         which involves training the world model and then training the policy in imagination.
         """
-        train_start_time = time.time()
-        logger.info(f"--- Agent Training Step {self.train_steps} START ---")
         self.train_steps += 1
-
-        # Part 1: Train the World Model
-        wm_start_time = time.time()
-        logger.info("Starting World Model training...")
+        # Part 1: Train the World Model on real, recently collected data.
         world_model_stats, indices, priorities = self.train_world_model(cortex_id)
         if indices is not None:
             self.update_priorities(indices, priorities)
-        wm_duration = time.time() - wm_start_time
-        logger.info(f"World Model training finished in {wm_duration:.4f}s.")
 
         policy_stats = {}
-        # Part 2: Train the Actor-Critic policy in imagination
+
+        # Part 2: Train the Actor-Critic policy in imagined trajectories, but less frequently.
         policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
         if self.train_steps % policy_train_frequency == 0:
-            policy_start_time = time.time()
-            logger.info("Starting Policy training in imagination...")
             policy_stats = self.train_policy_in_imagination()
-            policy_duration = time.time() - policy_start_time
-            logger.info(f"Policy training finished in {policy_duration:.4f}s.")
 
-        # Part 3: Prune the STAG graph periodically
+        # Part 3: Prune the STAG graph periodically for the active skill.
         if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
             if self.active_skill_id:
-                prune_start_time = time.time()
-                logger.info("Pruning STAG graph...")
                 self.skill_manager.prune_graph(self.active_skill_id, self.gng_min_utility_threshold)
-                prune_duration = time.time() - prune_start_time
-                logger.info(f"STAG pruning finished in {prune_duration:.4f}s.")
 
-        # Combine stats and total duration for logging
+        # Combine stats for logging
         combined_stats = {**world_model_stats, **policy_stats}
-        total_duration = time.time() - train_start_time
-        logger.info(f"--- Agent Training Step {self.train_steps-1} END (Total Duration: {total_duration:.4f}s) ---")
         return combined_stats
 
     def update_priorities(self, indices, priorities):
@@ -772,20 +756,20 @@ class ChimeraAgent:
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
-            logger.warning("Skipping world model training: not enough experiences in buffer.")
             return {}, None, None
 
-        logger.info(f"WM: Sampling batch of size {batch_size} with sequence length {self.replay_buffer.sequence_length}.")
-        sampling_start = time.time()
+        contrastive_loss_fn = ContrastiveLoss()
+
+        # For PER, we sample a single batch that will be used for calculating priorities
         shared_batch, shared_indices, shared_weights_np = self.replay_buffer.sample(batch_size)
         shared_weights = torch.from_numpy(shared_weights_np).float().to(self.device)
-        logger.info(f"WM: Batch sampling took {time.time() - sampling_start:.4f}s.")
 
         total_wm_loss = 0
+        # Priorities are calculated based on the average loss on the shared_batch across the ensemble
         sequence_priorities = torch.zeros(batch_size, device=self.device)
 
-        ensemble_loop_start = time.time()
         for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
+
             # --- Ensemble Diversity Logic ---
             if i > 0 and random.random() < self.hyperparams.get('ensemble_diversity_prob', 0.5):
                 train_batch, _, _ = self.replay_buffer.sample(batch_size)
@@ -793,8 +777,10 @@ class ChimeraAgent:
             else:
                 train_batch, train_weights = shared_batch, shared_weights
 
-            # --- Main Training Pass ---
-            world_model_loss, _, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
+            # --- Main Training Pass on `train_batch` ---
+            # This is where the model parameters are updated
+            # (The detailed implementation of the forward pass and loss calculation is encapsulated in a helper)
+            world_model_loss, contrastive_loss, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
                 world_model, train_batch, cortex_id, train_weights
             )
 
@@ -804,13 +790,14 @@ class ChimeraAgent:
             wm_optimizer.step()
             total_wm_loss += world_model_loss.item()
 
-            # --- Priority Calculation Pass ---
+            # --- Priority Calculation Pass on `shared_batch` ---
+            # This pass is only for calculating the loss to be used as priority, so no gradients needed.
             with torch.no_grad():
                 priority_loss, _, _, _ = self._calculate_world_model_loss(
                     world_model, shared_batch, cortex_id, shared_weights
                 )
+                # The priority for an experience is the loss from the model that trained on it
                 sequence_priorities += priority_loss.detach()
-        logger.info(f"WM: Ensemble training loop took {time.time() - ensemble_loop_start:.4f}s.")
 
         # --- Update the contrastive queue ---
         if self.contrastive_queue_size > 0:
@@ -933,50 +920,55 @@ class ChimeraAgent:
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
-            logger.warning("Skipping policy training: not enough experiences in buffer.")
             return {}
 
+        # AGENT_FIX: The policy's imagination horizon should match the planner's
+        # horizon for the behavioral cloning loss to be calculated correctly.
         horizon = self.planner.plan_horizon
-        logger.info(f"Policy: Starting imagination for horizon {horizon} and batch size {batch_size}.")
 
-        # --- Scheduled parameters ---
+        # --- Calculate scheduled parameters ---
         progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
+
         progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
         lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
 
-        # --- Sample starting states ---
-        sampling_start = time.time()
+        # --- Sample starting states from real data ---
         batch, _, _ = self.replay_buffer.sample(batch_size)
         h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
         z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
-        logger.info(f"Policy: Batch sampling took {time.time() - sampling_start:.4f}s.")
 
-        # --- Generate "teacher" plan ---
-        plan_start = time.time()
+        # --- Generate "teacher" plan from the latent planner ---
         with torch.no_grad():
             teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
-        logger.info(f"Policy: Teacher plan generation took {time.time() - plan_start:.4f}s.")
 
-        # --- Imagine Trajectories ---
-        imagine_start = time.time()
+        # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
-        imagined_h, imagined_z = [h_t], [z_t]
-        policy_actions, policy_log_probs, policy_entropies = [], [], []
+        imagined_h = [h_t]
+        imagined_z = [z_t]
+
+        policy_actions = []
+        policy_log_probs = []
+        policy_entropies = []
 
         for t in range(horizon):
             norm_h = self.h_norm(h_t)
+            # Note: STAG context is not used in this simplified distillation loop for now.
             stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
+
             action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
+
             action = action_dist.sample()
             policy_actions.append(action)
             policy_log_probs.append(action_dist.log_prob(action))
             policy_entropies.append(action_dist.entropy())
+
             with torch.no_grad():
                 h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
+
             imagined_h.append(h_t)
             imagined_z.append(z_t)
 
@@ -985,16 +977,16 @@ class ChimeraAgent:
         policy_actions = torch.stack(policy_actions)
         policy_log_probs = torch.stack(policy_log_probs)
         policy_entropies = torch.stack(policy_entropies)
-        logger.info(f"Policy: Trajectory imagination took {time.time() - imagine_start:.4f}s.")
 
-        # --- Predict Rewards and Values ---
+        # --- Predict Rewards and Values for the policy's imagined trajectory ---
         norm_imagined_h = self.h_norm(imagined_h)
         norm_imagined_z = self.z_norm(imagined_z)
         goal_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
+
         imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_expanded], dim=-1)).squeeze(-1)
         imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded], dim=-1)).squeeze(-1)
 
-        # --- Calculate Value Targets (Lambda-Return) ---
+        # --- Calculate Value Targets (Lambda-Return) for the RL loss ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
         returns = torch.zeros_like(imagined_values[-1])
         lambda_returns = []
@@ -1004,28 +996,40 @@ class ChimeraAgent:
         lambda_returns = torch.stack(list(reversed(lambda_returns)))
 
         # --- Calculate Losses ---
+        # 1. RL Policy Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         policy_loss = -(policy_log_probs * advantage).mean()
+
+        # 2. RL Critic Loss
         critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
+        # 3. Behavioral Cloning (BC) Loss
+        # The teacher plan has shape (horizon, batch, action_dim).
+        # We need the policy's logits for the states it visited.
+        # We process the whole trajectory at once by reshaping.
         imagined_states = norm_imagined_h[:-1]
         stag_context_bc = torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)
         goal_bc = goal_sequence.unsqueeze(0).expand(horizon, -1, -1)
+
+        # Flatten the horizon and batch dimensions to treat the sequence as a single batch
         imagined_states_flat = imagined_states.reshape(-1, self.hidden_dim)
         stag_context_bc_flat = stag_context_bc.reshape(-1, self.stag_context_dim)
         goal_bc_flat = goal_bc.reshape(-1, self.goal_dim)
+
         combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat], dim=-1)
         policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
+
+        # Reshape the output logits back to (horizon, batch, action_dim)
         policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
         bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
+        # 4. Entropy Bonus
         entropy_loss = -entropy_coef * policy_entropies.mean()
 
         # --- Total Loss and Backpropagation ---
         total_loss = policy_loss + critic_loss + lambda_bc * bc_loss + entropy_loss
 
-        backprop_start = time.time()
         ac_optimizer = torch.optim.Adam(
             list(self.action_head.parameters()) + list(self.value_head.parameters()),
             lr=self.hyperparams.get('actor_critic_lr', 0.0003)
@@ -1034,7 +1038,6 @@ class ChimeraAgent:
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.action_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
         ac_optimizer.step()
-        logger.info(f"Policy: Backpropagation took {time.time() - backprop_start:.4f}s.")
 
         return {
             "ac_loss": total_loss.item(),

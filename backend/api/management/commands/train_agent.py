@@ -152,6 +152,9 @@ class Command(BaseCommand):
                                 h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
                                 action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
+                                # Update action probabilities in Redis for UI visualization
+                                update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs.tolist()})
+
                                 next_state, reward, done, truncated, info = env.step(action)
 
                                 agent.update_stag(h_normalized, reward)
