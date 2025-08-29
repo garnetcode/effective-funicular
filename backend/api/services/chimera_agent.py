@@ -591,7 +591,8 @@ class ChimeraAgent:
         else:
             # Fallback to learned policy
             with torch.no_grad():
-                h_normalized = self.h_norm(self.hidden_state)
+                # Use the top-level hidden state for the policy
+                h_normalized = self.h_norm(self.hidden_state[0])
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
 
