@@ -17,12 +17,15 @@ class BrainConsumer(AsyncWebsocketConsumer):
         self.poll_task = None
         self.connected = False
         self.last_known_states = {}
-        self.redis_keys_to_poll = [
-            "chimera_environments",
-            "chimera_graph_state",
-            "chimera_training_metrics",
-            "chimera_episode_metrics"
-        ]
+        # Map Redis keys to the message types the frontend expects
+        self.key_to_message_type = {
+            "chimera_environments": "environments_update",
+            "chimera_graph_state": "graph_update",
+            "chimera_training_metrics": "training_metrics",
+            "chimera_episode_metrics": "training_metrics", # Both use the same handler
+            "chimera_action_update": "action_update"
+        }
+        self.redis_keys_to_poll = list(self.key_to_message_type.keys())
 
     async def connect(self):
         """Called when the websocket is trying to connect."""
@@ -58,12 +61,14 @@ class BrainConsumer(AsyncWebsocketConsumer):
                         # Check if the state has changed since the last time we sent it
                         if self.last_known_states.get(key) != current_state_json:
                             self.last_known_states[key] = current_state_json
-                            # The key name itself determines the message type for the frontend
-                            message = {
-                                "type": key.replace("chimera_", ""), # e.g., "graph_state"
-                                "payload": json.loads(current_state_json)
-                            }
-                            await self.send(text_data=json.dumps({"type": "training_update", "data": message}))
+                            # Use the mapping to get the correct message type
+                            message_type = self.key_to_message_type.get(key)
+                            if message_type:
+                                message = {
+                                    "type": message_type,
+                                    "payload": json.loads(current_state_json)
+                                }
+                                await self.send(text_data=json.dumps(message))
 
                 # Wait for the next poll interval
                 await asyncio.sleep(1.0)

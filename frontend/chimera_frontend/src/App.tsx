@@ -99,20 +99,20 @@ function App() {
           {statusMessage}
         </div>
       </header>
-      <div className="main-content-grid">
-        <div className="top-row">
-          <div className="network-visualizer-container">
-            <h3>STAG Graph</h3>
-            <NetworkVisualizer graphData={graphData} />
-          </div>
+      <div className="main-content">
+        <div className="network-visualizer-container full-width">
+          <h3>STAG Graph</h3>
+          <NetworkVisualizer graphData={graphData} />
+        </div>
+        <div className="bottom-container">
           <div className="performance-chart-container">
             <h3>Performance Dashboard</h3>
             <PerformanceChart data={trainingMetrics} />
           </div>
-        </div>
-        <div className="bottom-row">
-          <h3>Action Probabilities</h3>
-          <ActionVisualizer probabilities={actionProbs} />
+          <div className="action-visualizer-container">
+            <h3>Action Probabilities</h3>
+            <ActionVisualizer probabilities={actionProbs} />
+          </div>
         </div>
       </div>
     </div>
