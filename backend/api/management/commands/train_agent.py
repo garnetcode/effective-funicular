@@ -149,6 +149,9 @@ class Command(BaseCommand):
                             h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
                             action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
+                            # Broadcast action probabilities for UI visualization
+                            broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()})
+
                             next_state, reward, done, truncated, info = env.step(action)
 
                             agent.update_stag(h_normalized, reward)
@@ -167,10 +170,12 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    # All UI updates are now sent only when the agent is updated.
                                     broadcast_to_brain_monitoring('training_metrics', train_stats)
-                                    updated_graph = agent.get_graph_structure()
-                                    broadcast_to_brain_monitoring('graph_update', updated_graph)
+
+                            # Periodically update the graph structure for the UI
+                            if total_steps % 500 == 0: # Broadcast every 500 steps
+                                updated_graph = agent.get_graph_structure()
+                                broadcast_to_brain_monitoring('graph_update', updated_graph)
 
 
                         logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")
