@@ -51,6 +51,7 @@ class Command(BaseCommand):
         parser.add_argument("--episodes", type=int, default=500, help="Total number of episodes to train for.")
         parser.add_argument("--agent-tag", type=str, default=None, help="A unique tag for the agent.")
         parser.add_argument("--port", type=int, default=8002, help="The port of the Colosseum server.")
+        parser.add_argument("--verbosity", type=int, default=0, choices=[0, 1], help="Set verbosity level (0 for quiet, 1 for detailed).")
 
     def handle(self, *args, **options):
         """Synchronous entry point that runs the async handler."""
@@ -125,15 +126,21 @@ class Command(BaseCommand):
         hyperparams = agent.hyperparams
         actual_action_dim = agent.max_action_dim
 
+        step_num = 0
         while not done:
             try:
+                step_num += 1
+                logger.info(f"[Ep.{episode_num} Step.{step_num}] Perceiving state...")
                 # Agent logic
                 h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                logger.info(f"[Ep.{episode_num} Step.{step_num}] Selecting action...")
                 action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
                 update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
 
                 # Network interaction
+                logger.info(f"[Ep.{episode_num} Step.{step_num}] Sending action {action}...")
                 await connector.send_action(int(action))
+                logger.info(f"[Ep.{episode_num} Step.{step_num}] Waiting for message...")
                 msg = await connector.receive_message()
 
                 if not msg:
@@ -161,6 +168,9 @@ class Command(BaseCommand):
 
                 elif msg.get("type") == "game.over":
                     done = True
+                elif msg.get("type") == "pong":
+                    logger.info("Received pong from server.")
+                    continue
                 else:
                     logger.warning(f"Unexpected message type received: {msg.get('type')}")
 
@@ -197,7 +207,8 @@ class Command(BaseCommand):
 
     async def async_handle(self, *args, **options):
         """The main asynchronous logic for training the agent."""
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        log_level = logging.INFO if options['verbosity'] > 0 else logging.WARNING
+        logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
         agent, connector, session_info, cortex_id = await self._setup(options)
 
