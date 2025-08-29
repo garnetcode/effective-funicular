@@ -2,6 +2,7 @@ import random
 import numpy as np
 from collections import namedtuple, deque
 import torch
+import threading
 
 Experience = namedtuple('Experience',
                         ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal'))
@@ -61,80 +62,83 @@ class PERSequenceBuffer:
         self.priorities = SegmentTree(capacity)
         self.max_priority = 1.0
         self.position = 0
+        self.lock = threading.Lock()
 
     def beta_by_frame(self, frame_idx):
         return min(1.0, self.beta_start + frame_idx * (1.0 - self.beta_start) / self.beta_frames)
 
     def push(self, *args):
         """Saves an experience."""
-        if len(self.memory) < self.capacity:
-            self.memory.append(None)
+        with self.lock:
+            if len(self.memory) < self.capacity:
+                self.memory.append(None)
 
-        self.memory[self.position] = Experience(*args)
-        # The priority of a new experience is set to the max priority.
-        # Note: The priority is associated with the *starting index* of a sequence.
-        # When a new experience is added, it can be the start of a new sequence.
-        self.priorities.update(self.position, self.max_priority ** self.alpha)
-        self.position = (self.position + 1) % self.capacity
+            self.memory[self.position] = Experience(*args)
+            # The priority of a new experience is set to the max priority.
+            # Note: The priority is associated with the *starting index* of a sequence.
+            # When a new experience is added, it can be the start of a new sequence.
+            self.priorities.update(self.position, self.max_priority ** self.alpha)
+            self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size, num_models=1):
         """
-        Samples a batch of sequences with HER.
+        Samples a batch of sequences with HER. This method is now thread-safe.
         """
-        # For now, we don't support HER with ensembles.
-        if num_models > 1:
-             # For ensembles, we don't use PER for now, as it complicates things.
-            # We just sample with replacement.
-            batches = []
-            for _ in range(num_models):
-                indices = np.random.choice(len(self.memory) - self.sequence_length + 1, size=batch_size, replace=True)
-                batch = [self.memory[i : i + self.sequence_length] for i in indices]
-                batches.append(self._format_batch(batch, batch_size))
-            return batches
+        with self.lock:
+            # For now, we don't support HER with ensembles.
+            if num_models > 1:
+                 # For ensembles, we don't use PER for now, as it complicates things.
+                # We just sample with replacement.
+                batches = []
+                for _ in range(num_models):
+                    indices = np.random.choice(len(self.memory) - self.sequence_length + 1, size=batch_size, replace=True)
+                    batch = [self.memory[i : i + self.sequence_length] for i in indices]
+                    batches.append(self._format_batch(batch, batch_size))
+                return batches
 
-        indices, weights = self._sample_indices(batch_size)
-        if indices is None:
-            return None, None, None
+            indices, weights = self._sample_indices(batch_size)
+            if indices is None:
+                return None, None, None
 
-        batch = [self.memory[i : i + self.sequence_length] for i in indices]
+            batch = [self.memory[i : i + self.sequence_length] for i in indices]
 
-        num_relabeled = int(batch_size / (self.her_replay_k + 1))
+            num_relabeled = int(batch_size / (self.her_replay_k + 1))
 
-        relabeled_indices = np.random.choice(batch_size, num_relabeled, replace=False)
+            relabeled_indices = np.random.choice(batch_size, num_relabeled, replace=False)
 
-        for i in relabeled_indices:
-            sequence = batch[i]
-            if len(sequence) < self.sequence_length:
-                continue # Skip short sequences which can cause errors
+            for i in relabeled_indices:
+                sequence = batch[i]
+                if len(sequence) < self.sequence_length:
+                    continue # Skip short sequences which can cause errors
 
-            if self.her_replay_strategy == 'future':
-                # Sample a future state from the same sequence as the new goal
-                future_idx = np.random.randint(self.sequence_length)
-                new_goal = sequence[future_idx].next_obs
-            else: # 'final'
-                new_goal = sequence[-1].next_obs
+                if self.her_replay_strategy == 'future':
+                    # Sample a future state from the same sequence as the new goal
+                    future_idx = np.random.randint(self.sequence_length)
+                    new_goal = sequence[future_idx].next_obs
+                else: # 'final'
+                    new_goal = sequence[-1].next_obs
 
-            # AGENT_FIX: Pad the goal if its dimension does not match the required goal_dim.
-            # This handles cases where HER uses environment observations as goals.
-            goal_for_reward = new_goal
-            padded_goal = new_goal
-            if new_goal.shape[0] < self.goal_dim:
-                padded_goal = np.zeros(self.goal_dim)
-                padded_goal[:new_goal.shape[0]] = new_goal
+                # AGENT_FIX: Pad the goal if its dimension does not match the required goal_dim.
+                # This handles cases where HER uses environment observations as goals.
+                goal_for_reward = new_goal
+                padded_goal = new_goal
+                if new_goal.shape[0] < self.goal_dim:
+                    padded_goal = np.zeros(self.goal_dim)
+                    padded_goal[:new_goal.shape[0]] = new_goal
 
 
-            # Relabel the sequence with the new goal and recalculate rewards
-            new_sequence = []
-            for exp in sequence:
-                # The new reward is the negative distance to the new goal
-                # We use the un-padded goal for reward calculation.
-                new_reward = -np.linalg.norm(exp.obs - goal_for_reward)
-                # We store the padded goal in the experience.
-                new_exp = exp._replace(goal=padded_goal, reward=new_reward)
-                new_sequence.append(new_exp)
-            batch[i] = new_sequence
+                # Relabel the sequence with the new goal and recalculate rewards
+                new_sequence = []
+                for exp in sequence:
+                    # The new reward is the negative distance to the new goal
+                    # We use the un-padded goal for reward calculation.
+                    new_reward = -np.linalg.norm(exp.obs - goal_for_reward)
+                    # We store the padded goal in the experience.
+                    new_exp = exp._replace(goal=padded_goal, reward=new_reward)
+                    new_sequence.append(new_exp)
+                batch[i] = new_sequence
 
-        return self._format_batch(batch, batch_size), indices, weights
+            return self._format_batch(batch, batch_size), indices, weights
 
     def _sample_indices(self, batch_size):
         """Samples a single batch of indices using PER."""
@@ -208,10 +212,11 @@ class PERSequenceBuffer:
 
     def update_priorities(self, batch_indices, batch_priorities):
         """Update priorities of sampled sequences."""
-        for idx, priority in zip(batch_indices, batch_priorities):
-            priority = np.abs(priority) + 1e-5
-            self.priorities.update(idx, priority ** self.alpha)
-            self.max_priority = max(self.max_priority, priority)
+        with self.lock:
+            for idx, priority in zip(batch_indices, batch_priorities):
+                priority = np.abs(priority) + 1e-5
+                self.priorities.update(idx, priority ** self.alpha)
+                self.max_priority = max(self.max_priority, priority)
 
     def __len__(self):
         return len(self.memory)
