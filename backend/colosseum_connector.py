@@ -25,10 +25,14 @@ class ColosseumConnector:
         while True:
             try:
                 await asyncio.sleep(20)
-                # Use .open as .closed was causing issues
-                if self.websocket and self.websocket.open:
-                    await self.websocket.ping()
-                    logger.debug("Sent WebSocket ping")
+                if self.websocket:
+                    # Rely on exception handling rather than a proactive check like .open or .closed
+                    try:
+                        await self.websocket.ping()
+                        logger.debug("Sent WebSocket ping")
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("Keep-alive ping failed: connection is closed. Exiting keep-alive task.")
+                        break  # Exit the keep-alive loop
             except asyncio.CancelledError:
                 logger.info("Keep-alive task cancelled.")
                 break
