@@ -1,22 +1,25 @@
-# Forcing re-compile to address caching issues.
-import numpy as np
-import os
-import torch
-import yaml
+import asyncio
 import logging
+import yaml
+import numpy as np
+import torch
+import websockets
 import random
 from tqdm import tqdm
+
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
+from colosseum_connector import ColosseumConnector
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 import gymnasium as gym
 import redis
 import json
 import time
 
+# --- Setup logging ---
 logger = logging.getLogger(__name__)
 
-# --- Redis-based UI State Caching ---
+# --- Redis Caching for UI ---
 try:
     redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
     redis_client.ping()
@@ -30,191 +33,168 @@ def update_ui_state_in_redis(key, data):
     if redis_client is None:
         return
     try:
-        # Using a custom JSON encoder to handle numpy types
-        from api.services.chimera_agent import NumpyJSONEncoder
         payload = json.dumps(data, cls=NumpyJSONEncoder)
         redis_client.set(key, payload)
     except Exception as e:
         logger.warning(f"Failed to update UI state in Redis for key {key}: {e}")
 
-def seed_all(s):
-    """Sets the seed for all random number generators."""
-    random.seed(s)
-    np.random.seed(s)
-    torch.manual_seed(s)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(s)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+class NumpyJSONEncoder(json.JSONEncoder):
+    """ Custom encoder for numpy data types """
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
 
 class Command(BaseCommand):
-    help = 'Train a ChimeraAgent using local Gymnasium environments.'
+    help = 'Train a ChimeraAgent using a Colosseum server environment.'
 
     def add_arguments(self, parser):
-        parser.add_argument("--config", type=str, default="configs/base.yaml", help="Path to the main configuration file.")
-        parser.add_argument("--env-curriculum", type=str, default="MountainCar-v0", help="A single env name or a comma-separated list of env names for curriculum learning.")
-        parser.add_argument("--total-steps", type=int, default=50000, help="Total number of steps to train for across all environments.")
-        parser.add_argument("--steps-per-env", type=int, default=50000, help="Number of steps to train on each environment in the curriculum.")
+        parser.add_argument("--config", type=str, default="backend/configs/base.yaml", help="Path to the main configuration file.")
+        parser.add_argument("--env-id", type=str, default="LunarLander-v2", help="The Colosseum environment ID to train in.")
+        parser.add_argument("--episodes", type=int, default=500, help="Total number of episodes to train for.")
+        parser.add_argument("--agent-tag", type=str, default=None, help="A unique tag for the agent.")
 
-    def handle(self, *args, **options):
+    # Django management commands can be async
+    async def handle(self, *args, **options):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+        env_id = options['env_id']
+        agent_tag = options['agent_tag'] or f"chimera-agent-{random.randint(1000, 9999)}"
+        config_path = options['config']
+        episodes = options['episodes']
+
+        logger.info(f"Starting Chimera agent '{agent_tag}' for environment: {env_id}")
+
         # --- Load Configuration ---
-        config_path = os.path.join('', options['config'])
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
+            logger.info(f"Loaded configuration from {config_path}")
         except FileNotFoundError:
             logger.error(f"Config file not found at: {config_path}")
             return
-
-        logger.info(f"Loaded configuration from {config_path}")
 
         agent_config = config.get('agent_config', {})
         hyperparams = agent_config.get('hyperparams', {})
         history_config = config.get('agent_history', {})
 
-        # --- Set Seed for Reproducibility ---
-        seed = config.get('training', {}).get('seed')
-        if seed is not None:
-            logger.info(f"Setting random seed to {seed}")
-            seed_all(seed)
+        # --- Colosseum Connection ---
+        connector = ColosseumConnector(env_id, agent_tag, port=8000)
 
-        # --- Environment & Agent Setup ---
-        env_names = [env.strip() for env in options['env_curriculum'].split(',')]
-        total_training_steps = options['total_steps']
-        steps_per_env = options['steps_per_env']
-
-        # --- Pre-inspect all environments locally ---
-        master_cortex_configs = {}
-        max_action_dim = 0
-        for name in env_names:
-            logger.info(f"Inspecting local environment: {name}")
-            try:
-                temp_env = gym.make(name)
-                env_cortex_configs, _ = create_cortex_configs_from_observation_space(temp_env.observation_space)
-                master_cortex_configs.update(env_cortex_configs)
-                if isinstance(temp_env.action_space, gym.spaces.Discrete):
-                    max_action_dim = max(max_action_dim, temp_env.action_space.n)
-                temp_env.close()
-            except Exception as e:
-                logger.error(f"Could not inspect environment {name}: {e}. Skipping.")
-                env_names.remove(name)
-
-        logger.info(f"Master cortex configuration will include: {list(master_cortex_configs.keys())}")
-        logger.info(f"Max action dimension across all environments: {max_action_dim}")
-
-        # Update UI state in Redis
-        env_list_for_ui = [{'id': name, 'name': name} for name in env_names]
-        update_ui_state_in_redis('chimera_environments', env_list_for_ui)
-
-        # --- Initialize a single, generalist agent ---
-        agent_id = agent_config.get('default_agent_id_prefix', 'Kymera-') + "local-train"
-        embedding_dim = agent_config.get('embedding_dim', 512)
-
-        agent = ChimeraAgent(
-            agent_id=agent_id,
-            embedding_dim=embedding_dim,
-            max_action_dim=max_action_dim,
-            cortex_configs=master_cortex_configs,
-            load_from_storage=not config.get('force_new_agent', False),
-            hyperparams=hyperparams,
-            history_config=history_config
-        )
-        logger.info(f"Initialized Generalist Agent '{agent_id}'")
-
-        # Update initial graph structure in Redis
-        initial_graph = agent.get_graph_structure()
-        update_ui_state_in_redis('chimera_graph_state', initial_graph)
-
-
-        # --- Training Loop ---
-        total_steps = 0
-        episode_num = 0
         try:
-            for env_id in env_names:
-                logger.info(f"--- Starting Curriculum Stage: {env_id} ---")
-                env = gym.make(env_id)
-                _, cortex_id = create_cortex_configs_from_observation_space(env.observation_space)
-                actual_action_dim = env.action_space.n
-                agent.set_active_skill(env_id, actual_action_dim)
+            session_info = await connector.create_session()
+            if not session_info:
+                logger.error("Could not create session. Exiting.")
+                return
 
-                steps_in_current_env = 0
-                # Initialize the postfix dictionary for the progress bar
-                postfix_data = {
-                    "Ep": 0, "Reward": "N/A", "Epsilon": "N/A", "Decision": "N/A",
-                    "WM Loss": "N/A", "AC Loss": "N/A", "Nodes": 0, "Edges": 0
-                }
-                with tqdm(total=steps_per_env, desc=f"Training on {env_id}") as pbar:
-                    while steps_in_current_env < steps_per_env and total_steps < total_training_steps:
-                        state, _ = env.reset()
-                        done, truncated = False, False
-                        episode_reward = 0
-                        episode_num += 1
-                        postfix_data["Ep"] = episode_num
+            if not await connector.connect_websocket():
+                logger.error("Could not connect to WebSocket. Exiting.")
+                return
 
-                        while not (done or truncated):
-                            h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
-                            action, log_prob, _, decision_maker, epsilon, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+            join_response = await connector.join_session()
+            if not join_response:
+                logger.error("Could not join session. Exiting.")
+                await connector.close()
+                return
 
-                            # Update postfix data for real-time display
-                            postfix_data["Epsilon"] = f"{epsilon:.2f}"
-                            postfix_data["Decision"] = decision_maker
-                            pbar.set_postfix(postfix_data)
+            # --- Environment and Agent Setup (Post-Connection) ---
+            env_specs = join_response['environment']
+            obs_space_info = env_specs['observation_space']
+            action_space_info = env_specs['action_space']
 
-                            # Update action probabilities in Redis for UI visualization
-                            update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs.tolist()})
+            observation_space = gym.spaces.Box(
+                low=np.array(obs_space_info['low']),
+                high=np.array(obs_space_info['high']),
+                shape=obs_space_info['shape'],
+                dtype=np.dtype(obs_space_info['dtype'])
+            )
+            cortex_configs, cortex_id = create_cortex_configs_from_observation_space(observation_space)
+            actual_action_dim = action_space_info['n']
 
-                            next_state, reward, done, truncated, info = env.step(action)
+            agent = ChimeraAgent(
+                agent_id=agent_tag,
+                embedding_dim=agent_config.get('embedding_dim', 512),
+                max_action_dim=actual_action_dim,
+                cortex_configs=cortex_configs,
+                load_from_storage=not config.get('force_new_agent', False),
+                hyperparams=hyperparams,
+                history_config=history_config
+            )
+            agent.set_active_skill(env_id, actual_action_dim)
+            logger.info(f"Initialized Chimera Agent '{agent_tag}' for {env_id}")
 
-                            agent.update_stag(h_normalized, reward)
-                            agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, reward, next_state, done or truncated)
+            # --- Main Training Loop ---
+            with tqdm(total=episodes, desc=f"Training on {env_id}") as pbar:
+                for episode in range(1, episodes + 1):
+                    current_obs = np.array(join_response.get("observation"))
+                    done = False
+                    total_reward = 0
 
-                            state = next_state
+                    episode_reward = 0
+                    while not done:
+                        h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                        action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+
+                        # Update Redis with action probabilities for the UI
+                        update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
+
+                        await connector.send_action(int(action))
+                        msg = await connector.receive_message()
+
+                        if not msg:
+                            logger.warning("Did not receive state, might be reconnecting. Ending episode.")
+                            break
+
+                        if msg.get("type") == "action.taken":
+                            next_obs = np.array(msg.get("observation"))
+                            reward = msg.get("reward", 0)
+                            done = msg.get("done", False)
                             episode_reward += reward
-                            total_steps += 1
-                            steps_in_current_env += 1
-                            pbar.update(1)
 
-                            # Online Training
-                            policy_train_frequency = hyperparams.get('policy_train_frequency', 10)
-                            if total_steps > hyperparams.get('burnin_steps', 1000) and \
-                               total_steps % policy_train_frequency == 0 and \
+                            agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+                            current_obs = next_obs
+
+                            if agent.steps_done > hyperparams.get('burnin_steps', 1000) and \
+                               agent.steps_done % hyperparams.get('policy_train_frequency', 10) == 0 and \
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
-                                train_stats = agent.train(cortex_id)
+                                train_stats = agent.train(cortex_id=cortex_id)
+                                # Update UI state after training
                                 if train_stats:
-                                    # Update postfix with training stats, checking for type before formatting
-                                    wm_loss = train_stats.get('wm_loss_total')
-                                    ac_loss = train_stats.get('ac_loss')
-                                    postfix_data["WM Loss"] = f"{wm_loss:.4f}" if isinstance(wm_loss, (int, float)) else "N/A"
-                                    postfix_data["AC Loss"] = f"{ac_loss:.4f}" if isinstance(ac_loss, (int, float)) else "N/A"
-
-                                    # Update UI State in Redis after training step
                                     update_ui_state_in_redis('chimera_training_metrics', train_stats)
                                     updated_graph = agent.get_graph_structure()
                                     update_ui_state_in_redis('chimera_graph_state', updated_graph)
 
-                                    # Update graph size in postfix
-                                    postfix_data["Nodes"] = len(updated_graph.get('nodes', []))
-                                    postfix_data["Edges"] = len(updated_graph.get('edges', []))
+                        elif msg.get("type") == "game.over":
+                            done = True
+                        else:
+                            logger.warning(f"Unexpected message type received: {msg.get('type')}")
 
+                    # --- End of Episode ---
+                    pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": agent.steps_done})
+                    pbar.update(1)
 
-                        # End of episode
-                        postfix_data["Reward"] = f"{episode_reward:.2f}"
-                        pbar.set_postfix(postfix_data)
+                    # Update episode metrics in Redis
+                    episode_stats = {
+                        'episode': episode,
+                        'reward': episode_reward,
+                        'total_steps': agent.steps_done
+                    }
+                    update_ui_state_in_redis('chimera_episode_metrics', episode_stats)
 
-                        # Also update episode stats in Redis
-                        episode_stats = {
-                            'episode': episode_num,
-                            'reward': episode_reward,
-                            'total_steps': total_steps
-                        }
-                        update_ui_state_in_redis('chimera_episode_metrics', episode_stats)
+                    if episode < episodes:
+                        reset_response = await connector.reset_environment()
+                        if reset_response:
+                            join_response = reset_response
+                        else:
+                            logger.error("Failed to reset environment. Exiting.")
+                            break
 
-                env.close()
-
+        except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError):
+            logger.error("\nConnection to the server failed. Please ensure the Colosseum backend is running.")
         except KeyboardInterrupt:
-            logger.info("Training interrupted by user.")
+            logger.info("Interrupted by user.")
         finally:
-            agent.save_state(version_info={"message": "Local training stopped."})
-            logger.info("Training finished and agent state saved.")
+            logger.info("Closing connection and saving agent state.")
+            await connector.close()
+            if 'agent' in locals():
+                agent.save_state(version_info={"message": f"Colosseum training on {env_id} stopped."})

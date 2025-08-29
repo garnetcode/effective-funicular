@@ -153,6 +153,27 @@ class ColosseumConnector:
             if self.websocket and not self.websocket.closed:
                 await self.websocket.send(json.dumps(message))
 
+    async def reset_environment(self):
+        """Resets the environment via the HTTP API and returns the new initial observation."""
+        if not self.session_id:
+            logger.error("Cannot reset environment without a session ID.")
+            return None
+        url = f"{self.http_base_url}/sessions/{self.session_id}/reset/"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    if data.get("success"):
+                        logger.info(f"Successfully reset environment for session: {self.session_id}")
+                        return data
+                    else:
+                        logger.error(f"Failed to reset environment. Server response: {data}")
+                        return None
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP error resetting environment: {e}")
+            return None
+
     async def handle_reconnect(self):
         """Handles WebSocket reconnection with exponential backoff."""
         if self.is_reconnecting:
