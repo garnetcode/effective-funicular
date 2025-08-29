@@ -145,23 +145,25 @@ class Command(BaseCommand):
                         episode_reward = 0
                         episode_num += 1
 
-                        while not (done or truncated):
-                            h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
-                            action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+                        with tqdm(total=env._max_episode_steps, desc=f"Episode {episode_num}", leave=False) as episode_pbar:
+                            while not (done or truncated):
+                                h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
+                                action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                            # Broadcast action probabilities for UI visualization
-                            broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()})
+                                # Broadcast action probabilities for UI visualization
+                                broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()})
 
-                            next_state, reward, done, truncated, info = env.step(action)
+                                next_state, reward, done, truncated, info = env.step(action)
 
-                            agent.update_stag(h_normalized, reward)
-                            agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, reward, next_state, done or truncated)
+                                agent.update_stag(h_normalized, reward)
+                                agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, reward, next_state, done or truncated)
 
-                            state = next_state
-                            episode_reward += reward
-                            total_steps += 1
-                            steps_in_current_env += 1
-                            pbar.update(1)
+                                state = next_state
+                                episode_reward += reward
+                                total_steps += 1
+                                steps_in_current_env += 1
+                                pbar.update(1)
+                                episode_pbar.update(1)
 
                             # Online Training
                             policy_train_frequency = hyperparams.get('policy_train_frequency', 10)
