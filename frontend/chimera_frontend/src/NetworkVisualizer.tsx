@@ -45,25 +45,19 @@ interface NetworkVisualizerProps {
 }
 
 
-const GNGNode: React.FC<GNGNodeProps> = ({ node }) => {
+const GNGNode: React.FC<GNGNodeProps> = React.memo(({ node }) => {
   const meshRef = useRef<THREE.Mesh>(null);
   const [isHovered, setIsHovered] = useState(false);
 
   const scale = useMemo(() => 0.1 + Math.min(node.utility * 0.5, 0.4), [node.utility]);
   const color = useMemo(() => {
-    // Normalize utility to a 0-1 range. Let's assume a max utility of ~20 for a good spread.
     const utilityNormalized = Math.min(node.utility / 20, 1);
-
-    // Interpolate hue from Purple (0.75) to Lime (0.33)
-    // As utility increases, hue decreases, moving from purple -> blue -> cyan -> lime
     const hue = 0.75 - (utilityNormalized * (0.75 - 0.33));
-    const saturation = 0.9; // Keep saturation high for vibrant colors
-    const lightness = 0.6;   // Keep lightness consistent and bright
-
+    const saturation = 0.9;
+    const lightness = 0.6;
     return new THREE.Color().setHSL(hue, saturation, lightness);
   }, [node.utility]);
 
-  // The node object from d3-force has x, y, and z properties.
   const position = useMemo(() => new THREE.Vector3(node.x, node.y, node.z), [node.x, node.y, node.z]);
 
   return (
@@ -92,89 +86,81 @@ const GNGNode: React.FC<GNGNodeProps> = ({ node }) => {
       )}
     </group>
   );
-};
+});
 
-const GNGEdge: React.FC<GNGEdgeProps> = ({ edge }) => {
+const GNGEdge: React.FC<GNGEdgeProps> = React.memo(({ edge }) => {
   const sourceNode = edge.source as NodeDatum;
   const targetNode = edge.target as NodeDatum;
 
-  // The edge object from d3-force has source and target properties, which are node objects.
   const start = useMemo(() => new THREE.Vector3(sourceNode.x, sourceNode.y, sourceNode.z), [sourceNode.x, sourceNode.y, sourceNode.z]);
   const end = useMemo(() => new THREE.Vector3(targetNode.x, targetNode.y, targetNode.z), [targetNode.x, targetNode.y, targetNode.z]);
 
   return (
     <Line
       points={[start, end]}
-      color="#00ffff" // A cyan color for a futuristic look
+      color="#00ffff"
       lineWidth={1}
       dashed={false}
     />
   );
-};
+});
 
 const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
-  const [nodes, setNodes] = useState<NodeDatum[]>([]);
-  const [edges, setEdges] = useState<EdgeDatum[]>([]);
+  const nodesRef = useRef<NodeDatum[]>([]);
+  const [renderTrigger, setRenderTrigger] = useState(0);
 
-  const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum> | null>(null);
+  const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum>>(
+    forceSimulation<NodeDatum, EdgeDatum>()
+      .force("link", forceLink<NodeDatum, EdgeDatum>().id((d: any) => d.id).distance(1).strength(0.1))
+      .force("charge", forceManyBody().strength(-10))
+      .force("center", forceCenter())
+  );
 
   useEffect(() => {
-    const gngNodes = graphData?.nodes || {};
-    // Edges are now objects like {source: "id1", target: "id2"}
-    const gngEdges: { source: string; target: string }[] = graphData?.edges || [];
+    const simulation = simulationRef.current;
+    const newNodesData = graphData?.nodes || {};
+    const newEdgesData = graphData?.edges || [];
 
-    const nodeArray: NodeDatum[] = Object.entries(gngNodes).map(([id, data]: [string, any]) => {
-      // Initialize position from weight vector for stable layout, falling back to random
-      const [x, y, z] = data.weight ? new THREE.Vector3(...data.weight).multiplyScalar(5).toArray() : [Math.random(), Math.random(), Math.random()];
-      return {
-        id: id, // Keep id as a string from the Object.entries key
-        error: data.error || 0,
-        utility: data.utility || 0,
-        weight: data.weight,
-        x,
-        y,
-        z,
-      };
+    const existingNodesMap = new Map(nodesRef.current.map(node => [node.id, node]));
+    const updatedNodes: NodeDatum[] = [];
+
+    // Update existing nodes and add new ones
+    Object.entries(newNodesData).forEach(([id, data]: [string, any]) => {
+      const existingNode = existingNodesMap.get(id);
+      if (existingNode) {
+        // Update existing node properties
+        existingNode.utility = data.utility || 0;
+        existingNode.error = data.error || 0;
+        updatedNodes.push(existingNode);
+      } else {
+        // Add new node
+        const [x, y, z] = data.weight ? new THREE.Vector3(...data.weight).multiplyScalar(5).toArray() : [Math.random(), Math.random(), Math.random()];
+        updatedNodes.push({ id, ...data, x, y, z });
+      }
     });
 
-    // d3-force expects links to reference node objects or ids.
-    // We use IDs and tell the forceLink to look up nodes by their 'id' field.
-    const edgeArray = gngEdges.map(edge => ({
-      source: edge.source, // The backend now sends string IDs directly
-      target: edge.target,
-    }));
+    nodesRef.current = updatedNodes;
 
-    setNodes(nodeArray);
-    setEdges(edgeArray);
+    // Update simulation
+    simulation.nodes(nodesRef.current);
+    simulation.force<forceLink<NodeDatum, EdgeDatum>>("link")?.links(newEdgesData);
+    simulation.alpha(0.3).restart(); // Reheat the simulation
 
-    if (nodeArray.length > 0) {
-      simulationRef.current = forceSimulation(nodeArray)
-        .force("link", forceLink<NodeDatum, EdgeDatum>(edgeArray).id(d => d.id).distance(1).strength(0.1))
-        .force("charge", forceManyBody().strength(-10))
-        .force("center", forceCenter());
-    }
-
-    return () => {
-      simulationRef.current?.stop();
-    };
   }, [graphData]);
 
   useFrame(() => {
-    if (simulationRef.current) {
-      simulationRef.current.tick();
-      // The simulation modifies the node array in place.
-      // We trigger a re-render by creating a new array reference.
-      setNodes(prevNodes => [...prevNodes]);
-    }
+    // The simulation runs continuously and modifies the node positions in the ref
+    // We just need to trigger a re-render to see the changes
+    setRenderTrigger(r => r + 1);
   });
 
   return (
     <>
-      {nodes.map((node) => (
+      {nodesRef.current.map((node) => (
         <GNGNode key={node.id} node={node} />
       ))}
-      {edges.map((edge, index) => (
-        <GNGEdge key={index} edge={edge} />
+      {nodesRef.current.length > 0 && simulationRef.current.force<forceLink<NodeDatum, EdgeDatum>>("link")?.links().map((edge, index) => (
+        <GNGEdge key={index} edge={edge as EdgeDatum} />
       ))}
     </>
   );

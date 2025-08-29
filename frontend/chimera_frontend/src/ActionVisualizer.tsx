@@ -35,7 +35,7 @@ const ActionVisualizer: React.FC<ActionVisualizerProps> = ({ probabilities }) =>
           formatter={(value: number) => value.toFixed(4)}
         />
         <Legend wrapperStyle={{ color: '#eee' }} />
-        <Bar dataKey="probability" fill="#8884d8" />
+        <Bar dataKey="probability" fill="#8884d8" isAnimationActive={true} animationDuration={500} />
       </BarChart>
     </ResponsiveContainer>
   );
