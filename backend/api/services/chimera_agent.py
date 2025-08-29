@@ -851,70 +851,39 @@ class ChimeraAgent:
             obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
         obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
 
-        # --- Sequence-based Forward Pass through Hierarchical RSSM ---
-        h_states, z_states, z_dists, reconstructions, errors = self.hierarchical_rssm.forward_sequence(obs_sequence_processed, action_sequence)
+        # --- Sequence-based Forward Pass and Loss Calculation (Simplified for Speed) ---
+        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        total_loss = 0
 
-        # --- Loss Calculation ---
-        kl_loss, free_nats = self.hierarchical_rssm.calculate_kl_loss(z_dists, free_bits=self.hyperparams.get('free_bits', 1.0))
+        hidden_states_list = []
 
-        # The reconstruction is from the lowest level of the hierarchy
-        bottom_level_recons = reconstructions[0]
-        # The error term in PC loss is the sum of squares of the error signals at each level
-        pc_loss = self._predictive_coding_loss(bottom_level_recons, errors, kl_loss, obs_sequence_processed, free_nats)
+        for t in range(self.replay_buffer.sequence_length):
+            obs_t = obs_sequence_processed[:, t]
+            action_t = action_sequence[:, t]
 
-        # --- Contrastive Loss Calculation ---
-        # Use the hidden state from the final layer of the hierarchy as the representation
-        final_hidden_states = h_states[-1]
-        anchor = final_hidden_states[:, :-1].reshape(-1, self.hidden_dim)
-        positive = final_hidden_states[:, 1:].reshape(-1, self.hidden_dim)
-        if self.contrastive_queue_size > 0:
-            negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
-        else:
-            # If queue is disabled, use other positives in the batch as negatives
-            negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
-        contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
+            # Call level0 directly, bypassing the full hierarchy
+            h_t, z_t, _, error, reconstruction = self.level0(obs_t, action_t, h_t, z_t)
+            hidden_states_list.append(h_t)
 
-        # --- Latent Consistency Loss ---
-        consistency_loss = 0
-        if self.hyperparams.get('latent_consistency_weight', 0.0) > 0:
-            # Create augmented observations (e.g., with noise)
-            obs_aug = obs_sequence + torch.randn_like(obs_sequence) * 0.1
-            if obs_sequence.dim() == 5:
-                obs_aug_processed_aug = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
-            else:
-                obs_aug_processed_aug = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
-            obs_aug_processed_aug = obs_aug_processed_aug.view(batch_size, self.replay_buffer.sequence_length, -1)
+            loss = self._predictive_coding_loss(reconstruction, error, obs_t)
+            total_loss += loss
 
-            # Get hidden states for augmented observations
-            h_states_aug, _, _, _, _ = self.hierarchical_rssm.forward_sequence(obs_aug_processed_aug, action_sequence)
-            final_h_aug = h_states_aug[-1]
-            consistency_loss = F.mse_loss(final_hidden_states.detach(), final_h_aug)
-
-        # --- Total Loss ---
-        total_loss = (
-            pc_loss +
-            self.contrastive_loss_weight * contrastive_loss +
-            self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
-        )
+        total_loss /= self.replay_buffer.sequence_length
 
         # Apply importance sampling weights from PER
         weighted_loss = (total_loss * weights).mean()
 
-        return weighted_loss, contrastive_loss, final_hidden_states, batch['reward']
+        # For compatibility with the rest of the function
+        hidden_states = torch.stack(hidden_states_list, dim=1)
+        contrastive_loss = torch.tensor(0.0) # Disabled for speed
 
-    def _predictive_coding_loss(self, reconstruction, errors, kl_loss, target_observation, free_nats):
-        # Reconstruction loss is calculated only at the lowest level
+        return weighted_loss, contrastive_loss, hidden_states, batch['reward']
+
+    def _predictive_coding_loss(self, reconstruction, error, target_observation):
         reconstruction_loss = F.mse_loss(reconstruction, target_observation)
-
-        # Prediction error loss is the sum of squared errors from all levels
-        prediction_error_loss = 0
-        for level_errors in errors:
-            # level_errors is a list of tensors, one for each timestep
-            stacked_errors = torch.stack(level_errors, dim=1)
-            prediction_error_loss += torch.mean(stacked_errors ** 2)
-
-        # The kl_loss is already calculated and includes the free_nats part
-        return reconstruction_loss + prediction_error_loss + kl_loss
+        prediction_error_loss = torch.mean(error ** 2)
+        return reconstruction_loss + prediction_error_loss
 
 
     def train_policy_in_imagination(self):
