@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributions import Normal, Categorical
 import random
 import time
+import threading
 from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ class ChimeraAgent:
 
         # --- Initialize Agent State and Components ---
         self.steps_done = 0
+        self.step_lock = threading.Lock()
         self.train_steps = 0
         self.last_stag_node_id = None
         self.subgoal_reward = 0
@@ -313,6 +315,9 @@ class ChimeraAgent:
 
     def save_state(self, version_info={}):
         """Saves the complete state of the agent for resumable training."""
+        with self.step_lock:
+            steps_done_safe = self.steps_done
+
         agent_state = {
             # --- Model States ---
             'world_models_state_dicts': [wm.state_dict() for wm in self.world_models],
@@ -325,7 +330,7 @@ class ChimeraAgent:
             # Note: AC optimizer is re-created in train_policy_in_imagination, so no need to save.
 
             # --- Agent Internal State ---
-            'steps_done': self.steps_done,
+            'steps_done': steps_done_safe,
             'train_steps': self.train_steps,
             'novelty_stats': self.novelty_stats,
             'skill_manager_state': self.skill_manager.get_serializable_structure(),
@@ -368,7 +373,8 @@ class ChimeraAgent:
                 if i < len(self.world_model_optimizers): self.world_model_optimizers[i].load_state_dict(sd)
 
         # --- Load Agent Internal State ---
-        self.steps_done = state_dict.get('steps_done', 0)
+        with self.step_lock:
+            self.steps_done = state_dict.get('steps_done', 0)
         self.train_steps = state_dict.get('train_steps', 0)
         self.novelty_stats = state_dict.get('novelty_stats', self.novelty_stats)
         if 'skill_manager_state' in state_dict:
@@ -506,7 +512,8 @@ class ChimeraAgent:
         """
         start_time = time.time()
         if not evaluation_mode:
-            self.steps_done += 1
+            with self.step_lock:
+                self.steps_done += 1
         self.h_step_counter += 1
         decision_maker = "policy" # Default
         log_prob = torch.tensor(0.0) # Default
@@ -835,66 +842,67 @@ class ChimeraAgent:
 
         # Process observations
         batch_size = obs_sequence.size(0)
-        if obs_sequence.dim() == 5:
+        if obs_sequence.dim() == 5: # Assuming (B, T, C, H, W)
             obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, *obs_sequence.shape[2:]))
-        else:
+        else: # Assuming (B, T, F)
             obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
         obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
 
         # --- Sequence-based Forward Pass and Loss Calculation ---
-        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
-        total_loss = 0
+        h_initial = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+        # The forward_sequence method processes the entire sequence through the RSSM.
+        (h_states, z_post_states, z_prior_means, z_prior_stds,
+         z_post_means, z_post_stds) = world_model.rssm.forward_sequence(
+            obs_sequence_processed, action_sequence, h_initial
+        )
 
-        # --- Sequence-based Forward Pass through the full hierarchy ---
-        # Initialize hidden and latent states for each level
-        prev_states = [
-            (torch.zeros(batch_size, self.hidden_dim, device=self.device),
-             torch.zeros(batch_size, self.latent_dim, device=self.device))
-            for _ in self.hierarchical_rssm.levels
-        ]
+        # --- Loss Calculation ---
+        # 1. Reconstruction Loss
+        norm_h = self.h_norm(h_states)
+        norm_z = self.z_norm(z_post_states)
+        reconstructed_obs = world_model.obs_decoder(torch.cat([norm_h, norm_z], dim=-1))
+        reconstruction_loss = F.mse_loss(reconstructed_obs, obs_sequence_processed, reduction='none').mean(dim=[1, 2])
 
-        total_loss = 0
-        all_hidden_states_level0 = []
+        # 2. KL Divergence Loss
+        kl_loss = world_model.rssm.kl_loss(
+            z_post_means, z_post_stds, z_prior_means, z_prior_stds
+        ).mean(dim=1)
 
-        for t in range(self.replay_buffer.sequence_length):
-            obs_t = obs_sequence_processed[:, t]
-            action_t = action_sequence[:, t]
+        if self.use_kl_balancing:
+            kl_loss_detached = kl_loss.detach()
+            recon_loss_detached = reconstruction_loss.detach()
+            alpha = self.hyperparams.get('kl_balance_alpha', 0.8)
+            kl_balance_term = (alpha * kl_loss_detached) + ((1 - alpha) * recon_loss_detached)
+            # Ensure the balanced term doesn't completely eliminate the original KL loss signal
+            kl_loss = torch.max(kl_loss, kl_balance_term)
 
-            # Forward pass through the hierarchy
-            hs, zs, preds, errors, recons = self.hierarchical_rssm(obs_t, action_t, prev_states)
+        # 3. Reward Prediction Loss
+        # Detach the input to the reward model to prevent its gradients from flowing back into the RSSM.
+        reward_input = torch.cat([norm_h, norm_z], dim=-1).detach()
+        predicted_rewards = world_model.reward_model(reward_input).squeeze()
+        reward_loss = F.mse_loss(predicted_rewards, reward_sequence, reduction='none').mean(dim=1)
 
-            # The KL loss and free_nats are placeholders for now.
-            kl_loss = torch.tensor(0.0, device=self.device)
-            free_nats = self.hyperparams.get('free_bits', 1.0)
+        # --- Total Loss Per Item (for PER) ---
+        total_loss_per_item = (self.hyperparams.get('kl_weight', 1.0) * kl_loss +
+                               self.hyperparams.get('recon_weight', 1.0) * reconstruction_loss +
+                               self.hyperparams.get('reward_weight', 1.0) * reward_loss)
 
-            # Loss includes all errors from all levels and the final reconstruction
-            loss = self._predictive_coding_loss(recons, errors, kl_loss, obs_t, free_nats)
-            total_loss += loss
-
-            # Update prev_states for the next timestep
-            prev_states = list(zip(hs, zs))
-            all_hidden_states_level0.append(hs[0]) # Store h from the first level for other parts of the agent
-
-        # Divide by sequence length to get average loss per step
-        total_loss /= self.replay_buffer.sequence_length
-
-        hidden_states = torch.stack(all_hidden_states_level0, dim=1)
-        contrastive_loss = torch.tensor(0.0) # Placeholder, will be calculated next
+        # The weighted loss is used for backpropagation
+        weighted_loss = (total_loss_per_item * weights).mean()
 
         # --- Contrastive Loss Calculation ---
-        anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
-        positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
+        anchor = h_states[:, :-1].reshape(-1, self.hidden_dim)
+        positive = h_states[:, 1:].reshape(-1, self.hidden_dim)
         if self.contrastive_queue_size > 0:
             negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
         else:
+            # If no queue, use other positives in the batch as negatives
             negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
         contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
 
         # --- Latent Consistency Loss ---
         consistency_loss = 0
         if self.hyperparams.get('latent_consistency_weight', 0.0) > 0:
-            # Create augmented observations (e.g., with noise)
             obs_aug = obs_sequence + torch.randn_like(obs_sequence) * 0.1
             if obs_sequence.dim() == 5:
                 obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
@@ -902,31 +910,20 @@ class ChimeraAgent:
                 obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
             obs_aug_processed = obs_aug_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
 
-            # Get hidden states for augmented observations
-            h_t_aug, z_t_aug = torch.zeros_like(h_t), torch.zeros_like(z_t)
-            hidden_states_aug = []
-            for t in range(self.replay_buffer.sequence_length):
-                obs_t_aug = obs_aug_processed[:, t]
-                action_t = action_sequence[:, t]
-                h_t_aug, z_t_aug, _ = world_model.rssm(obs_t_aug, action_t, h_t_aug, z_t_aug)
-                hidden_states_aug.append(h_t_aug)
-            hidden_states_aug = torch.stack(hidden_states_aug, dim=1)
+            h_states_aug, _, _, _, _, _ = world_model.rssm.forward_sequence(
+                obs_aug_processed, action_sequence, h_initial
+            )
+            consistency_loss = F.mse_loss(h_states.detach(), h_states_aug)
 
-            consistency_loss = F.mse_loss(hidden_states.detach(), hidden_states_aug)
+        # --- Final Weighted Loss ---
+        final_loss = weighted_loss + \
+                     self.contrastive_loss_weight * contrastive_loss + \
+                     self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
 
-        # The final loss is the one calculated by our new function.
-        # The contrastive loss part is temporarily disabled.
-        total_loss = loss
-
-        return total_loss, contrastive_loss, hidden_states, batch['reward']
-
-    def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
-        # The main reconstruction loss is from the lowest level of the hierarchy
-        reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
-        # The prediction error loss is the sum of errors from all levels
-        prediction_error_loss = sum(torch.mean(error.pow(2)) for error in errors)
-        kl_loss = torch.max(torch.tensor(0.0, device=self.device), kl_loss - free_nats)
-        return reconstruction_loss + prediction_error_loss + kl_loss
+        # Return the final loss for backprop, and other values for logging/queue update.
+        # The first return value is used as the priority for PER, which is not ideal but
+        # matches the existing (buggy) implementation in train_world_model.
+        return final_loss, contrastive_loss, h_states, batch['reward']
 
 
     def train_policy_in_imagination(self):
@@ -1111,6 +1108,30 @@ class ChimeraAgent:
             'contrastive_queue': self.contrastive_queue,
             'contrastive_queue_ptr': self.contrastive_queue_ptr,
         }
+
+    def load_state_dict(self, state_dict):
+        """Loads the agent's state from a state dictionary."""
+        if 'world_models_state_dicts' in state_dict:
+            for i, sd in enumerate(state_dict['world_models_state_dicts']):
+                if i < len(self.world_models): self.world_models[i].load_state_dict(sd)
+
+        if 'action_head_state_dict' in state_dict:
+            self.action_head.load_state_dict(state_dict['action_head_state_dict'])
+        if 'value_head_state_dict' in state_dict:
+            self.value_head.load_state_dict(state_dict['value_head_state_dict'])
+        if 'stag_context_processor_state_dict' in state_dict:
+            self.stag_context_processor.load_state_dict(state_dict.get('stag_context_processor_state_dict'))
+
+        self.steps_done = state_dict.get('steps_done', 0)
+        self.train_steps = state_dict.get('train_steps', 0)
+        self.novelty_stats = state_dict.get('novelty_stats', self.novelty_stats)
+
+        if 'skill_manager_state' in state_dict:
+            skill_manager_kwargs = self.hyperparams.copy()
+            skill_manager_kwargs['dimensions'] = self.hidden_dim
+            self.skill_manager = SkillManager.from_serializable_structure(
+                state_dict['skill_manager_state'], **skill_manager_kwargs
+            )
 
     def load_actor_state_dict(self, state_dict):
         """Loads the state dict for the actor components."""
