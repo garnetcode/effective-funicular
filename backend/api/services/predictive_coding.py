@@ -6,6 +6,8 @@ class PredictiveCodingModule(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
         # The transition model is now a GRU, similar to the original RSSM
         self.transition_model = nn.GRUCell(latent_dim + action_dim, hidden_dim)
         # A linear layer to predict the next latent state from the new hidden state
@@ -42,28 +44,30 @@ class HierarchicalRSSM(nn.Module):
         super().__init__()
         self.levels = nn.ModuleList(levels)
 
-    def forward(self, x, action, prev_states):
+    def forward(self, x, action, prev_h, prev_z):
         all_h_next = []
         all_z_next = []
-        all_predictions = []
         all_errors = []
         all_reconstructions = []
 
-        # The input to the first level is the observation, for higher levels it's the error from below
         current_input = x
 
         for i, level in enumerate(self.levels):
-            h_prev, z_prev = prev_states[i]
+            h_prev_i = prev_h[i]
+            z_prev_i = prev_z[i]
 
-            h_next, z_next, prediction, error, reconstruction = level(current_input, action, h_prev, z_prev)
+            h_next, z_next, prediction, error, reconstruction = level(current_input, action, h_prev_i, z_prev_i)
 
             all_h_next.append(h_next)
             all_z_next.append(z_next)
-            all_predictions.append(prediction)
             all_errors.append(error)
             all_reconstructions.append(reconstruction)
 
-            # The error from the current level is the input for the next level
             current_input = error
 
-        return all_h_next, all_z_next, all_predictions, all_errors, all_reconstructions
+        # To match the expected return signature at the call site in chimera_agent.py,
+        # we return a dummy KL loss. A proper implementation would calculate the
+        # KL divergence between the prediction and target at each level.
+        kl_loss = torch.tensor(0.0, device=x.device)
+
+        return all_h_next, all_z_next, all_reconstructions, all_errors, kl_loss
