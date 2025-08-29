@@ -39,9 +39,9 @@ const PerformanceChart: React.FC<PerformanceChartProps> = ({ data }) => {
           labelStyle={{ color: '#eee' }}
         />
         <Legend wrapperStyle={{ color: '#eee' }} />
-        <Line yAxisId="left" type="monotone" dataKey="avg_reward" name="Avg Reward" stroke="#8884d8" dot={false} />
-        <Line yAxisId="right" type="monotone" dataKey="policy_loss" name="Policy Loss" stroke="#82ca9d" dot={false} />
-        <Line yAxisId="right" type="monotone" dataKey="epsilon" name="Epsilon" stroke="#ffc658" dot={false} />
+        <Line yAxisId="left" type="monotone" dataKey="avg_reward" name="Avg Reward" stroke="#8884d8" dot={false} isAnimationActive={true} animationDuration={500} animationEasing="ease-out" />
+        <Line yAxisId="right" type="monotone" dataKey="policy_loss" name="Policy Loss" stroke="#82ca9d" dot={false} isAnimationActive={true} animationDuration={500} animationEasing="ease-out" />
+        <Line yAxisId="right" type="monotone" dataKey="epsilon" name="Epsilon" stroke="#ffc658" dot={false} isAnimationActive={true} animationDuration={500} animationEasing="ease-out" />
       </LineChart>
     </ResponsiveContainer>
   );
