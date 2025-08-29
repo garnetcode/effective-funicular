@@ -77,14 +77,23 @@ class ColosseumConnector:
             return False
 
     async def send_message(self, message):
-        """Sends a raw JSON message to the server."""
-        if not self.websocket:
-            logger.error("Cannot send message, WebSocket is not connected.")
-            return
+        """Sends a raw JSON message to the server, with reconnection logic."""
+        if not self.websocket or self.websocket.closed:
+            logger.warning(f"WebSocket closed or not available when trying to send {message.get('type')}. Reconnecting.")
+            if not await self.reconnect():
+                logger.error(f"Cannot send message of type {message.get('type')}, reconnection failed.")
+                return
+
+        message_str = json.dumps(message)
         try:
-            await self.websocket.send(json.dumps(message))
+            await self.websocket.send(message_str)
         except websockets.exceptions.ConnectionClosed:
-            logger.warning("Cannot send message, connection is closed.")
+            logger.warning(f"Connection closed on send_message for type {message.get('type')}. Reconnecting.")
+            if await self.reconnect():
+                logger.info("Reconnected successfully. Retrying send_message.")
+                await self.websocket.send(message_str)
+            else:
+                logger.error(f"Cannot send message of type {message.get('type')}, reconnection failed.")
         except Exception as e:
             logger.error(f"Failed to send message: {e}", exc_info=True)
 
@@ -206,9 +215,14 @@ class ColosseumConnector:
                 return None # If reconnect fails, give up
 
         try:
-            message = await self.websocket.recv()
+            message = await asyncio.wait_for(self.websocket.recv(), timeout=60.0)
             logger.debug(f"Raw message received: {message}")
             return json.loads(message)
+        except asyncio.TimeoutError:
+            logger.error("Timeout receiving message. The server may be unresponsive.")
+            # Attempt a reconnect, as the connection might be stale
+            asyncio.create_task(self.reconnect())
+            return None # Return None to indicate failure
         except websockets.exceptions.ConnectionClosed:
             logger.warning("Connection closed on receive. Attempting to reconnect...")
             if await self.reconnect():
