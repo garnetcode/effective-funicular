@@ -61,31 +61,24 @@ h3 {
   font-size: 0.9em;
 }
 
-/* --- New Flexbox Layout --- */
-.main-content {
-  display: flex;
-  flex-direction: column;
+/* --- New Grid Layout --- */
+.main-content-grid {
+  display: grid;
+  grid-template-rows: 1fr 1fr; /* 2 equal rows */
   flex-grow: 1;
   gap: 10px;
   padding: 10px;
   overflow: hidden;
 }
 
-.full-width {
-  width: 100%;
-}
-
-.bottom-container {
-  display: flex;
-  flex-direction: row;
+.top-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr; /* 2 equal columns */
   gap: 10px;
-  flex-grow: 1;
   overflow: hidden;
 }
 
-.network-visualizer-container,
-.performance-chart-container,
-.action-visualizer-container {
+.bottom-row {
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -95,32 +88,20 @@ h3 {
   padding: 15px;
 }
 
-.network-visualizer-container {
-  height: 60vh; /* Give the top graph a larger fixed height */
-}
-
-.performance-chart-container,
-.action-visualizer-container {
-  flex: 1; /* Each takes up half of the bottom container's width */
-  min-width: 0; /* Prevents flex items from overflowing their container */
+.network-visualizer-container,
+.performance-chart-container {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 15px;
 }
 
 /* Ensure canvas/chart takes up available space */
 .network-visualizer-container > div,
 .performance-chart-container > div,
-.action-visualizer-container > div {
+.bottom-row > div {
   flex-grow: 1;
-}
-
-.graph-legend {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  background-color: rgba(0, 0, 0, 0.6);
-  color: var(--secondary-text-color);
-  padding: 8px;
-  border-radius: 4px;
-  z-index: 10;
-  font-size: 0.8em;
-  pointer-events: none; /* Allows mouse events to pass through to the canvas */
 }
