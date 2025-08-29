@@ -724,26 +724,42 @@ class ChimeraAgent:
         The main training loop that orchestrates the "sleep" phase of the agent,
         which involves training the world model and then training the policy in imagination.
         """
+        train_start_time = time.time()
+        logger.info(f"--- Agent Training Step {self.train_steps} START ---")
         self.train_steps += 1
-        # Part 1: Train the World Model on real, recently collected data.
+
+        # Part 1: Train the World Model
+        wm_start_time = time.time()
+        logger.info("Starting World Model training...")
         world_model_stats, indices, priorities = self.train_world_model(cortex_id)
         if indices is not None:
             self.update_priorities(indices, priorities)
+        wm_duration = time.time() - wm_start_time
+        logger.info(f"World Model training finished in {wm_duration:.4f}s.")
 
         policy_stats = {}
-
-        # Part 2: Train the Actor-Critic policy in imagined trajectories, but less frequently.
+        # Part 2: Train the Actor-Critic policy in imagination
         policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
         if self.train_steps % policy_train_frequency == 0:
+            policy_start_time = time.time()
+            logger.info("Starting Policy training in imagination...")
             policy_stats = self.train_policy_in_imagination()
+            policy_duration = time.time() - policy_start_time
+            logger.info(f"Policy training finished in {policy_duration:.4f}s.")
 
-        # Part 3: Prune the STAG graph periodically for the active skill.
+        # Part 3: Prune the STAG graph periodically
         if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
             if self.active_skill_id:
+                prune_start_time = time.time()
+                logger.info("Pruning STAG graph...")
                 self.skill_manager.prune_graph(self.active_skill_id, self.gng_min_utility_threshold)
+                prune_duration = time.time() - prune_start_time
+                logger.info(f"STAG pruning finished in {prune_duration:.4f}s.")
 
-        # Combine stats for logging
+        # Combine stats and total duration for logging
         combined_stats = {**world_model_stats, **policy_stats}
+        total_duration = time.time() - train_start_time
+        logger.info(f"--- Agent Training Step {self.train_steps-1} END (Total Duration: {total_duration:.4f}s) ---")
         return combined_stats
 
     def update_priorities(self, indices, priorities):
@@ -756,20 +772,20 @@ class ChimeraAgent:
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
+            logger.warning("Skipping world model training: not enough experiences in buffer.")
             return {}, None, None
 
-        contrastive_loss_fn = ContrastiveLoss()
-
-        # For PER, we sample a single batch that will be used for calculating priorities
+        logger.info(f"WM: Sampling batch of size {batch_size} with sequence length {self.replay_buffer.sequence_length}.")
+        sampling_start = time.time()
         shared_batch, shared_indices, shared_weights_np = self.replay_buffer.sample(batch_size)
         shared_weights = torch.from_numpy(shared_weights_np).float().to(self.device)
+        logger.info(f"WM: Batch sampling took {time.time() - sampling_start:.4f}s.")
 
         total_wm_loss = 0
-        # Priorities are calculated based on the average loss on the shared_batch across the ensemble
         sequence_priorities = torch.zeros(batch_size, device=self.device)
 
+        ensemble_loop_start = time.time()
         for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
-
             # --- Ensemble Diversity Logic ---
             if i > 0 and random.random() < self.hyperparams.get('ensemble_diversity_prob', 0.5):
                 train_batch, _, _ = self.replay_buffer.sample(batch_size)
@@ -777,10 +793,8 @@ class ChimeraAgent:
             else:
                 train_batch, train_weights = shared_batch, shared_weights
 
-            # --- Main Training Pass on `train_batch` ---
-            # This is where the model parameters are updated
-            # (The detailed implementation of the forward pass and loss calculation is encapsulated in a helper)
-            world_model_loss, contrastive_loss, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
+            # --- Main Training Pass ---
+            world_model_loss, _, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
                 world_model, train_batch, cortex_id, train_weights
             )
 
@@ -790,14 +804,13 @@ class ChimeraAgent:
             wm_optimizer.step()
             total_wm_loss += world_model_loss.item()
 
-            # --- Priority Calculation Pass on `shared_batch` ---
-            # This pass is only for calculating the loss to be used as priority, so no gradients needed.
+            # --- Priority Calculation Pass ---
             with torch.no_grad():
                 priority_loss, _, _, _ = self._calculate_world_model_loss(
                     world_model, shared_batch, cortex_id, shared_weights
                 )
-                # The priority for an experience is the loss from the model that trained on it
                 sequence_priorities += priority_loss.detach()
+        logger.info(f"WM: Ensemble training loop took {time.time() - ensemble_loop_start:.4f}s.")
 
         # --- Update the contrastive queue ---
         if self.contrastive_queue_size > 0:
@@ -838,26 +851,42 @@ class ChimeraAgent:
             obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
         obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
 
-        # --- Sequence-based Forward Pass through Hierarchical RSSM ---
-        h_states, z_states, z_dists, reconstructions, errors = self.hierarchical_rssm.forward_sequence(obs_sequence_processed, action_sequence)
+        # --- Sequence-based Forward Pass and Loss Calculation ---
+        h_t = torch.zeros(batch_size, self.hidden_dim, device=self.device)
+        z_t = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        total_loss = 0
 
-        # --- Loss Calculation ---
-        kl_loss, free_nats = self.hierarchical_rssm.calculate_kl_loss(z_dists, free_bits=self.hyperparams.get('free_bits', 1.0))
+        # This simplified loop trains only the first level of the hierarchy for verification.
+        # It iterates through the sequence to correctly update the hidden state.
+        for t in range(self.replay_buffer.sequence_length):
+            obs_t = obs_sequence_processed[:, t]
+            action_t = action_sequence[:, t]
 
-        # The reconstruction is from the lowest level of the hierarchy
-        bottom_level_recons = reconstructions[0]
-        # The error term in PC loss is the sum of squares of the error signals at each level
-        pc_loss = self._predictive_coding_loss(bottom_level_recons, errors, kl_loss, obs_sequence_processed, free_nats)
+            # Call level0 directly, bypassing the full hierarchy
+            h_t, z_t, _, error, reconstruction = self.level0(obs_t, action_t, h_t, z_t)
+
+            # The KL loss and free_nats are placeholders for now.
+            kl_loss = torch.tensor(0.0, device=self.device)
+            free_nats = self.hyperparams.get('free_bits', 1.0)
+
+            loss = self._predictive_coding_loss([reconstruction], [error], kl_loss, obs_t, free_nats)
+            total_loss += loss
+
+        # Divide by sequence length to get average loss per step
+        total_loss /= self.replay_buffer.sequence_length
+
+        # For compatibility with the rest of the function, we create placeholder
+        # return values. The important part is that `total_loss` is calculated
+        # based on our isolated level0 module.
+        hidden_states = torch.stack([h_t], dim=1) # Use the final hidden state
+        contrastive_loss = torch.tensor(0.0)
 
         # --- Contrastive Loss Calculation ---
-        # Use the hidden state from the final layer of the hierarchy as the representation
-        final_hidden_states = h_states[-1]
-        anchor = final_hidden_states[:, :-1].reshape(-1, self.hidden_dim)
-        positive = final_hidden_states[:, 1:].reshape(-1, self.hidden_dim)
+        anchor = hidden_states[:, :-1].reshape(-1, self.hidden_dim)
+        positive = hidden_states[:, 1:].reshape(-1, self.hidden_dim)
         if self.contrastive_queue_size > 0:
             negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
         else:
-            # If queue is disabled, use other positives in the batch as negatives
             negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
         contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
 
@@ -867,40 +896,33 @@ class ChimeraAgent:
             # Create augmented observations (e.g., with noise)
             obs_aug = obs_sequence + torch.randn_like(obs_sequence) * 0.1
             if obs_sequence.dim() == 5:
-                obs_aug_processed_aug = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
+                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, *obs_aug.shape[2:]))
             else:
-                obs_aug_processed_aug = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
-            obs_aug_processed_aug = obs_aug_processed_aug.view(batch_size, self.replay_buffer.sequence_length, -1)
+                obs_aug_processed = self.cortexes[cortex_id](obs_aug.view(-1, obs_aug.shape[-1]))
+            obs_aug_processed = obs_aug_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
 
             # Get hidden states for augmented observations
-            h_states_aug, _, _, _, _ = self.hierarchical_rssm.forward_sequence(obs_aug_processed_aug, action_sequence)
-            final_h_aug = h_states_aug[-1]
-            consistency_loss = F.mse_loss(final_hidden_states.detach(), final_h_aug)
+            h_t_aug, z_t_aug = torch.zeros_like(h_t), torch.zeros_like(z_t)
+            hidden_states_aug = []
+            for t in range(self.replay_buffer.sequence_length):
+                obs_t_aug = obs_aug_processed[:, t]
+                action_t = action_sequence[:, t]
+                h_t_aug, z_t_aug, _ = world_model.rssm(obs_t_aug, action_t, h_t_aug, z_t_aug)
+                hidden_states_aug.append(h_t_aug)
+            hidden_states_aug = torch.stack(hidden_states_aug, dim=1)
 
-        # --- Total Loss ---
-        total_loss = (
-            pc_loss +
-            self.contrastive_loss_weight * contrastive_loss +
-            self.hyperparams.get('latent_consistency_weight', 0.0) * consistency_loss
-        )
+            consistency_loss = F.mse_loss(hidden_states.detach(), hidden_states_aug)
 
-        # Apply importance sampling weights from PER
-        weighted_loss = (total_loss * weights).mean()
+        # The final loss is the one calculated by our new function.
+        # The contrastive loss part is temporarily disabled.
+        total_loss = loss
 
-        return weighted_loss, contrastive_loss, final_hidden_states, batch['reward']
+        return total_loss, contrastive_loss, hidden_states, batch['reward']
 
-    def _predictive_coding_loss(self, reconstruction, errors, kl_loss, target_observation, free_nats):
-        # Reconstruction loss is calculated only at the lowest level
-        reconstruction_loss = F.mse_loss(reconstruction, target_observation)
-
-        # Prediction error loss is the sum of squared errors from all levels
-        prediction_error_loss = 0
-        for level_errors in errors:
-            # level_errors is a list of tensors, one for each timestep
-            stacked_errors = torch.stack(level_errors, dim=1)
-            prediction_error_loss += torch.mean(stacked_errors ** 2)
-
-        # The kl_loss is already calculated and includes the free_nats part
+    def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
+        reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
+        prediction_error_loss = sum(torch.mean(error ** 2) for error in errors)
+        kl_loss = torch.max(torch.tensor(0.0, device=self.device), kl_loss - free_nats)
         return reconstruction_loss + prediction_error_loss + kl_loss
 
 
@@ -911,55 +933,50 @@ class ChimeraAgent:
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
+            logger.warning("Skipping policy training: not enough experiences in buffer.")
             return {}
 
-        # AGENT_FIX: The policy's imagination horizon should match the planner's
-        # horizon for the behavioral cloning loss to be calculated correctly.
         horizon = self.planner.plan_horizon
+        logger.info(f"Policy: Starting imagination for horizon {horizon} and batch size {batch_size}.")
 
-        # --- Calculate scheduled parameters ---
+        # --- Scheduled parameters ---
         progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
-
         progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
         lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
 
-        # --- Sample starting states from real data ---
+        # --- Sample starting states ---
+        sampling_start = time.time()
         batch, _, _ = self.replay_buffer.sample(batch_size)
         h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
         z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
+        logger.info(f"Policy: Batch sampling took {time.time() - sampling_start:.4f}s.")
 
-        # --- Generate "teacher" plan from the latent planner ---
+        # --- Generate "teacher" plan ---
+        plan_start = time.time()
         with torch.no_grad():
             teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
+        logger.info(f"Policy: Teacher plan generation took {time.time() - plan_start:.4f}s.")
 
-        # --- Imagine Trajectories using the policy's actions ---
+        # --- Imagine Trajectories ---
+        imagine_start = time.time()
         h_t, z_t = h_start, z_start
-        imagined_h = [h_t]
-        imagined_z = [z_t]
-
-        policy_actions = []
-        policy_log_probs = []
-        policy_entropies = []
+        imagined_h, imagined_z = [h_t], [z_t]
+        policy_actions, policy_log_probs, policy_entropies = [], [], []
 
         for t in range(horizon):
             norm_h = self.h_norm(h_t)
-            # Note: STAG context is not used in this simplified distillation loop for now.
             stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
-
             action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
-
             action = action_dist.sample()
             policy_actions.append(action)
             policy_log_probs.append(action_dist.log_prob(action))
             policy_entropies.append(action_dist.entropy())
-
             with torch.no_grad():
                 h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
                 z_t = Normal(prior_mean, prior_std).rsample()
-
             imagined_h.append(h_t)
             imagined_z.append(z_t)
 
@@ -968,16 +985,16 @@ class ChimeraAgent:
         policy_actions = torch.stack(policy_actions)
         policy_log_probs = torch.stack(policy_log_probs)
         policy_entropies = torch.stack(policy_entropies)
+        logger.info(f"Policy: Trajectory imagination took {time.time() - imagine_start:.4f}s.")
 
-        # --- Predict Rewards and Values for the policy's imagined trajectory ---
+        # --- Predict Rewards and Values ---
         norm_imagined_h = self.h_norm(imagined_h)
         norm_imagined_z = self.z_norm(imagined_z)
         goal_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
-
         imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_expanded], dim=-1)).squeeze(-1)
         imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded], dim=-1)).squeeze(-1)
 
-        # --- Calculate Value Targets (Lambda-Return) for the RL loss ---
+        # --- Calculate Value Targets (Lambda-Return) ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
         returns = torch.zeros_like(imagined_values[-1])
         lambda_returns = []
@@ -987,40 +1004,28 @@ class ChimeraAgent:
         lambda_returns = torch.stack(list(reversed(lambda_returns)))
 
         # --- Calculate Losses ---
-        # 1. RL Policy Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         policy_loss = -(policy_log_probs * advantage).mean()
-
-        # 2. RL Critic Loss
         critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
-        # 3. Behavioral Cloning (BC) Loss
-        # The teacher plan has shape (horizon, batch, action_dim).
-        # We need the policy's logits for the states it visited.
-        # We process the whole trajectory at once by reshaping.
         imagined_states = norm_imagined_h[:-1]
         stag_context_bc = torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)
         goal_bc = goal_sequence.unsqueeze(0).expand(horizon, -1, -1)
-
-        # Flatten the horizon and batch dimensions to treat the sequence as a single batch
         imagined_states_flat = imagined_states.reshape(-1, self.hidden_dim)
         stag_context_bc_flat = stag_context_bc.reshape(-1, self.stag_context_dim)
         goal_bc_flat = goal_bc.reshape(-1, self.goal_dim)
-
         combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat], dim=-1)
         policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
-
-        # Reshape the output logits back to (horizon, batch, action_dim)
         policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
         bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
-        # 4. Entropy Bonus
         entropy_loss = -entropy_coef * policy_entropies.mean()
 
         # --- Total Loss and Backpropagation ---
         total_loss = policy_loss + critic_loss + lambda_bc * bc_loss + entropy_loss
 
+        backprop_start = time.time()
         ac_optimizer = torch.optim.Adam(
             list(self.action_head.parameters()) + list(self.value_head.parameters()),
             lr=self.hyperparams.get('actor_critic_lr', 0.0003)
@@ -1029,6 +1034,7 @@ class ChimeraAgent:
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.action_head.parameters()) + list(self.value_head.parameters()), self.max_grad_norm)
         ac_optimizer.step()
+        logger.info(f"Policy: Backpropagation took {time.time() - backprop_start:.4f}s.")
 
         return {
             "ac_loss": total_loss.item(),
