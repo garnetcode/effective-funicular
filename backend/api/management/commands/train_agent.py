@@ -53,17 +53,28 @@ class Command(BaseCommand):
         parser.add_argument("--env-id", type=str, default="LunarLander-v2", help="The Colosseum environment ID to train in.")
         parser.add_argument("--episodes", type=int, default=500, help="Total number of episodes to train for.")
         parser.add_argument("--agent-tag", type=str, default=None, help="A unique tag for the agent.")
+        parser.add_argument("--port", type=int, default=8002, help="The port of the Colosseum server.")
 
-    # Django management commands can be async
-    async def handle(self, *args, **options):
+    def handle(self, *args, **options):
+        """Synchronous entry point that runs the async handler."""
+        try:
+            asyncio.run(self.async_handle(*args, **options))
+        except KeyboardInterrupt:
+            logger.info("Training interrupted by user.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in async_handle: {e}", exc_info=True)
+
+    async def async_handle(self, *args, **options):
+        """The main asynchronous logic for training the agent."""
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
         env_id = options['env_id']
         agent_tag = options['agent_tag'] or f"chimera-agent-{random.randint(1000, 9999)}"
         config_path = options['config']
         episodes = options['episodes']
+        port = options['port']
 
-        logger.info(f"Starting Chimera agent '{agent_tag}' for environment: {env_id}")
+        logger.info(f"Starting Chimera agent '{agent_tag}' for environment: {env_id} on port {port}")
 
         # --- Load Configuration ---
         try:
@@ -79,7 +90,7 @@ class Command(BaseCommand):
         history_config = config.get('agent_history', {})
 
         # --- Colosseum Connection ---
-        connector = ColosseumConnector(env_id, agent_tag, port=8000)
+        connector = ColosseumConnector(env_id, agent_tag, port=port)
 
         try:
             session_info = await connector.create_session()
@@ -128,14 +139,12 @@ class Command(BaseCommand):
                 for episode in range(1, episodes + 1):
                     current_obs = np.array(join_response.get("observation"))
                     done = False
-                    total_reward = 0
-
                     episode_reward = 0
+
                     while not done:
                         h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
                         action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                        # Update Redis with action probabilities for the UI
                         update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
 
                         await connector.send_action(int(action))
@@ -158,7 +167,6 @@ class Command(BaseCommand):
                                agent.steps_done % hyperparams.get('policy_train_frequency', 10) == 0 and \
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id=cortex_id)
-                                # Update UI state after training
                                 if train_stats:
                                     update_ui_state_in_redis('chimera_training_metrics', train_stats)
                                     updated_graph = agent.get_graph_structure()
@@ -169,16 +177,10 @@ class Command(BaseCommand):
                         else:
                             logger.warning(f"Unexpected message type received: {msg.get('type')}")
 
-                    # --- End of Episode ---
                     pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": agent.steps_done})
                     pbar.update(1)
 
-                    # Update episode metrics in Redis
-                    episode_stats = {
-                        'episode': episode,
-                        'reward': episode_reward,
-                        'total_steps': agent.steps_done
-                    }
+                    episode_stats = { 'episode': episode, 'reward': episode_reward, 'total_steps': agent.steps_done }
                     update_ui_state_in_redis('chimera_episode_metrics', episode_stats)
 
                     if episode < episodes:
@@ -189,10 +191,6 @@ class Command(BaseCommand):
                             logger.error("Failed to reset environment. Exiting.")
                             break
 
-        except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError):
-            logger.error("\nConnection to the server failed. Please ensure the Colosseum backend is running.")
-        except KeyboardInterrupt:
-            logger.info("Interrupted by user.")
         finally:
             logger.info("Closing connection and saving agent state.")
             await connector.close()
