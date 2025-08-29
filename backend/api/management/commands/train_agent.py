@@ -10,30 +10,32 @@ from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 import gymnasium as gym
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
+import redis
+import json
 import time
 
 logger = logging.getLogger(__name__)
 
-def broadcast_to_brain_monitoring(message_type, data):
-    """Helper function to broadcast a message to the brain_monitoring group."""
+# --- Redis-based UI State Caching ---
+try:
+    redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
+    redis_client.ping()
+    logger.info("Successfully connected to Redis for UI state caching.")
+except redis.exceptions.ConnectionError as e:
+    logger.error(f"Could not connect to Redis: {e}. UI updates will be disabled.")
+    redis_client = None
+
+def update_ui_state_in_redis(key, data):
+    """Serializes data to JSON and stores it in a Redis key."""
+    if redis_client is None:
+        return
     try:
-        channel_layer = get_channel_layer()
-        if channel_layer is not None:
-            async_to_sync(channel_layer.group_send)(
-                'brain_monitoring',
-                {
-                    'type': 'training_update', # This is the handler method name in the consumer
-                    'data': {
-                        'type': message_type,
-                        'payload': data,
-                        'timestamp': time.time()
-                    }
-                }
-            )
+        # Using a custom JSON encoder to handle numpy types
+        from api.services.chimera_agent import NumpyJSONEncoder
+        payload = json.dumps(data, cls=NumpyJSONEncoder)
+        redis_client.set(key, payload)
     except Exception as e:
-        logger.warning(f"Failed to broadcast message of type {message_type}: {e}")
+        logger.warning(f"Failed to update UI state in Redis for key {key}: {e}")
 
 def seed_all(s):
     """Sets the seed for all random number generators."""
@@ -102,9 +104,9 @@ class Command(BaseCommand):
         logger.info(f"Master cortex configuration will include: {list(master_cortex_configs.keys())}")
         logger.info(f"Max action dimension across all environments: {max_action_dim}")
 
-        # Broadcast environment list to the UI
+        # Update UI state in Redis
         env_list_for_ui = [{'id': name, 'name': name} for name in env_names]
-        broadcast_to_brain_monitoring('environments_update', env_list_for_ui)
+        update_ui_state_in_redis('chimera_environments', env_list_for_ui)
 
         # --- Initialize a single, generalist agent ---
         agent_id = agent_config.get('default_agent_id_prefix', 'Kymera-') + "local-train"
@@ -121,9 +123,9 @@ class Command(BaseCommand):
         )
         logger.info(f"Initialized Generalist Agent '{agent_id}'")
 
-        # Broadcast initial graph structure
+        # Update initial graph structure in Redis
         initial_graph = agent.get_graph_structure()
-        broadcast_to_brain_monitoring('graph_update', initial_graph)
+        update_ui_state_in_redis('chimera_graph_state', initial_graph)
 
 
         # --- Training Loop ---
@@ -150,9 +152,6 @@ class Command(BaseCommand):
                                 h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
                                 action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                                # Broadcast action probabilities for UI visualization
-                                broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()})
-
                                 next_state, reward, done, truncated, info = env.step(action)
 
                                 agent.update_stag(h_normalized, reward)
@@ -172,20 +171,20 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    broadcast_to_brain_monitoring('training_metrics', train_stats)
-
-                            # Periodically update the graph structure for the UI
-                            if total_steps % 500 == 0: # Broadcast every 500 steps
-                                updated_graph = agent.get_graph_structure()
-                                broadcast_to_brain_monitoring('graph_update', updated_graph)
+                                    # --- Update UI State in Redis after training step ---
+                                    update_ui_state_in_redis('chimera_training_metrics', train_stats)
+                                    updated_graph = agent.get_graph_structure()
+                                    update_ui_state_in_redis('chimera_graph_state', updated_graph)
 
 
                         logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")
-                        broadcast_to_brain_monitoring('training_metrics', {
+                        # Also update episode stats in Redis
+                        episode_stats = {
                             'episode': episode_num,
                             'reward': episode_reward,
                             'total_steps': total_steps
-                        })
+                        }
+                        update_ui_state_in_redis('chimera_episode_metrics', episode_stats)
 
                 env.close()
 
