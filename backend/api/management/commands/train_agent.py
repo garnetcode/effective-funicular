@@ -58,10 +58,11 @@ class SharedModelWeights:
 
 class LearnerThread(threading.Thread):
     """A dedicated thread for running the agent's training loop."""
-    def __init__(self, agent, cortex_id, stop_event, shared_weights):
+    def __init__(self, agent, cortex_id, env_id, stop_event, shared_weights):
         super().__init__()
         self.agent = agent
         self.cortex_id = cortex_id
+        self.env_id = env_id
         self.stop_event = stop_event
         self.shared_weights = shared_weights
         self.daemon = True
@@ -87,6 +88,12 @@ class LearnerThread(threading.Thread):
                     if train_steps % hyperparams.get('actor_update_frequency', 100) == 0:
                         logger.info(f"Learner publishing new weights for actor at step {train_steps}.")
                         self.shared_weights.set_weights(self.agent.get_actor_state_dict())
+
+                    # Periodically update the STAG graph in the UI
+                    if train_steps % hyperparams.get('stag_ui_update_frequency', 50) == 0:
+                        stag_graph = self.agent.get_graph_structure(self.env_id)
+                        if stag_graph:
+                            update_ui_state_in_redis('chimera_stag_graph', stag_graph)
                 else:
                     time.sleep(1)
             except Exception as e:
@@ -255,7 +262,13 @@ class Command(BaseCommand):
         learner_agent, actor_agent, connector, session_info, cortex_id, shared_weights = setup_result
         stop_event = threading.Event()
 
-        learner_thread = LearnerThread(agent=learner_agent, cortex_id=cortex_id, stop_event=stop_event, shared_weights=shared_weights)
+        learner_thread = LearnerThread(
+            agent=learner_agent,
+            cortex_id=cortex_id,
+            env_id=connector.environment_id,
+            stop_event=stop_event,
+            shared_weights=shared_weights
+        )
 
         try:
             learner_thread.start()
