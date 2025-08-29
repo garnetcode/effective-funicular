@@ -16,20 +16,8 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# --- Time-based Throttling for WebSocket Broadcasts ---
-last_broadcast_time = {}
-
-def broadcast_to_brain_monitoring(message_type, data, throttle_secs=0):
-    """
-    Helper function to broadcast a message to the brain_monitoring group,
-    with optional time-based throttling.
-    """
-    now = time.time()
-    if throttle_secs > 0:
-        last_time = last_broadcast_time.get(message_type, 0)
-        if now - last_time < throttle_secs:
-            return  # Throttled
-
+def broadcast_to_brain_monitoring(message_type, data):
+    """Helper function to broadcast a message to the brain_monitoring group."""
     try:
         channel_layer = get_channel_layer()
         if channel_layer is not None:
@@ -40,12 +28,10 @@ def broadcast_to_brain_monitoring(message_type, data, throttle_secs=0):
                     'data': {
                         'type': message_type,
                         'payload': data,
-                        'timestamp': now
+                        'timestamp': time.time()
                     }
                 }
             )
-        # Update the last broadcast time if the message was sent
-        last_broadcast_time[message_type] = now
     except Exception as e:
         logger.warning(f"Failed to broadcast message of type {message_type}: {e}")
 
@@ -163,9 +149,6 @@ class Command(BaseCommand):
                             h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
                             action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                            # Broadcast action probabilities for UI visualization (time-throttled)
-                            broadcast_to_brain_monitoring('action_update', {'probabilities': action_probs.tolist()}, throttle_secs=1.0)
-
                             next_state, reward, done, truncated, info = env.step(action)
 
                             agent.update_stag(h_normalized, reward)
@@ -184,12 +167,10 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id)
                                 if train_stats:
-                                    broadcast_to_brain_monitoring('training_metrics', train_stats, throttle_secs=1.0)
-
-                            # Periodically update the graph structure for the UI
-                            if total_steps % 500 == 0: # Broadcast every 500 steps
-                                updated_graph = agent.get_graph_structure()
-                                broadcast_to_brain_monitoring('graph_update', updated_graph)
+                                    # All UI updates are now sent only when the agent is updated.
+                                    broadcast_to_brain_monitoring('training_metrics', train_stats)
+                                    updated_graph = agent.get_graph_structure()
+                                    broadcast_to_brain_monitoring('graph_update', updated_graph)
 
 
                         logger.info(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Total Steps: {total_steps}")

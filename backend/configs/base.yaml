@@ -35,7 +35,7 @@ agent_config:
     epsilon_end: 0.05
     epsilon_decay_steps: 200000
     burnin_steps: 1000
-    sequence_length: 20
+    sequence_length: 10
     policy_train_frequency: 10
     # Training Schedules
     imagination_horizon_start: 5
@@ -48,7 +48,7 @@ agent_config:
     use_stag_in_ac_loss: true # If true, the STAG context vector is used in the actor-critic loss.
     # Phased Training for STAG
     world_model_pretrain_steps: 1000 # Reduced to engage STAG earlier.
-    stag_update_frequency: 50 # Increased to allow STAG to stabilize.
+    stag_update_frequency: 10 # Increased to allow STAG to stabilize.
     # STAG Graph Growth Management
     gng_pruning_frequency: 1000 # Prune low-utility nodes every N training steps.
     gng_min_utility_threshold: 0.1 # Prune nodes with utility below this threshold.
