@@ -207,28 +207,21 @@ class ColosseumConnector:
 
     async def receive_message(self):
         """
-        Receives, parses, and returns a single message from the WebSocket,
-        with reconnection logic. It ignores broadcasts of the agent's own actions.
+        Receives, parses, and returns a single message from the WebSocket.
+        This method now silently ignores 'pong' keep-alive messages.
         """
-        while True:  # Loop to ignore self-action broadcasts and find a relevant message
+        while True:
             message_data = await self._receive_one_message_with_retry()
             if message_data is None:
-                return None  # Return None if receiving fails permanently
+                return None  # Connection failed
 
-            # Check if the message is a reflection of our own action
-            is_own_action = (
-                message_data.get("type") == "action.taken" and
-                message_data.get("agent_tag") == self.agent_tag
-            )
+            # Ignore pong messages and continue waiting for a substantive message
+            if message_data.get("type") == "pong":
+                logger.debug("Received and ignored pong message.")
+                continue
 
-            if is_own_action:
-                # This is a broadcast of our own action. We process it because it contains
-                # the environment's response (obs, reward, done). In other protocols,
-                # we might ignore this and wait for a direct response.
-                return message_data
-            else:
-                # If it's not our action, it's a relevant message.
-                return message_data
+            # For all other messages, return them.
+            return message_data
 
     async def _receive_one_message_with_retry(self):
         """Helper that attempts to receive a single message, with one retry after reconnecting."""
