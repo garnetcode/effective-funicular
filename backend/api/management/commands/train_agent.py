@@ -5,6 +5,7 @@ import numpy as np
 from tqdm import tqdm
 import time
 import threading
+import copy
 
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
@@ -41,32 +42,48 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
 
+class SharedModelWeights:
+    """A thread-safe class to hold the model weights for the actor to pull."""
+    def __init__(self):
+        self.state_dict = None
+        self.lock = threading.Lock()
+
+    def set_weights(self, state_dict):
+        with self.lock:
+            self.state_dict = copy.deepcopy(state_dict)
+
+    def get_weights(self):
+        with self.lock:
+            return copy.deepcopy(self.state_dict) if self.state_dict else None
+
 class LearnerThread(threading.Thread):
     """A dedicated thread for running the agent's training loop."""
-    def __init__(self, agent, cortex_id, stop_event):
+    def __init__(self, agent, cortex_id, stop_event, shared_weights):
         super().__init__()
         self.agent = agent
         self.cortex_id = cortex_id
         self.stop_event = stop_event
-        self.daemon = True # Allows main thread to exit even if this thread is still running
+        self.shared_weights = shared_weights
+        self.daemon = True
 
     def run(self):
         logger.info("Learner thread started.")
+        train_steps = 0
         while not self.stop_event.is_set():
             try:
                 hyperparams = self.agent.hyperparams
-                if len(self.agent.replay_buffer) > hyperparams.get('burnin_steps', 1000) and \
-                   len(self.agent.replay_buffer) > hyperparams.get('batch_size', 16):
-
-                    logger.debug("Learner is training a batch.")
-                    # This is a synchronous, blocking call, which is why it's in its own thread.
+                if len(self.agent.replay_buffer) > hyperparams.get('burnin_steps', 1000):
                     train_stats = self.agent.train(cortex_id=self.cortex_id)
+                    train_steps += 1
+
                     if train_stats:
                         update_ui_state_in_redis('chimera_training_metrics', train_stats)
-                        updated_graph = self.agent.get_graph_structure()
-                        update_ui_state_in_redis('chimera_graph_state', updated_graph)
+
+                    if train_steps % hyperparams.get('actor_update_frequency', 100) == 0:
+                        logger.info(f"Learner publishing new weights for actor at step {train_steps}.")
+                        self.shared_weights.set_weights(self.agent.get_actor_state_dict())
                 else:
-                    time.sleep(1) # Avoid busy-waiting
+                    time.sleep(1)
             except Exception as e:
                 logger.error(f"Error in learner thread: {e}", exc_info=True)
                 time.sleep(5)
@@ -90,23 +107,22 @@ class Command(BaseCommand):
         except Exception as e:
             logger.error(f"An unexpected error occurred in main handler: {e}", exc_info=True)
 
-    async def _setup(self, options):
+    async def _setup_components(self, options):
         env_id = options['env_id']
         agent_tag = options['agent_tag'] or f"chimera-agent-{int(time.time())}"
         config_path = options['config']
         port = options['port']
 
-        logger.info(f"Starting Chimera agent '{agent_tag}' for environment: {env_id} on port {port}")
+        logger.info(f"Setting up components for agent '{agent_tag}' in '{env_id}'...")
 
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
-            logger.info(f"Loaded configuration from {config_path}")
         except FileNotFoundError:
             logger.error(f"Config file not found at: {config_path}")
             return None
 
-        hyperparams = config['agent_config'].get('hyperparams', {})
+        hyperparams = config.get('agent_config', {}).get('hyperparams', {})
         replay_buffer = PERSequenceBuffer(
             capacity=hyperparams.get('buffer_capacity', 10000),
             sequence_length=hyperparams.get('sequence_length', 50),
@@ -117,58 +133,78 @@ class Command(BaseCommand):
 
         connector = ColosseumConnector(env_id, agent_tag, http_port=port, ws_port=port)
         session_info = await connector.create_session()
-        if not session_info:
-            logger.error("Could not create session.")
-            return None
+        if not session_info: return None
 
         env_specs = session_info['environment']
         obs_space_info = env_specs['observation_space']
         action_space_info = env_specs['action_space']
+
         cortex_configs, cortex_id = create_cortex_configs_from_observation_space(
             gym.spaces.Box(
                 low=np.array(obs_space_info['low']), high=np.array(obs_space_info['high']),
                 shape=obs_space_info['shape'], dtype=np.dtype(obs_space_info['dtype'])
             )
         )
-        agent = ChimeraAgent(
+
+        common_params = {
+            "embedding_dim": config.get('agent_config', {}).get('embedding_dim', 512),
+            "max_action_dim": action_space_info['n'],
+            "cortex_configs": cortex_configs,
+            "hyperparams": hyperparams,
+            "replay_buffer": replay_buffer
+        }
+
+        learner_agent = ChimeraAgent(
             agent_id=agent_tag,
-            embedding_dim=config['agent_config'].get('embedding_dim', 512),
-            max_action_dim=action_space_info['n'],
-            cortex_configs=cortex_configs,
             load_from_storage=not config.get('force_new_agent', False),
-            hyperparams=hyperparams,
             history_config=config.get('agent_history', {}),
-            replay_buffer=replay_buffer
+            **common_params
         )
-        agent.set_active_skill(env_id)
-        logger.info(f"Initialized Chimera Agent '{agent_tag}' for {env_id}")
+
+        actor_agent = ChimeraAgent(
+            agent_id=f"{agent_tag}-actor",
+            load_from_storage=False,
+            history_config={},
+            **common_params
+        )
+        actor_agent.load_state_dict(learner_agent.state_dict())
+
+        learner_agent.set_active_skill(env_id)
+        actor_agent.set_active_skill(env_id)
+
+        shared_weights = SharedModelWeights()
+        shared_weights.set_weights(learner_agent.get_actor_state_dict())
 
         if not await connector.connect_websocket() or not await connector.join_session():
-            logger.error("Could not connect to WebSocket or join session.")
             await connector.close()
             return None
 
-        return agent, connector, session_info, cortex_id
+        logger.info("Setup complete. Actor and Learner are ready.")
+        return learner_agent, actor_agent, connector, session_info, cortex_id, shared_weights
 
-    async def _actor_task(self, agent, connector, session_info, cortex_id, episodes):
+    async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id, episodes):
         logger.info("Actor task started.")
-        initial_obs = np.array(session_info.get("observation"))
+        current_obs = np.array(session_info.get("observation"))
+
         with tqdm(total=episodes, desc=f"Acting in {connector.environment_id}") as pbar:
             for episode in range(1, episodes + 1):
+                latest_weights = shared_weights.get_weights()
+                if latest_weights:
+                    actor_agent.load_actor_state_dict(latest_weights)
+
                 done = False
                 episode_reward = 0
-                current_obs = initial_obs
 
                 while not done:
-                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
-                    action, log_prob, _, _, _, _, action_probs = agent.select_action(agent.max_action_dim, activation_path)
-                    update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
+                    h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
+                    action, log_prob, _, _, _, _, action_probs = actor_agent.select_action(actor_agent.max_action_dim, activation_path)
 
+                    update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
                     await connector.send_action(int(action))
                     msg = await connector.receive_message()
 
                     if not msg:
-                        logger.warning("Did not receive state from server. Ending episode.")
+                        logger.warning("Actor did not receive state from server. Ending episode.")
                         break
 
                     if msg.get("type") == "action.taken":
@@ -176,21 +212,19 @@ class Command(BaseCommand):
                         reward = msg.get("reward", 0)
                         done = msg.get("done", False)
                         episode_reward += reward
-                        agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+                        actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
                         current_obs = next_obs
-                    elif msg.get("type") == "game.over":
-                        done = True
                     else:
-                        logger.warning(f"Unexpected message type received: {msg.get('type')}")
+                        logger.warning(f"Actor received unexpected message type: {msg.get('type')}")
 
-                pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": agent.steps_done})
+                pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": actor_agent.steps_done})
                 pbar.update(1)
-                update_ui_state_in_redis('chimera_episode_metrics', {'episode': episode, 'reward': episode_reward, 'total_steps': agent.steps_done})
+                update_ui_state_in_redis('chimera_episode_metrics', {'episode': episode, 'reward': episode_reward, 'total_steps': actor_agent.steps_done})
 
                 if episode < episodes:
                     reset_response = await connector.reset_environment()
                     if reset_response:
-                        initial_obs = np.array(reset_response.get("observation"))
+                        current_obs = np.array(reset_response.get("observation"))
                     else:
                         logger.error("Failed to reset environment. Stopping actor task.")
                         break
@@ -200,22 +234,22 @@ class Command(BaseCommand):
         log_level = logging.INFO if options.get('verbosity', 0) > 0 else logging.WARNING
         logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-        setup_result = await self._setup(options)
+        setup_result = await self._setup_components(options)
         if not setup_result:
             logger.error("Setup failed. Aborting training.")
             return
 
-        agent, connector, session_info, cortex_id = setup_result
+        learner_agent, actor_agent, connector, session_info, cortex_id, shared_weights = setup_result
         stop_event = threading.Event()
 
-        learner_thread = LearnerThread(agent=agent, cortex_id=cortex_id, stop_event=stop_event)
-        learner_thread.start()
+        learner_thread = LearnerThread(agent=learner_agent, cortex_id=cortex_id, stop_event=stop_event, shared_weights=shared_weights)
 
         try:
-            await self._actor_task(agent, connector, session_info, cortex_id, options['episodes'])
+            learner_thread.start()
+            await self._actor_task(actor_agent, shared_weights, connector, session_info, cortex_id, options['episodes'])
         finally:
-            logger.info("Actor finished. Stopping learner and cleaning up.")
+            logger.info("Main task finished. Stopping learner and cleaning up.")
             stop_event.set()
-            learner_thread.join() # Wait for the learner thread to finish
+            learner_thread.join()
             await connector.close()
-            agent.save_state(version_info={"message": f"Colosseum training on {connector.environment_id} stopped."})
+            learner_agent.save_state(version_info={"message": f"Colosseum training on {connector.environment_id} stopped."})

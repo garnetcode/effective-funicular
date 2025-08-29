@@ -1086,6 +1086,40 @@ class ChimeraAgent:
         self.contrastive_queue_ptr[0] = ptr
 
 
+    def get_actor_state_dict(self):
+        """Returns the state dict for the actor components."""
+        return {
+            'action_head_state_dict': self.action_head.state_dict(),
+            'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
+        }
+
+    def state_dict(self):
+        """Returns the complete state of the agent for serialization."""
+        # This is similar to save_state but returns the dict instead of saving it.
+        return {
+            'world_models_state_dicts': [wm.state_dict() for wm in self.world_models],
+            'action_head_state_dict': self.action_head.state_dict(),
+            'value_head_state_dict': self.value_head.state_dict(),
+            'stag_context_processor_state_dict': self.stag_context_processor.state_dict(),
+            'steps_done': self.steps_done,
+            'train_steps': self.train_steps,
+            'novelty_stats': self.novelty_stats,
+            'skill_manager_state': self.skill_manager.get_serializable_structure(),
+            'kl_coeff': self.kl_coeff,
+            'kl_error_integral': self.kl_error_integral,
+            'kl_last_error': self.kl_last_error,
+            'contrastive_queue': self.contrastive_queue,
+            'contrastive_queue_ptr': self.contrastive_queue_ptr,
+        }
+
+    def load_actor_state_dict(self, state_dict):
+        """Loads the state dict for the actor components."""
+        if 'action_head_state_dict' in state_dict:
+            self.action_head.load_state_dict(state_dict['action_head_state_dict'])
+        if 'stag_context_processor_state_dict' in state_dict:
+            self.stag_context_processor.load_state_dict(state_dict['stag_context_processor_state_dict'])
+        logger.info("Actor weights updated from learner.")
+
     def get_graph_structure(self, skill_id=None):
         """
         Gets the graph structure for the active skill, or a specified skill.
