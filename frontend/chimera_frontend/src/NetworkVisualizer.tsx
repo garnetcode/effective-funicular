@@ -2,7 +2,7 @@ import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Bounds, Line } from '@react-three/drei';
 import * as THREE from 'three';
-import { forceSimulation, forceLink, forceManyBody, forceCenter, Simulation, SimulationNodeDatum, SimulationLinkDatum, ForceLink } from 'd3-force';
+import { forceSimulation, forceLink, forceManyBody, forceCenter, forceX, forceY, Simulation, SimulationNodeDatum, SimulationLinkDatum, ForceLink } from 'd3-force';
 
 // --- Type Definitions ---
 
@@ -113,8 +113,11 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
   const simulationRef = useRef<Simulation<NodeDatum, EdgeDatum>>(
     forceSimulation<NodeDatum, EdgeDatum>()
       .force("link", forceLink<NodeDatum, EdgeDatum>().id((d: any) => d.id).distance(1).strength(0.1))
-      .force("charge", forceManyBody().strength(-10))
+      .force("charge", forceManyBody().strength(-15))
       .force("center", forceCenter())
+      // Add forces to encourage a brain-like shape (wider than it is tall)
+      .force("x", forceX(0).strength(0.05))
+      .force("y", forceY(0).strength(0.02))
   );
 
   useEffect(() => {
@@ -153,8 +156,9 @@ const ForceGraph: React.FC<ForceGraphProps> = ({ graphData }) => {
   }, [graphData]);
 
   useFrame(() => {
-    // The simulation runs continuously, modifying node positions.
-    // We trigger a re-render to see the changes.
+    // Run the simulation on each frame
+    simulationRef.current.tick();
+    // Trigger a re-render to show the new positions
     setRenderTrigger(r => r + 1);
   });
 
