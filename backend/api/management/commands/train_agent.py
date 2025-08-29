@@ -98,18 +98,8 @@ class Command(BaseCommand):
                 logger.error("Could not create session. Exiting.")
                 return
 
-            if not await connector.connect_websocket():
-                logger.error("Could not connect to WebSocket. Exiting.")
-                return
-
-            join_response = await connector.join_session()
-            if not join_response:
-                logger.error("Could not join session. Exiting.")
-                await connector.close()
-                return
-
-            # --- Environment and Agent Setup (Post-Connection) ---
-            env_specs = join_response['environment']
+            # --- Environment and Agent Setup (Post-Session-Creation) ---
+            env_specs = session_info['environment']
             obs_space_info = env_specs['observation_space']
             action_space_info = env_specs['action_space']
 
@@ -134,24 +124,28 @@ class Command(BaseCommand):
             agent.set_active_skill(env_id, actual_action_dim)
             logger.info(f"Initialized Chimera Agent '{agent_tag}' for {env_id}")
 
+            # --- Connect and Join Session ---
+            if not await connector.connect_websocket():
+                logger.error("Could not connect to WebSocket. Exiting.")
+                return
+
+            join_response = await connector.join_session()
+            if not join_response:
+                logger.error("Could not join session. Exiting.")
+                await connector.close()
+                return
+
             # --- Main Training Loop ---
-            postfix_data = {
-                "Reward": "N/A", "Epsilon": "N/A", "Decision": "N/A",
-                "WM Loss": "N/A", "AC Loss": "N/A", "Nodes": 0, "Edges": 0
-            }
             with tqdm(total=episodes, desc=f"Training on {env_id}") as pbar:
+                current_obs = np.array(session_info.get("observation"))
                 for episode in range(1, episodes + 1):
-                    current_obs = np.array(join_response.get("observation"))
                     done = False
                     episode_reward = 0
-                    pbar.set_postfix(postfix_data)
 
                     while not done:
                         h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
-                        action, log_prob, _, decision_maker, epsilon, _, action_probs = agent.select_action(actual_action_dim, activation_path)
+                        action, log_prob, _, _, _, _, action_probs = agent.select_action(actual_action_dim, activation_path)
 
-                        postfix_data["Epsilon"] = f"{epsilon:.2f}"
-                        postfix_data["Decision"] = decision_maker
                         update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
 
                         await connector.send_action(int(action))
@@ -175,15 +169,8 @@ class Command(BaseCommand):
                                len(agent.replay_buffer) > hyperparams.get('batch_size', 16):
                                 train_stats = agent.train(cortex_id=cortex_id)
                                 if train_stats:
-                                    wm_loss = train_stats.get('wm_loss_total')
-                                    ac_loss = train_stats.get('ac_loss')
-                                    postfix_data["WM Loss"] = f"{wm_loss:.4f}" if isinstance(wm_loss, (int, float)) else "N/A"
-                                    postfix_data["AC Loss"] = f"{ac_loss:.4f}" if isinstance(ac_loss, (int, float)) else "N/A"
                                     update_ui_state_in_redis('chimera_training_metrics', train_stats)
-
                                     updated_graph = agent.get_graph_structure()
-                                    postfix_data["Nodes"] = len(updated_graph.get('nodes', []))
-                                    postfix_data["Edges"] = len(updated_graph.get('edges', []))
                                     update_ui_state_in_redis('chimera_graph_state', updated_graph)
 
                         elif msg.get("type") == "game.over":
@@ -191,11 +178,7 @@ class Command(BaseCommand):
                         else:
                             logger.warning(f"Unexpected message type received: {msg.get('type')}")
 
-                        pbar.set_postfix(postfix_data)
-
-                    # --- End of Episode ---
-                    postfix_data["Reward"] = f"{episode_reward:.2f}"
-                    pbar.set_postfix(postfix_data)
+                    pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": agent.steps_done})
                     pbar.update(1)
 
                     episode_stats = { 'episode': episode, 'reward': episode_reward, 'total_steps': agent.steps_done }
@@ -204,7 +187,8 @@ class Command(BaseCommand):
                     if episode < episodes:
                         reset_response = await connector.reset_environment()
                         if reset_response:
-                            join_response = reset_response
+                            # The reset response should contain the new initial observation
+                            current_obs = np.array(reset_response.get("observation"))
                         else:
                             logger.error("Failed to reset environment. Exiting.")
                             break
