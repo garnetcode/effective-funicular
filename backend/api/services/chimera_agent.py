@@ -454,7 +454,8 @@ class ChimeraAgent:
                     )
                     # Update successor features
                     with torch.no_grad():
-                        state_features = torch.matmul(self.hidden_state, self.sf_projection_matrix).squeeze(0).cpu().numpy()
+                        # Use the top-level hidden state for SF calculation
+                        state_features = torch.matmul(self.hidden_state[0], self.sf_projection_matrix).squeeze(0).cpu().numpy()
                     self.skill_manager.update_successor_features(
                         self.active_skill_id,
                         self.last_stag_node_id,
@@ -555,7 +556,8 @@ class ChimeraAgent:
                 subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
                 with torch.no_grad():
                     logger.info(f"M-Planner: Planning trajectory to subgoal {self.current_subgoal}")
-                    plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight=subgoal_weight)
+                    # Pass the top-level states to the planner
+                    plan = self.planner.plan(self.hidden_state[0], self.latent_state[0], subgoal_weight=subgoal_weight)
 
                 if plan is not None and len(plan) > 0:
                     self.action_plan = plan
@@ -714,13 +716,17 @@ class ChimeraAgent:
         stats['std'] = max(stats['std'], 1e-6)
 
 
-    def record_experience(self, *args):
+    def record_experience(self, h_t, z_t, activation_path, obs, action, log_prob, reward, next_obs, done):
         """Pushes an experience to the replay buffer and updates subgoal counters."""
-        experience = list(args)
-        experience.append(self.current_goal)
+        # Convert state lists to numpy arrays for storage.
+        # h_t and z_t are lists of tensors of shape (1, dim).
+        h_t_np = torch.stack(h_t).detach().cpu().numpy()
+        z_t_np = torch.stack(z_t).detach().cpu().numpy()
+
+        experience = (h_t_np, z_t_np, activation_path, obs, action, log_prob, reward, next_obs, done, self.current_goal)
         self.replay_buffer.push(*experience)
-        # Assumes the reward is the 6th argument in *args
-        self.subgoal_reward += args[6]
+
+        self.subgoal_reward += reward
         self.subgoal_duration += 1
 
     def train(self, cortex_id="vector_input"):
@@ -902,47 +908,54 @@ class ChimeraAgent:
     def train_policy_in_imagination(self):
         """
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
-        This version implements policy distillation from a planner.
+        This version is corrected to work with a hierarchical state space.
         """
         batch_size = self.hyperparams.get('batch_size', 32)
         if len(self.replay_buffer) < self.replay_buffer.sequence_length:
             return {}
 
-        # AGENT_FIX: The policy's imagination horizon should match the planner's
-        # horizon for the behavioral cloning loss to be calculated correctly.
         horizon = self.planner.plan_horizon
 
         # --- Calculate scheduled parameters ---
         progress = min(1.0, self.train_steps / self.entropy_coef_schedule_steps)
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
-
         progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
         lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
 
         # --- Sample starting states from real data ---
         batch, _, _ = self.replay_buffer.sample(batch_size)
-        h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
-        z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
+
+        # The replay buffer stores stacked numpy arrays of shape (num_levels, 1, dim).
+        # We select the first state in the sequence [:, 0], convert to tensor, and squeeze the singleton dimension.
+        h_start_all_levels = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(2)
+        z_start_all_levels = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(2)
+
+        # Use the top-level state (index 0) for imagination, shape (batch_size, dim)
+        h_start = h_start_all_levels[:, 0, :]
+        z_start = z_start_all_levels[:, 0, :]
+
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
 
         # --- Generate "teacher" plan from the latent planner ---
         with torch.no_grad():
+            # Pass the top-level states to the planner
             teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
 
         # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
         imagined_h = [h_t]
         imagined_z = [z_t]
-
         policy_actions = []
         policy_log_probs = []
         policy_entropies = []
 
+        # The transition model from the top level of the hierarchy
+        transition_model = self.world_models[0].rssm.levels[0].transition_model
+        fc_prediction = self.world_models[0].rssm.levels[0].fc_prediction
+
         for t in range(horizon):
             norm_h = self.h_norm(h_t)
-            # Note: STAG context is not used in this simplified distillation loop for now.
             stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
-
             action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
 
@@ -952,8 +965,10 @@ class ChimeraAgent:
             policy_entropies.append(action_dist.entropy())
 
             with torch.no_grad():
-                h_t, prior_mean, prior_std = self.world_models[0].rssm.transition_model(z_t, action, h_t)
-                z_t = Normal(prior_mean, prior_std).rsample()
+                a_one_hot = torch.nn.functional.one_hot(action.long(), num_classes=transition_model.input_size - z_t.shape[-1]).float()
+                rnn_input = torch.cat([z_t, a_one_hot], dim=-1)
+                h_t = transition_model(rnn_input, h_t)
+                z_t = fc_prediction(h_t)
 
             imagined_h.append(h_t)
             imagined_z.append(z_t)
@@ -972,7 +987,6 @@ class ChimeraAgent:
         imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_expanded], dim=-1)).squeeze(-1)
         imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded], dim=-1)).squeeze(-1)
 
-        # --- Calculate Value Targets (Lambda-Return) for the RL loss ---
         lambda_ = self.hyperparams.get('lambda', 0.95)
         returns = torch.zeros_like(imagined_values[-1])
         lambda_returns = []
@@ -981,39 +995,24 @@ class ChimeraAgent:
             lambda_returns.append(returns)
         lambda_returns = torch.stack(list(reversed(lambda_returns)))
 
-        # --- Calculate Losses ---
-        # 1. RL Policy Loss
         advantage = (lambda_returns - imagined_values[:-1]).detach()
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         policy_loss = -(policy_log_probs * advantage).mean()
-
-        # 2. RL Critic Loss
         critic_loss = F.mse_loss(imagined_values[:-1], lambda_returns.detach())
 
-        # 3. Behavioral Cloning (BC) Loss
-        # The teacher plan has shape (horizon, batch, action_dim).
-        # We need the policy's logits for the states it visited.
-        # We process the whole trajectory at once by reshaping.
         imagined_states = norm_imagined_h[:-1]
         stag_context_bc = torch.zeros(horizon, batch_size, self.stag_context_dim, device=self.device)
         goal_bc = goal_sequence.unsqueeze(0).expand(horizon, -1, -1)
-
-        # Flatten the horizon and batch dimensions to treat the sequence as a single batch
         imagined_states_flat = imagined_states.reshape(-1, self.hidden_dim)
         stag_context_bc_flat = stag_context_bc.reshape(-1, self.stag_context_dim)
         goal_bc_flat = goal_bc.reshape(-1, self.goal_dim)
-
         combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat], dim=-1)
         policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
-
-        # Reshape the output logits back to (horizon, batch, action_dim)
         policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
         bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
-        # 4. Entropy Bonus
         entropy_loss = -entropy_coef * policy_entropies.mean()
 
-        # --- Total Loss and Backpropagation ---
         total_loss = policy_loss + critic_loss + lambda_bc * bc_loss + entropy_loss
 
         ac_optimizer = torch.optim.Adam(
