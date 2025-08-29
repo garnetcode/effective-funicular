@@ -121,7 +121,8 @@ class Command(BaseCommand):
 
     async def _setup_components(self, options):
         env_id = options['env_id']
-        agent_tag = options['agent_tag'] or f"chimera-agent-{int(time.time())}"
+        # AGENT_FIX: Use the env_id to create a persistent agent name, allowing history to be loaded.
+        agent_tag = options['agent_tag'] or f"chimera-agent-{env_id}"
         config_path = options['config']
         port = options['port']
 
