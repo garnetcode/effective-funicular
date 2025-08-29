@@ -18,6 +18,23 @@ class ColosseumConnector:
         self.agent_tag = agent_tag
         self.session_id = None
         self.websocket = None
+        self.keep_alive_task = None
+
+    async def _keep_alive(self):
+        """Sends a ping message every 20 seconds to keep the connection alive."""
+        while True:
+            try:
+                await asyncio.sleep(20)
+                # Use .open as .closed was causing issues
+                if self.websocket and self.websocket.open:
+                    await self.websocket.ping()
+                    logger.debug("Sent WebSocket ping")
+            except asyncio.CancelledError:
+                logger.info("Keep-alive task cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"Error in keep-alive task: {e}")
+                break
 
     async def create_session(self):
         """Creates a new game session via the HTTP API."""
@@ -65,6 +82,12 @@ class ColosseumConnector:
                 additional_headers={"Origin": "http://localhost:3000"}
             )
             logger.debug(f"Successfully connected to WebSocket: {uri}")
+
+            # Start the keep-alive task
+            if self.keep_alive_task:
+                self.keep_alive_task.cancel()
+            self.keep_alive_task = asyncio.create_task(self._keep_alive())
+
             return True
         except websockets.exceptions.InvalidURI:
             logger.error(f"Invalid WebSocket URI: {uri}")
@@ -289,7 +312,11 @@ class ColosseumConnector:
         return False
 
     async def close(self):
-        """Closes the WebSocket connection."""
+        """Closes the WebSocket connection and stops the keep-alive task."""
+        if self.keep_alive_task:
+            self.keep_alive_task.cancel()
+            self.keep_alive_task = None
+
         if self.websocket:
             try:
                 await self.websocket.close()
