@@ -95,6 +95,7 @@ class LearnerThread(threading.Thread):
 
     def run(self):
         self.logger.info("Learner thread started.")
+        self.logger.info(f"Learner thread using replay buffer with ID: {id(self.agent.replay_buffer)}")
         train_steps = 0
         while not self.stop_event.is_set():
             try:
@@ -173,6 +174,7 @@ class Command(BaseCommand):
             beta_start=hyperparams.get('per_beta_start', 0.4),
             beta_frames=hyperparams.get('per_beta_frames', 100000)
         )
+        actor_logger.info(f"Main thread created replay buffer with ID: {id(replay_buffer)}")
 
         connector = ColosseumConnector(env_id, agent_tag, http_port=port, ws_port=port)
         session_info = await connector.create_session()
@@ -234,6 +236,7 @@ class Command(BaseCommand):
 
     async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id, logger):
         logger.info("Actor task started.")
+        logger.info(f"Actor task using replay buffer with ID: {id(actor_agent.replay_buffer)}")
         current_obs = np.array(session_info.get("observation"))
         best_episode_reward = -float('inf')
         episode = 0
