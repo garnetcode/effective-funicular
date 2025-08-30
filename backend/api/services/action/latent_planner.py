@@ -46,8 +46,15 @@ class LatentPlanner(nn.Module):
                         action_t_discrete = torch.argmax(action_t_samples, dim=-1)
                         action_t_flat = action_t_discrete.reshape(-1, 1)
 
-                        h_sim_flat, prior_mean, prior_std = world_model.rssm.transition_model(z_sim_flat, action_t_flat, h_sim_flat)
-                        z_sim_flat = torch.distributions.Normal(prior_mean, prior_std).rsample()
+                        transition_model = world_model.rssm.levels[0].transition_model
+                        fc_prediction = world_model.rssm.levels[0].fc_prediction
+
+                        # The GRUCell returns only the next hidden state
+                        h_sim_flat = transition_model(torch.cat([z_sim_flat, action_t_flat], dim=-1), h_sim_flat)
+
+                        # We use the fc_prediction layer to get the next latent state
+                        z_sim_flat = fc_prediction(h_sim_flat)
+
 
                         if subgoal_weight is not None:
                             # If a latent-space subgoal is provided, use distance in h-space as reward
