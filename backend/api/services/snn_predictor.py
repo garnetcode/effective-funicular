@@ -75,8 +75,12 @@ class NodePredictor(nn.Module):
     @classmethod
     def from_state(cls, state_dict, device='cpu'):
         """Creates a NodePredictor instance from a state dictionary."""
+        embedding_dim = state_dict.get('embedding_dim', state_dict.get('input_dim'))
+        if embedding_dim is None:
+            raise KeyError("State is missing 'embedding_dim' or 'input_dim'.")
+
         predictor = cls(
-            embedding_dim=state_dict['embedding_dim'],
+            embedding_dim=embedding_dim,
             hidden_dim=state_dict['hidden_dim'],
             max_nodes=state_dict['max_nodes'],
             num_layers=state_dict.get('num_layers', 1)

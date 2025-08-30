@@ -404,6 +404,7 @@ class ChimeraAgent:
         h_normalized = None
         activation_path = []
         novelty = 0
+        winner_id = None
         # Only engage STAG if we are past the pre-training phase.
         if self.steps_done > self.world_model_pretrain_steps:
             # Use the hidden state for the STAG
