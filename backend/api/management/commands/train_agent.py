@@ -189,19 +189,18 @@ class Command(BaseCommand):
             )
         )
 
-        common_params = {
-            "embedding_dim": config.get('agent_config', {}).get('embedding_dim', 512),
-            "max_action_dim": action_space_info['n'],
-            "cortex_configs": cortex_configs,
-            "hyperparams": hyperparams,
-            "replay_buffer": replay_buffer
-        }
+        embedding_dim = config.get('agent_config', {}).get('embedding_dim', 512)
+        max_action_dim = action_space_info['n']
 
         learner_agent = ChimeraAgent(
             agent_id=agent_tag,
+            embedding_dim=embedding_dim,
+            max_action_dim=max_action_dim,
+            cortex_configs=cortex_configs,
+            hyperparams=hyperparams,
+            replay_buffer=replay_buffer,
             load_from_storage=not config.get('force_new_agent', False),
-            history_config=config.get('agent_history', {}),
-            **common_params
+            history_config=config.get('agent_history', {})
         )
 
         # Create a new hyperparams dict for the actor with planning enabled
@@ -210,11 +209,11 @@ class Command(BaseCommand):
 
         actor_agent = ChimeraAgent(
             agent_id=f"{agent_tag}-actor",
-            embedding_dim=config.get('agent_config', {}).get('embedding_dim', 512),
-            max_action_dim=action_space_info['n'],
+            embedding_dim=embedding_dim,
+            max_action_dim=max_action_dim,
             cortex_configs=cortex_configs,
             hyperparams=actor_hyperparams,
-            replay_buffer=replay_buffer,
+            replay_buffer=replay_buffer, # Ensure the SAME buffer is used
             load_from_storage=False,
             history_config={}
         )
