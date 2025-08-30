@@ -119,7 +119,7 @@ class Command(BaseCommand):
                         exp = Experience(*exp_tuple)
                         learner_agent.replay_buffer.push(
                             exp.h_t, exp.z_t, exp.activation_path, exp.obs, exp.action,
-                            exp.log_prob, exp.reward, exp.next_obs, exp.done, exp.goal
+                            exp.log_prob, exp.reward, exp.next_obs, exp.done, exp.goal, exp.winner_id
                         )
 
                     train_stats = learner_agent.train(cortex_id=cortex_id)
