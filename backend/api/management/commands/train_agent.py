@@ -80,6 +80,9 @@ class Command(BaseCommand):
             return
 
         redis_buffer = RedisBuffer()
+        # Clear the buffer to ensure no stale data from previous runs
+        logger.info("Clearing Redis replay buffer...")
+        redis_buffer.clear()
 
         learner_agent = ChimeraAgent(
             agent_id=agent_tag,
