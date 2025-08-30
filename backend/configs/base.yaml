@@ -69,7 +69,7 @@ agent_config:
     cem_top_k: 50
     cem_iterations: 5
     low_level_plan_frequency: 10 # Plan every 10 steps
-    use_planner: true
+    use_planner: false
     high_level_replan_frequency: 100 # Replans every 100 steps
     # Prioritized Experience Replay
     per_alpha: 0.6
