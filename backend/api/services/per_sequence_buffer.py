@@ -204,7 +204,11 @@ class PERSequenceBuffer:
                             t = torch.tensor(d)
                         except (ValueError, TypeError):
                             # If it fails, stack the elements if they are tensors
-                            t = torch.stack([torch.tensor(item) for item in d])
+                            items_to_stack = [
+                                item.clone().detach() if isinstance(item, torch.Tensor) else torch.tensor(item)
+                                for item in d
+                            ]
+                            t = torch.stack(items_to_stack)
                     else:
                         # Final fallback
                         t = torch.tensor(d)
