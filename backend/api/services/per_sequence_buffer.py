@@ -194,13 +194,23 @@ class PERSequenceBuffer:
                     if isinstance(d, torch.Tensor):
                         t = d
                     elif isinstance(d, np.ndarray):
+                        # This is the expected path
                         t = torch.from_numpy(d)
+                    elif isinstance(d, (list, tuple)):
+                        # Defensive fallback for nested structures or irregular data.
+                        # This might happen with old data or edge cases.
+                        try:
+                            # Try to convert to a tensor, assuming it's a list of numbers/lists
+                            t = torch.tensor(d)
+                        except (ValueError, TypeError):
+                            # If it fails, stack the elements if they are tensors
+                            t = torch.stack([torch.tensor(item) for item in d])
                     else:
-                        # Fallback for other potential types, though not expected
+                        # Final fallback
                         t = torch.tensor(d)
 
                     if t.dim() == 0:
-                        t = t.reshape(1)  # Reshape scalar tensors
+                        t = t.reshape(1)
                     processed_data.append(t)
                 batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
             elif key == 'activation_path':
