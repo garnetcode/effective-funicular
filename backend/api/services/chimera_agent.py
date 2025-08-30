@@ -947,6 +947,7 @@ class ChimeraAgent:
         h_start = h_start_all_levels[:, 0, :]
         z_start = z_start_all_levels[:, 0, :]
 
+        batch_size = h_start.size(0)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
 
         # --- Generate "teacher" plan from the latent planner ---
