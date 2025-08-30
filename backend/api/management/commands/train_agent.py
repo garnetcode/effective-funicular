@@ -6,6 +6,7 @@ from tqdm import tqdm
 import time
 import threading
 import copy
+import sys
 
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
@@ -16,7 +17,31 @@ import gymnasium as gym
 import redis
 import json
 
-# --- Setup logging ---
+def setup_logging(process_name, environment_name):
+    """Sets up a specific logger for a process."""
+    logger = logging.getLogger(f"chimera.{process_name}")
+    logger.setLevel(logging.INFO)
+
+    # Prevent duplicate handlers
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    # File handler
+    log_filename = f"{environment_name.replace('/', '_')}_{process_name}.log"
+    file_handler = logging.FileHandler(log_filename)
+
+    # Console handler
+    stream_handler = logging.StreamHandler(sys.stdout)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    stream_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    return logger
+
+# Global logger for general command info, will be replaced by specific loggers
 logger = logging.getLogger(__name__)
 
 # --- Redis Caching for UI ---
@@ -58,17 +83,18 @@ class SharedModelWeights:
 
 class LearnerThread(threading.Thread):
     """A dedicated thread for running the agent's training loop."""
-    def __init__(self, agent, cortex_id, env_id, stop_event, shared_weights):
+    def __init__(self, agent, cortex_id, env_id, stop_event, shared_weights, logger):
         super().__init__()
         self.agent = agent
         self.cortex_id = cortex_id
         self.env_id = env_id
         self.stop_event = stop_event
         self.shared_weights = shared_weights
+        self.logger = logger
         self.daemon = True
 
     def run(self):
-        logger.info("Learner thread started.")
+        self.logger.info("Learner thread started.")
         train_steps = 0
         while not self.stop_event.is_set():
             try:
@@ -83,13 +109,14 @@ class LearnerThread(threading.Thread):
                         # Log training stats periodically to the console
                         if train_steps % 20 == 0: # Log every 20 training steps
                             stats_str = ", ".join([f"{key}={value:.4f}" for key, value in train_stats.items() if isinstance(value, (int, float))])
-                            logger.info(f"Learner (train_step {train_steps}): {stats_str}")
+                            self.logger.info(f"Learner (train_step {train_steps}): {stats_str}")
 
                     if train_steps % hyperparams.get('actor_update_frequency', 100) == 0:
-                        logger.info(f"Learner publishing new weights for actor at step {train_steps}.")
+                        self.logger.info(f"Learner publishing new weights for actor at step {train_steps}.")
                         self.shared_weights.set_weights(self.agent.get_actor_state_dict())
 
-                    # Periodically update the STAG graph in the UI
+                    # The learner is the single source of truth for the STAG.
+                    # Periodically update the STAG graph in the UI from here.
                     if train_steps % hyperparams.get('stag_ui_update_frequency', 50) == 0:
                         stag_graph = self.agent.get_graph_structure(self.env_id)
                         if stag_graph:
@@ -97,9 +124,9 @@ class LearnerThread(threading.Thread):
                 else:
                     time.sleep(1)
             except Exception as e:
-                logger.error(f"Error in learner thread: {e}", exc_info=True)
+                self.logger.error(f"Error in learner thread: {e}", exc_info=True)
                 time.sleep(5)
-        logger.info("Learner thread stopped.")
+        self.logger.info("Learner thread stopped.")
 
 class Command(BaseCommand):
     help = 'Train a ChimeraAgent using a Colosseum server environment.'
@@ -111,27 +138,31 @@ class Command(BaseCommand):
         parser.add_argument("--port", type=int, default=8002, help="The port of the Colosseum server.")
 
     def handle(self, *args, **options):
-        try:
-            asyncio.run(self.async_handle(*args, **options))
-        except KeyboardInterrupt:
-            logger.info("\nTraining interrupted by user.")
-        except Exception as e:
-            logger.error(f"An unexpected error occurred in main handler: {e}", exc_info=True)
+        env_id = options['env_id']
+        actor_logger = setup_logging('actor', env_id)
+        learner_logger = setup_logging('learner', env_id)
 
-    async def _setup_components(self, options):
+        try:
+            asyncio.run(self.async_handle(actor_logger, learner_logger, *args, **options))
+        except KeyboardInterrupt:
+            actor_logger.info("\nTraining interrupted by user.")
+        except Exception as e:
+            actor_logger.error(f"An unexpected error occurred in main handler: {e}", exc_info=True)
+
+    async def _setup_components(self, actor_logger, learner_logger, options):
         env_id = options['env_id']
         # AGENT_FIX: Use the env_id to create a persistent agent name, allowing history to be loaded.
         agent_tag = options['agent_tag'] or f"chimera-agent-{env_id}"
         config_path = options['config']
         port = options['port']
 
-        logger.info(f"Setting up components for agent '{agent_tag}' in '{env_id}'...")
+        actor_logger.info(f"Setting up components for agent '{agent_tag}' in '{env_id}'...")
 
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
         except FileNotFoundError:
-            logger.error(f"Config file not found at: {config_path}")
+            actor_logger.error(f"Config file not found at: {config_path}")
             return None
 
         hyperparams = config.get('agent_config', {}).get('hyperparams', {})
@@ -173,11 +204,15 @@ class Command(BaseCommand):
             **common_params
         )
 
+        actor_hyperparams = hyperparams.copy()
+        actor_hyperparams['use_planner'] = True
+
         actor_agent = ChimeraAgent(
             agent_id=f"{agent_tag}-actor",
             load_from_storage=False,
             history_config={},
-            **common_params
+            **common_params,
+            hyperparams=actor_hyperparams
         )
         actor_agent.load_state_dict(learner_agent.state_dict())
 
@@ -191,10 +226,10 @@ class Command(BaseCommand):
             await connector.close()
             return None
 
-        logger.info("Setup complete. Actor and Learner are ready.")
+        actor_logger.info("Setup complete. Actor and Learner are ready.")
         return learner_agent, actor_agent, connector, session_info, cortex_id, shared_weights
 
-    async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id):
+    async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id, logger):
         logger.info("Actor task started.")
         current_obs = np.array(session_info.get("observation"))
         best_episode_reward = -float('inf')
@@ -212,7 +247,8 @@ class Command(BaseCommand):
 
             while not done:
                 h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
-                action, log_prob, _, _, _, _, action_probs = actor_agent.select_action(actor_agent.max_action_dim, activation_path)
+                action, log_prob, _, decision_maker, epsilon, _, action_probs = actor_agent.select_action(actor_agent.max_action_dim, activation_path)
+                logger.info(f"Step {actor_agent.steps_done}: Action: {action}, Mode: {decision_maker}, Epsilon: {epsilon:.4f}")
 
                 update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
                 await connector.send_action(int(action))
@@ -224,17 +260,20 @@ class Command(BaseCommand):
 
                 if msg.get("type") == "action.taken":
                     next_obs = np.array(msg.get("observation"))
-                    reward = msg.get("reward", 0)
+                    env_reward = msg.get("reward", 0)
                     done = msg.get("done", False)
-                    episode_reward += reward
-                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+
+                    # The actor's job is just to collect experience. The learner will process it.
+                    episode_reward += env_reward
+                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, env_reward, next_obs, done)
                     current_obs = next_obs
                 elif msg.get("type") == "game.over":
                     logger.info("Game over message received. Ending episode.")
-                    reward = msg.get("reward", 0)
-                    episode_reward += reward
+                    env_reward = msg.get("reward", 0)
+                    episode_reward += env_reward
                     done = True
-                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, current_obs, done)
+                    # Use the last observation as next_obs since there is no next one.
+                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, env_reward, current_obs, done)
                 else:
                     logger.warning(f"Actor received unexpected message type: {msg.get('type')}")
 
@@ -255,13 +294,10 @@ class Command(BaseCommand):
                 break
         logger.info("Actor task finished.")
 
-    async def async_handle(self, *args, **options):
-        log_level = logging.INFO if options.get('verbosity', 0) > 0 else logging.WARNING
-        logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-        setup_result = await self._setup_components(options)
+    async def async_handle(self, actor_logger, learner_logger, *args, **options):
+        setup_result = await self._setup_components(actor_logger, learner_logger, options)
         if not setup_result:
-            logger.error("Setup failed. Aborting training.")
+            actor_logger.error("Setup failed. Aborting training.")
             return
 
         learner_agent, actor_agent, connector, session_info, cortex_id, shared_weights = setup_result
@@ -272,15 +308,16 @@ class Command(BaseCommand):
             cortex_id=cortex_id,
             env_id=connector.environment_id,
             stop_event=stop_event,
-            shared_weights=shared_weights
+            shared_weights=shared_weights,
+            logger=learner_logger
         )
 
         try:
             learner_thread.start()
-            await self._actor_task(actor_agent, shared_weights, connector, session_info, cortex_id)
+            await self._actor_task(actor_agent, shared_weights, connector, session_info, cortex_id, actor_logger)
         finally:
-            logger.info("Main task finished. Stopping learner and cleaning up.")
+            actor_logger.info("Main task finished. Stopping learner and cleaning up.")
             stop_event.set()
             learner_thread.join()
             await connector.close()
-            logger.info("Training complete. Best model was saved during the run based on episode performance.")
+            actor_logger.info("Training complete. Best model was saved during the run based on episode performance.")
