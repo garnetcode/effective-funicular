@@ -5,9 +5,12 @@
 # See Section 2.4 and 3.2 of the Project Chimera specification.
 
 import numpy as np
+import logging
 from .gng_engine import GNG_Engine
 from .snn_predictor import SNNPredictor
 import torch
+
+logger = logging.getLogger(__name__)
 
 class STAG_Framework:
     def __init__(self, dimensions, **kwargs):
@@ -98,12 +101,13 @@ class STAG_Framework:
         Returns:
             GNG_Engine: The new, untrained GNG instance for the child level.
         """
-        print(f"Expanding node {parent_gng_node_id} in parent GNG.")
+        parent_level_id = parent_level_node['level_id']
+        logger.info(f"STAG: Expanding node {parent_gng_node_id} in parent GNG at level {parent_level_id}.")
 
         # Check if a child for this node already exists
         if any(child['parent_node_id'] == parent_gng_node_id for child in parent_level_node['children']):
             # This should not happen if the agent logic is correct
-            print(f"Warning: Expansion attempted on node {parent_gng_node_id} which already has a child.")
+            logger.warning(f"Warning: Expansion attempted on node {parent_gng_node_id} which already has a child.")
             return None
 
         new_level_node = self._create_tree_node(parent_gng_node_id=parent_gng_node_id)

@@ -9,12 +9,14 @@ from collections import namedtuple
 from api.services.experience import Experience
 
 from django.core.management.base import BaseCommand
-from api.services.chimera_agent import ChimeraAgent, NumpyJSONEncoder
+from api.services.chimera_agent import ChimeraAgent
 from api.services.redis_buffer import RedisBuffer
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
+from api.services.redis_ui_utils import update_ui_state_in_redis
 import gymnasium as gym
 import redis
 import json
+import pickle
 
 def setup_logging(process_name, environment_name):
     logger = logging.getLogger(f"chimera.{process_name}")
@@ -31,20 +33,6 @@ def setup_logging(process_name, environment_name):
     logger.addHandler(stream_handler)
     return logger
 
-try:
-    redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
-except redis.exceptions.ConnectionError as e:
-    logging.error(f"Could not connect to Redis for UI: {e}.")
-    redis_client = None
-
-def update_ui_state_in_redis(key, data):
-    if redis_client is None: return
-    try:
-        payload = json.dumps(data, cls=NumpyJSONEncoder)
-        redis_client.set(key, payload)
-    except Exception as e:
-        logging.warning(f"Failed to update UI state in Redis for key {key}: {e}")
-
 class Command(BaseCommand):
     help = 'Runs the Learner process for a ChimeraAgent.'
 
@@ -60,6 +48,13 @@ class Command(BaseCommand):
 
         logger = setup_logging('learner', env_id)
         logger.info(f"Starting learner for agent '{agent_tag}' on env '{env_id}'")
+
+        try:
+            redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+            redis_client.ping()
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Could not connect to Redis: {e}.")
+            return
 
         try:
             with open(config_path, 'r') as f:
@@ -133,8 +128,18 @@ class Command(BaseCommand):
                             logger.info(f"Train step {train_steps}: {stats_str}")
 
                     if train_steps % hyperparams.get('actor_update_frequency', 100) == 0:
-                        logger.info(f"Saving latest weights to {weights_save_path}")
-                        torch.save(learner_agent.state_dict(), weights_save_path)
+                        logger.info(f"Saving latest weights to {weights_save_path} and publishing to Redis.")
+                        state_dict = learner_agent.state_dict()
+                        # Save to file (for persistence)
+                        torch.save(state_dict, weights_save_path)
+                        # Publish to Redis (for live actor updates)
+                        try:
+                            serialized_state = pickle.dumps(state_dict)
+                            redis_client.set('chimera_agent_state:latest', serialized_state)
+                            redis_client.incr('chimera_agent_state:version')
+                        except Exception as e:
+                            logger.error(f"Failed to publish agent state to Redis: {e}")
+
 
                     if train_steps % hyperparams.get('stag_ui_update_frequency', 50) == 0:
                         stag_graph = learner_agent.get_graph_structure(env_id)

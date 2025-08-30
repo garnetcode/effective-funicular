@@ -13,8 +13,11 @@ from api.services.chimera_agent import ChimeraAgent
 from api.services.redis_buffer import RedisBuffer
 from api.services.experience import Experience
 from colosseum_connector import ColosseumConnector
+from api.services.redis_ui_utils import update_ui_state_in_redis
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 import gymnasium as gym
+import redis
+import pickle
 
 def setup_logging(process_name, environment_name):
     logger = logging.getLogger(f"chimera.{process_name}")
@@ -99,8 +102,15 @@ class Command(BaseCommand):
         )
         actor_agent.set_active_skill(env_id)
 
-        weights_path = "latest_agent.pt"
-        logger.info(f"Actor setup complete. Looking for weights at {weights_path}")
+        try:
+            redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+            redis_client.ping()
+            logger.info("Actor connected to Redis for state updates.")
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Actor could not connect to Redis: {e}. Will not receive model updates.")
+            redis_client = None
+
+        last_known_version = -1
 
         if not await connector.connect_websocket() or not await connector.join_session():
             logger.error("Could not connect to session. Exiting.")
@@ -115,22 +125,38 @@ class Command(BaseCommand):
                 episode_count += 1
                 logger.info(f"--- Starting Episode {episode_count} ---")
 
-                if episode_count % 100 == 0:
+                # Check for new weights from the learner
+                if redis_client:
                     try:
-                        if os.path.exists(weights_path):
-                            logger.info(f"Reloading weights from {weights_path}")
-                            state_dict = torch.load(weights_path)
-                            actor_agent.load_state_dict(state_dict)
+                        current_version = int(redis_client.get('chimera_agent_state:version') or -1)
+                        if current_version > last_known_version:
+                            logger.info(f"New agent version {current_version} found. Loading from Redis.")
+                            serialized_state = redis_client.get('chimera_agent_state:latest')
+                            if serialized_state:
+                                state_dict = pickle.loads(serialized_state)
+                                actor_agent.load_state_dict(state_dict)
+                                last_known_version = current_version
                     except Exception as e:
-                        logger.error(f"Error reloading weights: {e}")
+                        logger.error(f"Error loading agent state from Redis: {e}")
+
 
                 done = False
                 episode_reward = 0
 
                 while not done:
                     h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
-                    action, log_prob, _, decision_maker, epsilon, _, _ = actor_agent.select_action(action_space_info['n'], activation_path, evaluation_mode=False)
+                    action, log_prob, _, decision_maker, epsilon, _, action_probs = actor_agent.select_action(action_space_info['n'], activation_path, evaluation_mode=False)
                     logger.info(f"Step {actor_agent.steps_done}: Action: {action}, Mode: {decision_maker}, Epsilon: {epsilon:.4f}")
+
+                    # Update UI with actor state
+                    actor_state_for_ui = {
+                        'h_t': h_t[0].detach().cpu().numpy().flatten(), # Top-level hidden state
+                        'z_t': z_t[0].detach().cpu().numpy().flatten(), # Top-level latent state
+                        'epsilon': epsilon,
+                        'action_probs': action_probs
+                    }
+                    update_ui_state_in_redis('chimera_actor_state', actor_state_for_ui)
+
 
                     await connector.send_action(int(action))
                     msg = await connector.receive_message()

@@ -23,7 +23,8 @@ class BrainConsumer(AsyncWebsocketConsumer):
             "chimera_graph_state": "graph_update",
             "chimera_training_metrics": "training_metrics",
             "chimera_episode_metrics": "training_metrics", # Both use the same handler
-            "chimera_action_update": "action_update"
+            "chimera_action_update": "action_update",
+            "chimera_actor_state": "actor_state_update"
         }
         self.redis_keys_to_poll = list(self.key_to_message_type.keys())
 
