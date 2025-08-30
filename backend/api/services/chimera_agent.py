@@ -29,7 +29,6 @@ from .action.modules import ActionHead
 from .action.latent_planner import LatentPlanner
 from .action.graph_planner import GraphPlanner
 from .world_model.rep_learning import ContrastiveLoss
-from .predictive_coding import HierarchicalRSSM, PredictiveCodingModule
 
 class StagContextProcessor(nn.Module):
     """
@@ -74,10 +73,6 @@ def _initialize_cortexes(configs, output_dim, device):
         except (AttributeError, ImportError) as e:
             print(f"Warning: Could not initialize cortex '{cortex_id}' of type '{class_name}': {e}")
     return cortexes
-
-def softmax(x):
-    e_x = np.exp(x - np.max(x))
-    return e_x / e_x.sum(axis=0)
 
 def sanitize_state_dict(state):
     """
@@ -185,7 +180,7 @@ class ChimeraAgent:
             ) for wm in self.world_models
         ]
 
-        # Initialize hidden and latent states as lists for the hierarchy
+        # Initialize hidden and latent states
         self.hidden_state, self.latent_state = self.world_models[0].get_initial_state(batch_size=1, device=self.device)
 
         # Normalization Hub
@@ -397,14 +392,13 @@ class ChimeraAgent:
 
         # 3. Use the first world model in the ensemble to update the agent's internal state
         with torch.no_grad():
-            # The HierarchicalRSSM returns lists of states for each level
-            all_h_next, all_z_next, _, _, _ = self.world_models[0].rssm(
+            h_next, z_next, kl_loss = self.world_models[0].rssm(
                 obs_tensor, self.last_action, self.hidden_state, self.latent_state
             )
 
         # 4. Update the agent's internal state
-        self.hidden_state = all_h_next
-        self.latent_state = all_z_next
+        self.hidden_state = h_next
+        self.latent_state = z_next
 
         # 5. Conditionally engage the STAG framework
         h_normalized = None
@@ -412,8 +406,8 @@ class ChimeraAgent:
         novelty = 0
         # Only engage STAG if we are past the pre-training phase.
         if self.steps_done > self.world_model_pretrain_steps:
-            # Use the top-level hidden state (most abstract) for the STAG
-            h_normalized = self.h_norm(self.hidden_state[0]).detach().cpu().numpy().flatten()
+            # Use the hidden state for the STAG
+            h_normalized = self.h_norm(self.hidden_state).detach().cpu().numpy().flatten()
             # The vector is now normalized by LayerNorm and will be normalized again
             # by _safe_unit in the GNG engine for double safety.
 
@@ -446,8 +440,7 @@ class ChimeraAgent:
                     )
                     # Update successor features
                     with torch.no_grad():
-                        # Use the top-level hidden state for SF calculation
-                        state_features = torch.matmul(self.hidden_state[0], self.sf_projection_matrix).squeeze(0).cpu().numpy()
+                        state_features = torch.matmul(self.hidden_state, self.sf_projection_matrix).squeeze(0).cpu().numpy()
                     self.skill_manager.update_successor_features(
                         self.active_skill_id,
                         self.last_stag_node_id,
@@ -553,8 +546,7 @@ class ChimeraAgent:
                 subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
                 with torch.no_grad():
                     logger.info(f"M-Planner: Planning trajectory to subgoal {self.current_subgoal}")
-                    # Pass the top-level states to the planner
-                    plan = self.planner.plan(self.hidden_state[0], self.latent_state[0], subgoal_weight=subgoal_weight)
+                    plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight=subgoal_weight)
 
                 if plan is not None and len(plan) > 0:
                     self.action_plan = plan
@@ -599,8 +591,8 @@ class ChimeraAgent:
                     snn_prediction = stag.generate_prediction(history_tensor)
 
 
-                # Use the top-level hidden state for the policy
-                h_normalized = self.h_norm(self.hidden_state[0])
+                # Use the hidden state for the policy
+                h_normalized = self.h_norm(self.hidden_state)
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector, snn_prediction), dim=1)
 
@@ -724,10 +716,8 @@ class ChimeraAgent:
 
     def record_experience(self, h_t, z_t, activation_path, obs, action, log_prob, reward, next_obs, done):
         """Pushes an experience to the replay buffer and updates subgoal counters."""
-        # Convert state lists to numpy arrays for storage.
-        # h_t and z_t are lists of tensors of shape (1, dim).
-        h_t_np = torch.stack(h_t).detach().cpu().numpy()
-        z_t_np = torch.stack(z_t).detach().cpu().numpy()
+        h_t_np = h_t.detach().cpu().numpy()
+        z_t_np = z_t.detach().cpu().numpy()
 
         experience = (h_t_np, z_t_np, activation_path, obs, action, log_prob.item(), reward, next_obs, done, self.current_goal)
         self.replay_buffer.push(*experience)
@@ -786,9 +776,8 @@ class ChimeraAgent:
         if not hasattr(stag, 'snn_predictor'):
             return {}
 
-        # The replay buffer stores h_t as (batch, seq_len, num_levels, 1, dim).
-        # We want the top-level hidden state, so we select it.
-        h_sequence = torch.from_numpy(batch['h'][:, :, 0, :, :]).float().to(self.device).squeeze(2)
+        # The replay buffer stores h_t as (batch, seq_len, 1, dim).
+        h_sequence = torch.from_numpy(batch['h']).float().to(self.device).squeeze(2)
 
         # The input sequence is all but the last state.
         input_sequence = h_sequence[:, :-1, :]
@@ -846,76 +835,43 @@ class ChimeraAgent:
         self.replay_buffer.update_priorities(indices, priorities)
 
     def _calculate_world_model_loss(self, world_model, batch, cortex_id, weights):
-        """Helper function to calculate the world model loss for a given batch using predictive coding."""
-        # --- Prepare tensors ---
+        """Helper function to calculate the world model loss for a given batch."""
         obs_sequence = torch.from_numpy(batch['obs']).float().to(self.device)
         action_sequence = torch.from_numpy(batch['action']).float().to(self.device)
         reward_sequence = torch.from_numpy(batch['reward']).float().to(self.device)
 
-        # Process observations
-        batch_size = obs_sequence.size(0)
-        if obs_sequence.dim() == 5:
-            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, *obs_sequence.shape[2:]))
-        else:
-            obs_sequence_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1]))
-        obs_sequence_processed = obs_sequence_processed.view(batch_size, self.replay_buffer.sequence_length, -1)
+        batch_size, seq_len, _ = obs_sequence.shape
+        obs_processed = self.cortexes[cortex_id](obs_sequence.view(-1, obs_sequence.shape[-1])).view(batch_size, seq_len, -1)
 
-        # --- Initialize States for Hierarchy ---
-        # Note: The 'world_model' parameter here is one from the ensemble.
-        # We are assuming its RSSM is a HierarchicalRSSM.
-        num_levels = len(world_model.rssm.levels)
-        all_h_t = [torch.zeros(batch_size, self.hidden_dim, device=self.device) for _ in range(num_levels)]
-        all_z_t = [torch.zeros(batch_size, self.latent_dim, device=self.device) for _ in range(num_levels)]
+        h_t, z_t = world_model.get_initial_state(batch_size, self.device)
+        total_kl_loss = 0
+        total_recon_loss = 0
+        all_h = []
 
-        total_loss = 0
-        hidden_states_level0_list = []
-
-        # --- Sequence-based Forward Pass and Loss Calculation ---
-        for t in range(self.replay_buffer.sequence_length):
-            obs_t = obs_sequence_processed[:, t]
+        for t in range(seq_len):
+            obs_t = obs_processed[:, t]
             action_t = action_sequence[:, t]
 
-            all_h_t, all_z_t, reconstructions, errors, kl_loss = world_model.rssm(
-                obs_t, action_t, all_h_t, all_z_t
-            )
+            h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
 
-            free_nats = self.hyperparams.get('free_bits', 1.0)
-            loss = self._predictive_coding_loss(reconstructions, errors, kl_loss, obs_t, free_nats)
-            total_loss += loss
+            recon_obs = world_model.obs_decoder(h_t)
+            recon_loss = F.mse_loss(recon_obs, obs_t)
 
-            hidden_states_level0_list.append(all_h_t[0])
+            total_kl_loss += kl_loss
+            total_recon_loss += recon_loss
+            all_h.append(h_t)
 
-        # Average loss over the sequence
-        total_loss /= self.replay_buffer.sequence_length
+        total_kl_loss /= seq_len
+        total_recon_loss /= seq_len
 
-        h_states = torch.stack(hidden_states_level0_list, dim=1)
+        free_nats = self.hyperparams.get('free_bits', 1.0)
+        kl_loss = torch.max(torch.tensor(free_nats, device=self.device), total_kl_loss)
 
-        # --- Contrastive Loss Calculation (using top-level hidden states) ---
-        anchor = h_states[:, :-1].reshape(-1, self.hidden_dim)
-        positive = h_states[:, 1:].reshape(-1, self.hidden_dim)
-        if self.contrastive_queue_size > 0:
-            negatives = self.contrastive_queue.clone().detach().unsqueeze(0).expand(anchor.size(0), -1, -1)
-        else:
-            negatives = positive.unsqueeze(0).expand(positive.size(0), -1, -1)
-        contrastive_loss = ContrastiveLoss()(anchor, positive, negatives)
+        final_loss = kl_loss + total_recon_loss
 
-        # --- Final Weighted Loss ---
-        final_loss = total_loss + self.contrastive_loss_weight * contrastive_loss
+        h_states = torch.stack(all_h, dim=1)
 
-        return final_loss, contrastive_loss, h_states, batch['reward']
-
-    def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
-        """Calculates the loss for a single step of the predictive coding hierarchy."""
-        # The reconstruction of the original observation happens at the first level (level 0).
-        reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
-
-        # Prediction error loss is the sum of squared errors from all levels
-        prediction_error_loss = sum(torch.mean(error ** 2) for error in errors)
-
-        # KL loss to regularize the latent spaces
-        kl_loss = torch.max(torch.tensor(0.0, device=self.device), kl_loss - free_nats)
-
-        return reconstruction_loss + prediction_error_loss + kl_loss
+        return final_loss, total_kl_loss, h_states, batch['reward']
 
 
     def train_policy_in_imagination(self, batch):
@@ -934,14 +890,8 @@ class ChimeraAgent:
         progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
         lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
 
-        # The replay buffer stores stacked numpy arrays of shape (num_levels, 1, dim).
-        # We select the first state in the sequence [:, 0], convert to tensor, and squeeze the singleton dimension.
-        h_start_all_levels = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(2)
-        z_start_all_levels = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(2)
-
-        # Use the top-level state (index 0) for imagination, shape (batch_size, dim)
-        h_start = h_start_all_levels[:, 0, :]
-        z_start = z_start_all_levels[:, 0, :]
+        h_start = torch.from_numpy(batch['h'][:, 0]).float().to(self.device).squeeze(1)
+        z_start = torch.from_numpy(batch['z'][:, 0]).float().to(self.device).squeeze(1)
 
         batch_size = h_start.size(0)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
@@ -968,9 +918,7 @@ class ChimeraAgent:
         policy_log_probs = []
         policy_entropies = []
 
-        # The transition model from the top level of the hierarchy
-        transition_model = self.world_models[0].rssm.levels[0].transition_model
-        fc_prediction = self.world_models[0].rssm.levels[0].fc_prediction
+        transition_model = self.world_models[0].rssm.transition_model
 
         logger.info(f"Imagination: Starting trajectory of length {horizon}")
         for t in range(horizon):
@@ -988,10 +936,8 @@ class ChimeraAgent:
             logger.debug(f"Imagination Step {t+1}/{horizon}: action={action.float().mean().item():.2f}")
 
             with torch.no_grad():
-                a_one_hot = torch.nn.functional.one_hot(action.long(), num_classes=transition_model.input_size - z_t.shape[-1]).float()
-                rnn_input = torch.cat([z_t, a_one_hot], dim=-1)
-                h_t = transition_model(rnn_input, h_t)
-                z_t = fc_prediction(h_t)
+                h_t, _, prior_std = transition_model(z_t, action, h_t)
+                z_t = Normal(h_t, prior_std).rsample()
 
             imagined_h.append(h_t)
             imagined_z.append(z_t)
