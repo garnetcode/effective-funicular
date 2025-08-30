@@ -967,7 +967,7 @@ class ChimeraAgent:
             policy_log_probs.append(action_dist.log_prob(action))
             policy_entropies.append(action_dist.entropy())
 
-            logger.debug(f"Imagination Step {t+1}/{horizon}: action={action.mean().item():.2f}")
+            logger.debug(f"Imagination Step {t+1}/{horizon}: action={action.float().mean().item():.2f}")
 
             with torch.no_grad():
                 a_one_hot = torch.nn.functional.one_hot(action.long(), num_classes=transition_model.input_size - z_t.shape[-1]).float()
