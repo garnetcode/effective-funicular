@@ -854,7 +854,7 @@ class ChimeraAgent:
 
             h_t, z_t, kl_loss = world_model.rssm(obs_t, action_t, h_t, z_t)
 
-            recon_obs = world_model.obs_decoder(h_t)
+            recon_obs = world_model.obs_decoder(h_t, z_t)
             recon_loss = F.mse_loss(recon_obs, obs_t)
 
             total_kl_loss += kl_loss
