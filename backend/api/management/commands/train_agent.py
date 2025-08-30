@@ -6,6 +6,7 @@ import sys
 import os
 import torch
 from collections import namedtuple
+from api.services.experience import Experience
 
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent, NumpyJSONEncoder
@@ -107,12 +108,23 @@ class Command(BaseCommand):
                         time.sleep(1)
                         continue
 
-                    # The experience is a tuple. Let's define a namedtuple for clarity.
-                    Experience = namedtuple('Experience', ['h_t', 'z_t', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal'])
-
                     # Convert list of serialized tuples to a batch dictionary
                     experiences = [Experience(*exp) for exp in batch_list]
-                    batch = {field: np.array([getattr(e, field) for e in experiences]) for field in Experience._fields}
+
+                    batch = {}
+                    for field in Experience._fields:
+                        if field != 'activation_path':
+                            try:
+                                batch[field] = np.array([getattr(e, field) for e in experiences])
+                            except (ValueError, TypeError) as err:
+                                logger.warning(f"Could not create numpy array for field '{field}': {err}")
+                                # If conversion fails, we skip this field for this batch.
+                                # A more robust solution might involve padding or other preprocessing.
+                                batch[field] = None # Or some other placeholder
+
+                    # Filter out fields that failed conversion
+                    batch = {k: v for k, v in batch.items() if v is not None}
+
 
                     train_stats = learner_agent.train_on_batch(batch, cortex_id=cortex_id)
                     train_steps += 1
