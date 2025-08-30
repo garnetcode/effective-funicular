@@ -144,7 +144,7 @@ class Command(BaseCommand):
                 episode_reward = 0
 
                 while not done:
-                    h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
+                    h_t, z_t, h_normalized, activation_path, novelty, winner_id = actor_agent.perceive_and_update_state(cortex_id, current_obs)
                     action, log_prob, stag_ctx, decision_maker, epsilon, _, action_probs, h_norm, snn_pred = actor_agent.select_action(
                         action_space_info['n'], activation_path, evaluation_mode=False
                     )
@@ -178,7 +178,7 @@ class Command(BaseCommand):
                         reward = msg.get("reward", 0)
                         done = msg.get("done", False)
 
-                        experience = Experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done, actor_agent.current_goal)
+                        experience = Experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done, actor_agent.current_goal, winner_id)
                         redis_buffer.push(experience)
 
                         if h_normalized is not None:
@@ -190,7 +190,7 @@ class Command(BaseCommand):
                         next_obs = np.array(msg.get("observation", current_obs))
                         reward = msg.get("reward", 0)
 
-                        experience = Experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, True, actor_agent.current_goal)
+                        experience = Experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, True, actor_agent.current_goal, winner_id)
                         redis_buffer.push(experience)
 
                         episode_reward += reward

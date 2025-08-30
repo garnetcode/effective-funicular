@@ -466,7 +466,7 @@ class ChimeraAgent:
         if winner_id is not None:
             self.state_history_for_snn.append(winner_id)
 
-        return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty
+        return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty, winner_id
 
     def update_stag(self, h_normalized, r_env):
         """
@@ -583,11 +583,28 @@ class ChimeraAgent:
         else:
             # Fallback to learned policy
             with torch.no_grad():
-                # --- Get SNN Prediction (Temporarily Disabled) ---
-                snn_prediction = torch.zeros(1, self.hidden_dim, device=self.device)
+                # --- Get SNN Prediction ---
+                snn_prediction_vector = torch.zeros(1, self.hidden_dim, device=self.device)
+                if self.active_skill_id and len(self.state_history_for_snn) == self.snn_history_length:
+                    stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+                    terminal_gng = stag.level_map[max(stag.level_map.keys())]
+
+                    history_node_ids = list(self.state_history_for_snn)
+                    history_embeddings = np.array(
+                        [terminal_gng.nodes[nid]['weight'] for nid in history_node_ids if nid in terminal_gng.nodes]
+                    )
+
+                    if len(history_embeddings) == self.snn_history_length:
+                        history_tensor = torch.from_numpy(history_embeddings).float().to(self.device).unsqueeze(0)
+                        predicted_node_logits = stag.snn_predictor(history_tensor)
+                        predicted_node_id = torch.argmax(predicted_node_logits, dim=-1).item()
+
+                        if predicted_node_id in terminal_gng.nodes:
+                            snn_prediction_vector = torch.from_numpy(terminal_gng.nodes[predicted_node_id]['weight']).float().to(self.device).unsqueeze(0)
 
                 # Use the hidden state for the policy
                 h_normalized = self.h_norm(self.hidden_state)
+                snn_prediction = snn_prediction_vector
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector, snn_prediction), dim=1)
 
@@ -770,22 +787,21 @@ class ChimeraAgent:
         stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
         terminal_gng = stag.level_map[max(stag.level_map.keys())]
 
-        # This is a placeholder for getting node activation sequences from the replay buffer.
-        # This part requires a more complex replay buffer that stores STAG activation paths.
-        # For now, we'll generate dummy data to test the training loop.
-        batch_size = batch['obs'].shape[0]
-        seq_len = self.snn_history_length
+        # The replay buffer now returns sequences of winner_ids
+        # Shape: (batch_size, sequence_length)
+        winner_id_sequence = batch['winner_id']
 
-        # Create dummy sequences of node IDs
-        node_ids = list(terminal_gng.nodes.keys())
-        if len(node_ids) < 2:
-            return {"snn_predictor_loss": 0} # Not enough nodes to form a sequence
-
-        input_node_ids = np.random.choice(node_ids, (batch_size, seq_len))
-        target_node_ids = np.random.choice(node_ids, (batch_size,))
+        # The input is all but the last winner_id in each sequence
+        input_node_ids = winner_id_sequence[:, :-1]
+        # The target is the last winner_id in each sequence
+        target_node_ids = winner_id_sequence[:, -1]
 
         # Convert node IDs to embeddings
-        input_embeddings = np.array([[terminal_gng.nodes[nid]['weight'] for nid in seq] for seq in input_node_ids])
+        # This can be slow if we iterate in python. A batch embedding lookup would be better.
+        # For now, this is a functional implementation.
+        input_embeddings = np.array(
+            [[terminal_gng.nodes[nid]['weight'] for nid in seq] for seq in input_node_ids]
+        )
 
         input_tensor = torch.from_numpy(input_embeddings).float().to(self.device)
         target_tensor = torch.from_numpy(target_node_ids).long().to(self.device)

@@ -59,8 +59,8 @@ agent_config:
     gng_max_nodes: 1000
     # Adaptive GNG Learning Rate
     gng_learning_rate_decay: 0.9999
-    gng_winner_learning_rate_initial: 0.8
-    gng_neighbor_learning_rate_initial: 0.1
+    gng_winner_learning_rate_initial: 0.1
+    gng_neighbor_learning_rate_initial: 0.01
     # World Model Regularization
     world_model_weight_decay: 1.0e-6 # L2 penalty for the world model optimizer
     free_bits: 1.0 # KL balancing parameter
