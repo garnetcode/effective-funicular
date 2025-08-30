@@ -583,26 +583,11 @@ class ChimeraAgent:
         else:
             # Fallback to learned policy
             with torch.no_grad():
-                # --- Get SNN Prediction ---
-                snn_prediction_vector = torch.zeros(1, self.hidden_dim, device=self.device)
-                if self.active_skill_id and len(self.state_history_for_snn) > 0:
-                    stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-
-                    # This needs to be a sequence of node embeddings, not hidden states
-                    # For now, we'll use a placeholder. The training loop will provide the real data.
-                    # This part needs to be updated when we refactor the history management.
-                    history_embeddings = torch.randn(1, self.snn_history_length, self.hidden_dim, device=self.device)
-
-                    predicted_node_logits = stag.snn_predictor(history_embeddings)
-                    predicted_node_id = torch.argmax(predicted_node_logits, dim=-1).item()
-
-                    terminal_gng = stag.level_map[max(stag.level_map.keys())]
-                    if predicted_node_id in terminal_gng.nodes:
-                        snn_prediction_vector = torch.from_numpy(terminal_gng.nodes[predicted_node_id]['weight']).float().to(self.device).unsqueeze(0)
+                # --- Get SNN Prediction (Temporarily Disabled) ---
+                snn_prediction = torch.zeros(1, self.hidden_dim, device=self.device)
 
                 # Use the hidden state for the policy
                 h_normalized = self.h_norm(self.hidden_state)
-                snn_prediction = snn_prediction_vector # Keep variable name for clarity
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector, snn_prediction), dim=1)
 
