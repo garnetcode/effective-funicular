@@ -175,6 +175,13 @@ class Command(BaseCommand):
                         episode_reward += reward
                         current_obs = next_obs
                     elif msg.get("type") == "game.over":
+                        next_obs = np.array(msg.get("observation", current_obs))
+                        reward = msg.get("reward", 0)
+
+                        experience = Experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, True, actor_agent.current_goal)
+                        redis_buffer.push(experience)
+
+                        episode_reward += reward
                         done = True
 
                 logger.info(f"Episode {episode_count} finished. Reward: {episode_reward:.2f}")
