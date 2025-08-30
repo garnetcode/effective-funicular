@@ -22,15 +22,11 @@ def setup_logging(process_name, environment_name):
     logger = logging.getLogger(f"chimera.{process_name}")
     logger.setLevel(logging.INFO)
 
-    # Prevent duplicate handlers
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    # File handler
     log_filename = f"{environment_name.replace('/', '_')}_{process_name}.log"
     file_handler = logging.FileHandler(log_filename)
-
-    # Console handler
     stream_handler = logging.StreamHandler(sys.stdout)
 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -41,10 +37,9 @@ def setup_logging(process_name, environment_name):
     logger.addHandler(stream_handler)
     return logger
 
-# Global logger for general command info, will be replaced by specific loggers
-logger = logging.getLogger(__name__)
-
 # --- Redis Caching for UI ---
+# Note: A global logger is used for this initial setup before specific loggers are created.
+logger = logging.getLogger(__name__)
 try:
     redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
     redis_client.ping()
@@ -59,7 +54,8 @@ def update_ui_state_in_redis(key, data):
         payload = json.dumps(data, cls=NumpyJSONEncoder)
         redis_client.set(key, payload)
     except Exception as e:
-        logger.warning(f"Failed to update UI state in Redis for key {key}: {e}")
+        # Use the general logger here as this function is global
+        logging.getLogger(__name__).warning(f"Failed to update UI state in Redis for key {key}: {e}")
 
 class NumpyJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -95,7 +91,6 @@ class LearnerThread(threading.Thread):
 
     def run(self):
         self.logger.info("Learner thread started.")
-        self.logger.info(f"Learner thread using replay buffer with ID: {id(self.agent.replay_buffer)}")
         train_steps = 0
         while not self.stop_event.is_set():
             try:
@@ -116,8 +111,7 @@ class LearnerThread(threading.Thread):
                         self.logger.info(f"Learner publishing new weights for actor at step {train_steps}.")
                         self.shared_weights.set_weights(self.agent.get_actor_state_dict())
 
-                    # The learner is the single source of truth for the STAG.
-                    # Periodically update the STAG graph in the UI from here.
+                    # Periodically update the STAG graph in the UI
                     if train_steps % hyperparams.get('stag_ui_update_frequency', 50) == 0:
                         stag_graph = self.agent.get_graph_structure(self.env_id)
                         if stag_graph:
@@ -174,7 +168,6 @@ class Command(BaseCommand):
             beta_start=hyperparams.get('per_beta_start', 0.4),
             beta_frames=hyperparams.get('per_beta_frames', 100000)
         )
-        actor_logger.info(f"Main thread created replay buffer with ID: {id(replay_buffer)}")
 
         connector = ColosseumConnector(env_id, agent_tag, http_port=port, ws_port=port)
         session_info = await connector.create_session()
@@ -205,7 +198,6 @@ class Command(BaseCommand):
             history_config=config.get('agent_history', {})
         )
 
-        # Create a new hyperparams dict for the actor with planning enabled
         actor_hyperparams = hyperparams.copy()
         actor_hyperparams['use_planner'] = True
 
@@ -236,7 +228,6 @@ class Command(BaseCommand):
 
     async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id, logger):
         logger.info("Actor task started.")
-        logger.info(f"Actor task using replay buffer with ID: {id(actor_agent.replay_buffer)}")
         current_obs = np.array(session_info.get("observation"))
         best_episode_reward = -float('inf')
         episode = 0
@@ -266,20 +257,17 @@ class Command(BaseCommand):
 
                 if msg.get("type") == "action.taken":
                     next_obs = np.array(msg.get("observation"))
-                    env_reward = msg.get("reward", 0)
+                    reward = msg.get("reward", 0)
                     done = msg.get("done", False)
-
-                    # The actor's job is just to collect experience. The learner will process it.
-                    episode_reward += env_reward
-                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, env_reward, next_obs, done)
+                    episode_reward += reward
+                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
                     current_obs = next_obs
                 elif msg.get("type") == "game.over":
                     logger.info("Game over message received. Ending episode.")
-                    env_reward = msg.get("reward", 0)
-                    episode_reward += env_reward
+                    reward = msg.get("reward", 0)
+                    episode_reward += reward
                     done = True
-                    # Use the last observation as next_obs since there is no next one.
-                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, env_reward, current_obs, done)
+                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, current_obs, done)
                 else:
                     logger.warning(f"Actor received unexpected message type: {msg.get('type')}")
 
@@ -301,6 +289,9 @@ class Command(BaseCommand):
         logger.info("Actor task finished.")
 
     async def async_handle(self, actor_logger, learner_logger, *args, **options):
+        # log_level = logging.INFO if options.get('verbosity', 0) > 0 else logging.WARNING
+        # logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
         setup_result = await self._setup_components(actor_logger, learner_logger, options)
         if not setup_result:
             actor_logger.error("Setup failed. Aborting training.")
