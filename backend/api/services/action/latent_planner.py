@@ -42,15 +42,15 @@ class LatentPlanner(nn.Module):
                         h_sim_flat = h_sim.reshape(-1, h_sim.size(-1))
                         z_sim_flat = z_sim.reshape(-1, z_sim.size(-1))
 
-                        # Convert continuous actions to discrete for the transition model
+                        # Convert continuous actions to discrete and one-hot encode for the transition model
                         action_t_discrete = torch.argmax(action_t_samples, dim=-1)
-                        action_t_flat = action_t_discrete.reshape(-1, 1)
+                        action_t_one_hot = torch.nn.functional.one_hot(action_t_discrete, num_classes=self.action_dim).float()
 
                         transition_model = world_model.rssm.levels[0].transition_model
                         fc_prediction = world_model.rssm.levels[0].fc_prediction
 
                         # The GRUCell returns only the next hidden state
-                        h_sim_flat = transition_model(torch.cat([z_sim_flat, action_t_flat], dim=-1), h_sim_flat)
+                        h_sim_flat = transition_model(torch.cat([z_sim_flat, action_t_one_hot], dim=-1), h_sim_flat)
 
                         # We use the fc_prediction layer to get the next latent state
                         z_sim_flat = fc_prediction(h_sim_flat)
