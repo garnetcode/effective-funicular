@@ -910,8 +910,8 @@ class ChimeraAgent:
 
     def _predictive_coding_loss(self, reconstructions, errors, kl_loss, target_observation, free_nats):
         """Calculates the loss for a single step of the predictive coding hierarchy."""
-        # Reconstruction loss is based on the final level's reconstruction of the initial observation
-        reconstruction_loss = F.mse_loss(reconstructions[-1], target_observation)
+        # The reconstruction of the original observation happens at the first level (level 0).
+        reconstruction_loss = F.mse_loss(reconstructions[0], target_observation)
 
         # Prediction error loss is the sum of squared errors from all levels
         prediction_error_loss = sum(torch.mean(error ** 2) for error in errors)
