@@ -198,6 +198,7 @@ class Command(BaseCommand):
     async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id, episodes):
         logger.info("Actor task started.")
         current_obs = np.array(session_info.get("observation"))
+        best_episode_reward = -float('inf')
 
         with tqdm(total=episodes, desc=f"Acting in {connector.environment_id}") as pbar:
             for episode in range(1, episodes + 1):
@@ -242,6 +243,13 @@ class Command(BaseCommand):
                 pbar.update(1)
                 update_ui_state_in_redis('chimera_episode_metrics', {'episode': episode, 'reward': episode_reward, 'total_steps': actor_agent.steps_done})
 
+                # Save the model if it's the best one seen so far.
+                if episode_reward > best_episode_reward:
+                    best_episode_reward = episode_reward
+                    logger.info(f"New best reward: {best_episode_reward:.2f}. Saving model...")
+                    # The actor agent has the weights that produced this reward.
+                    actor_agent.save_state(version_info={"message": f"New best model with reward {best_episode_reward:.2f} at episode {episode}."})
+
                 if episode < episodes:
                     reset_response = await connector.reset_environment()
                     if reset_response:
@@ -279,4 +287,4 @@ class Command(BaseCommand):
             stop_event.set()
             learner_thread.join()
             await connector.close()
-            learner_agent.save_state(version_info={"message": f"Colosseum training on {connector.environment_id} stopped."})
+            logger.info("Training complete. Best model was saved during the run based on episode performance.")
