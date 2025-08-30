@@ -11,6 +11,7 @@ from collections import namedtuple
 from django.core.management.base import BaseCommand
 from api.services.chimera_agent import ChimeraAgent
 from api.services.redis_buffer import RedisBuffer
+from api.services.experience import Experience
 from colosseum_connector import ColosseumConnector
 from api.services.cortex.factory import create_cortex_configs_from_observation_space
 import gymnasium as gym
@@ -85,7 +86,6 @@ class Command(BaseCommand):
         )
 
         redis_buffer = RedisBuffer()
-        Experience = namedtuple('Experience', ['h_t', 'z_t', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal'])
 
         actor_agent = ChimeraAgent(
             agent_id=agent_tag,
