@@ -39,7 +39,8 @@ class RedisBuffer:
             # Use a pipeline to efficiently retrieve multiple elements
             pipe = self.redis_client.pipeline()
             for index in indices:
-                pipe.lindex(self.list_key, index)
+                # Convert numpy int64 to python int
+                pipe.lindex(self.list_key, int(index))
 
             serialized_experiences = pipe.execute()
 
