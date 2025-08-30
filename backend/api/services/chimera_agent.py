@@ -508,6 +508,8 @@ class ChimeraAgent:
         log_prob = torch.tensor(0.0) # Default
         stag_context_vector = torch.zeros(1, self.stag_context_dim, device=self.device) # Default
         action_probs = torch.zeros(self.max_action_dim, device=self.device) # Default probabilities
+        h_normalized = torch.zeros(1, self.hidden_dim, device=self.device)
+        snn_prediction = torch.zeros(1, self.hidden_dim, device=self.device)
 
         # --- Hierarchical Planning Logic ---
         # 1. High-Level Planner (GraphPlanner)
@@ -631,7 +633,7 @@ class ChimeraAgent:
         action_time = time.time() - start_time
         epsilon = self._get_epsilon() if not evaluation_mode else 0.0 # Recalculate for logging
 
-        return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time, action_probs.cpu().numpy()
+        return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time, action_probs.cpu().numpy(), h_normalized, snn_prediction
 
     def _prepare_stag_context(self, activation_path):
         """

@@ -17,6 +17,7 @@ import gymnasium as gym
 import redis
 import json
 import pickle
+from tqdm import tqdm
 
 def setup_logging(process_name, environment_name):
     logger = logging.getLogger(f"chimera.{process_name}")
@@ -93,46 +94,49 @@ class Command(BaseCommand):
 
         logger.info("Learner setup complete. Starting training loop...")
 
-        train_steps = 0
         weights_save_path = "latest_agent.pt"
+        max_steps = config.get('max_training_steps', 100000)
+
+        # Wait for the replay buffer to fill before starting training
+        burnin_steps = hyperparams.get('burnin_steps', 1000)
+        while len(redis_buffer) < burnin_steps:
+            logger.info(f"Waiting for replay buffer to fill ({len(redis_buffer)}/{burnin_steps})...")
+            time.sleep(5)
+
+        logger.info("Buffer filled. Starting training.")
 
         try:
-            while True:
-                batch_size = hyperparams.get('batch_size', 50)
-                if len(redis_buffer) > hyperparams.get('burnin_steps', 1000):
-
-                    # Pull experiences from Redis and push to the agent's internal buffer
+            with tqdm(total=max_steps, desc="Training Steps") as pbar:
+                for train_steps in range(1, max_steps + 1):
+                    batch_size = hyperparams.get('batch_size', 50)
                     experiences = redis_buffer.sample(batch_size)
                     if not experiences:
                         time.sleep(1)
+                        pbar.update(0) # No step taken
                         continue
 
                     for exp_tuple in experiences:
-                        # We need to convert the tuple from Redis back into an Experience object
-                        # before pushing it to the agent's buffer.
                         exp = Experience(*exp_tuple)
                         learner_agent.replay_buffer.push(
                             exp.h_t, exp.z_t, exp.activation_path, exp.obs, exp.action,
                             exp.log_prob, exp.reward, exp.next_obs, exp.done, exp.goal
                         )
 
-                    # Now, call the agent's own train method, which handles sequence sampling.
                     train_stats = learner_agent.train(cortex_id=cortex_id)
-                    train_steps += 1
+                    pbar.update(1)
 
                     if train_stats:
                         update_ui_state_in_redis('chimera_training_metrics', train_stats)
+                        stats_str = ", ".join([f"{key}={value:.4f}" for key, value in train_stats.items() if isinstance(value, (int, float))])
+                        pbar.set_description(f"Step {train_steps}: {stats_str}")
 
                         if train_steps % 20 == 0:
-                            stats_str = ", ".join([f"{key}={value:.4f}" for key, value in train_stats.items() if isinstance(value, (int, float))])
                             logger.info(f"Train step {train_steps}: {stats_str}")
 
                     if train_steps % hyperparams.get('actor_update_frequency', 100) == 0:
                         logger.info(f"Saving latest weights to {weights_save_path} and publishing to Redis.")
                         state_dict = learner_agent.state_dict()
-                        # Save to file (for persistence)
                         torch.save(state_dict, weights_save_path)
-                        # Publish to Redis (for live actor updates)
                         try:
                             serialized_state = pickle.dumps(state_dict)
                             redis_client.set('chimera_agent_state:latest', serialized_state)
@@ -140,14 +144,11 @@ class Command(BaseCommand):
                         except Exception as e:
                             logger.error(f"Failed to publish agent state to Redis: {e}")
 
-
                     if train_steps % hyperparams.get('stag_ui_update_frequency', 50) == 0:
                         stag_graph = learner_agent.get_graph_structure(env_id)
                         if stag_graph:
                             update_ui_state_in_redis('chimera_stag_graph', stag_graph)
-                else:
-                    logger.info(f"Waiting for replay buffer to fill ({len(redis_buffer)}/{hyperparams.get('burnin_steps', 1000)})...")
-                    time.sleep(5)
+
         except KeyboardInterrupt:
             logger.info("Training interrupted by user. Shutting down.")
         finally:

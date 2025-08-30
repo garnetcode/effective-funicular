@@ -145,8 +145,17 @@ class Command(BaseCommand):
 
                 while not done:
                     h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
-                    action, log_prob, _, decision_maker, epsilon, _, action_probs = actor_agent.select_action(action_space_info['n'], activation_path, evaluation_mode=False)
-                    logger.info(f"Step {actor_agent.steps_done}: Action: {action}, Mode: {decision_maker}, Epsilon: {epsilon:.4f}")
+                    action, log_prob, stag_ctx, decision_maker, epsilon, _, action_probs, h_norm, snn_pred = actor_agent.select_action(
+                        action_space_info['n'], activation_path, evaluation_mode=False
+                    )
+                    if decision_maker == 'policy':
+                        log_msg = (
+                            f"Step {actor_agent.steps_done}: Action: {action}, Mode: {decision_maker}, Epsilon: {epsilon:.4f}, "
+                            f"h_norm: {h_norm.norm():.4f}, stag_ctx_norm: {stag_ctx.norm():.4f}, snn_pred_norm: {snn_pred.norm():.4f}"
+                        )
+                        logger.info(log_msg)
+                    else:
+                        logger.info(f"Step {actor_agent.steps_done}: Action: {action}, Mode: {decision_maker}, Epsilon: {epsilon:.4f}")
 
                     # Update UI with actor state
                     actor_state_for_ui = {
