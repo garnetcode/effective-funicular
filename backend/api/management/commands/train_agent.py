@@ -204,15 +204,19 @@ class Command(BaseCommand):
             **common_params
         )
 
+        # Create a new hyperparams dict for the actor with planning enabled
         actor_hyperparams = hyperparams.copy()
         actor_hyperparams['use_planner'] = True
 
         actor_agent = ChimeraAgent(
             agent_id=f"{agent_tag}-actor",
+            embedding_dim=config.get('agent_config', {}).get('embedding_dim', 512),
+            max_action_dim=action_space_info['n'],
+            cortex_configs=cortex_configs,
+            hyperparams=actor_hyperparams,
+            replay_buffer=replay_buffer,
             load_from_storage=False,
-            history_config={},
-            **common_params,
-            hyperparams=actor_hyperparams
+            history_config={}
         )
         actor_agent.load_state_dict(learner_agent.state_dict())
 
