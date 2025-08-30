@@ -57,7 +57,7 @@ class ChimeraAgentStagDecouplingTests(TestCase):
 
         # 1. Test perceive_and_update_state
         # STAG should not be engaged, so activation_path should be empty.
-        _, _, _, activation_path, novelty = self.agent.perceive_and_update_state("test_cortex", state)
+        _, _, _, activation_path, novelty, _ = self.agent.perceive_and_update_state("test_cortex", state)
         self.assertEqual(activation_path, [])
         self.assertEqual(novelty, 0)
 
@@ -120,7 +120,8 @@ class ChimeraAgentStagDecouplingTests(TestCase):
                         return torch.randn(batch_dim, self.agent.max_action_dim, device=input_tensor.device)
                     mock_action_layer_forward.side_effect = mock_forward_dynamic
 
-                    self.agent.train_policy_in_imagination()
+                    batch, _, _ = mock_buffer.sample.return_value
+                    self.agent.train_policy_in_imagination(batch)
 
                     # Get the input to the action head from the LAST call, which is the one for the BC loss.
                     call_args, _ = mock_action_layer_forward.call_args
@@ -145,7 +146,7 @@ class ChimeraAgentStagDecouplingTests(TestCase):
 
         # 1. Test perceive_and_update_state
         # STAG should now be engaged, so activation_path should not be empty.
-        _, _, h_normalized, activation_path, _ = self.agent.perceive_and_update_state("test_cortex", state)
+        _, _, h_normalized, activation_path, _, _ = self.agent.perceive_and_update_state("test_cortex", state)
         self.assertNotEqual(activation_path, [])
 
         # 2. Test update_stag frequency

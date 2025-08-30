@@ -282,24 +282,31 @@ class PredictiveCodingTests(TestCase):
         self.embedding_dim = 64
         self.latent_dim = 32
         self.hidden_dim = 128
+        self.action_dim = 4
         self.batch_size = 4
 
         # Mock models
         self.encoder = torch.nn.Linear(self.embedding_dim, self.latent_dim)
         self.decoder = torch.nn.Linear(self.latent_dim, self.embedding_dim)
-        self.transition = torch.nn.Linear(self.hidden_dim, self.latent_dim)
+
 
     def test_predictive_coding_module_forward_pass(self):
         """Tests the forward pass of a single PredictiveCodingModule."""
         from .services.predictive_coding import PredictiveCodingModule
-        pc_module = PredictiveCodingModule(self.encoder, self.decoder, self.transition)
+        pc_module = PredictiveCodingModule(
+            self.encoder, self.decoder, self.latent_dim, self.hidden_dim, self.action_dim
+        )
 
         # Dummy data
         x = torch.rand(self.batch_size, self.embedding_dim)
-        state = torch.rand(self.batch_size, self.hidden_dim)
+        action = torch.randint(0, self.action_dim, (self.batch_size,))
+        h_prev = torch.rand(self.batch_size, self.hidden_dim)
+        z_prev = torch.rand(self.batch_size, self.latent_dim)
 
-        prediction, error, reconstruction = pc_module(x, state)
+        h_next, z_next, prediction, error, reconstruction = pc_module(x, action, h_prev, z_prev)
 
+        self.assertEqual(h_next.shape, (self.batch_size, self.hidden_dim))
+        self.assertEqual(z_next.shape, (self.batch_size, self.latent_dim))
         self.assertEqual(prediction.shape, (self.batch_size, self.latent_dim))
         self.assertEqual(error.shape, (self.batch_size, self.latent_dim))
         self.assertEqual(reconstruction.shape, (self.batch_size, self.embedding_dim))
@@ -311,42 +318,50 @@ class PredictiveCodingTests(TestCase):
         # Level 0
         l0_encoder = torch.nn.Linear(self.embedding_dim, self.latent_dim)
         l0_decoder = torch.nn.Linear(self.latent_dim, self.embedding_dim)
-        l0_transition = torch.nn.Linear(self.hidden_dim, self.latent_dim)
-        level0 = PredictiveCodingModule(l0_encoder, l0_decoder, l0_transition)
+        level0 = PredictiveCodingModule(l0_encoder, l0_decoder, self.latent_dim, self.hidden_dim, self.action_dim)
 
         # Level 1 (takes error from level 0 as input)
         l1_encoder = torch.nn.Linear(self.latent_dim, self.latent_dim)
         l1_decoder = torch.nn.Linear(self.latent_dim, self.latent_dim)
-        l1_transition = torch.nn.Linear(self.hidden_dim, self.latent_dim)
-        level1 = PredictiveCodingModule(l1_encoder, l1_decoder, l1_transition)
+        level1 = PredictiveCodingModule(l1_encoder, l1_decoder, self.latent_dim, self.hidden_dim, self.action_dim)
 
         h_rssm = HierarchicalRSSM([level0, level1])
 
         # Dummy data
         x = torch.rand(self.batch_size, self.embedding_dim)
-        states = [
+        action = torch.randint(0, self.action_dim, (self.batch_size,))
+        prev_h = [
             torch.rand(self.batch_size, self.hidden_dim), # State for level 0
             torch.rand(self.batch_size, self.hidden_dim)  # State for level 1
         ]
+        prev_z = [
+            torch.rand(self.batch_size, self.latent_dim), # State for level 0
+            torch.rand(self.batch_size, self.latent_dim)  # State for level 1
+        ]
 
-        next_states, errors, reconstructions = h_rssm(x, states)
 
-        self.assertIsInstance(next_states, list)
-        self.assertIsInstance(errors, list)
-        self.assertIsInstance(reconstructions, list)
-        self.assertEqual(len(next_states), 2)
-        self.assertEqual(len(errors), 2)
-        self.assertEqual(len(reconstructions), 2)
+        all_h_next, all_z_next, all_reconstructions, all_errors, kl_loss = h_rssm(x, action, prev_h, prev_z)
+
+        self.assertIsInstance(all_h_next, list)
+        self.assertIsInstance(all_z_next, list)
+        self.assertIsInstance(all_errors, list)
+        self.assertIsInstance(all_reconstructions, list)
+        self.assertEqual(len(all_h_next), 2)
+        self.assertEqual(len(all_z_next), 2)
+        self.assertEqual(len(all_errors), 2)
+        self.assertEqual(len(all_reconstructions), 2)
 
         # Check shapes of level 0 outputs
-        self.assertEqual(next_states[0].shape, (self.batch_size, self.latent_dim))
-        self.assertEqual(errors[0].shape, (self.batch_size, self.latent_dim))
-        self.assertEqual(reconstructions[0].shape, (self.batch_size, self.embedding_dim))
+        self.assertEqual(all_h_next[0].shape, (self.batch_size, self.hidden_dim))
+        self.assertEqual(all_z_next[0].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(all_errors[0].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(all_reconstructions[0].shape, (self.batch_size, self.embedding_dim))
 
         # Check shapes of level 1 outputs
-        self.assertEqual(next_states[1].shape, (self.batch_size, self.latent_dim))
-        self.assertEqual(errors[1].shape, (self.batch_size, self.latent_dim))
-        self.assertEqual(reconstructions[1].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(all_h_next[1].shape, (self.batch_size, self.hidden_dim))
+        self.assertEqual(all_z_next[1].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(all_errors[1].shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(all_reconstructions[1].shape, (self.batch_size, self.latent_dim))
 
 
 class StateHistoryManagerTests(TestCase):
