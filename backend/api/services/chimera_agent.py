@@ -738,16 +738,21 @@ class ChimeraAgent:
         Trains the World Model and Policy on a pre-sampled batch of experiences.
         """
         self.train_steps += 1
-        start_time = time.time()
+        total_start_time = time.time()
+        timing_stats = {}
 
         # --- Part 1: Train the World Model ---
+        wm_start_time = time.time()
         world_model_stats, _, _ = self.train_world_model_on_batch(batch, cortex_id)
+        timing_stats['wm_train_time_ms'] = (time.time() - wm_start_time) * 1000
 
         # --- Part 2: Train the Policy ---
         policy_stats = {}
         policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
         if self.train_steps % policy_train_frequency == 0:
+            policy_start_time = time.time()
             policy_stats = self.train_policy_in_imagination(batch)
+            timing_stats['policy_train_time_ms'] = (time.time() - policy_start_time) * 1000
 
         # --- Part 3: Prune the STAG ---
         if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
@@ -759,11 +764,13 @@ class ChimeraAgent:
         snn_train_frequency = self.hyperparams.get('snn_train_frequency', 5)
         if self.train_steps > self.world_model_pretrain_steps and \
            self.train_steps % snn_train_frequency == 0:
+            snn_start_time = time.time()
             snn_stats = self._train_snn_on_batch(batch)
+            timing_stats['snn_train_time_ms'] = (time.time() - snn_start_time) * 1000
 
         # --- Combine stats for logging ---
-        combined_stats = {**world_model_stats, **policy_stats, **snn_stats}
-        combined_stats['total_train_time_ms'] = (time.time() - start_time) * 1000
+        combined_stats = {**world_model_stats, **policy_stats, **snn_stats, **timing_stats}
+        combined_stats['total_train_time_ms'] = (time.time() - total_start_time) * 1000
         return combined_stats
 
     def _train_snn_on_batch(self, batch):
