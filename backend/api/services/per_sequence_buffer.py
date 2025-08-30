@@ -187,7 +187,7 @@ class PERSequenceBuffer:
             if key in ['obs', 'next_obs', 'goal']:
                 # These are expected to be numpy arrays and can be stacked.
                 batch_dict[key] = np.stack(data)
-            elif key in ['h', 'z', 'log_prob']:
+            elif key in ['h', 'z']:
                 # These are tensors.
                 processed_data = []
                 for d in data:
