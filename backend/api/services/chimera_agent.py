@@ -735,25 +735,33 @@ class ChimeraAgent:
         which involves training the world model and then training the policy in imagination.
         """
         self.train_steps += 1
-        # Part 1: Train the World Model on real, recently collected data.
+
+        # --- Part 1: Train the World Model ---
+        start_time_wm = time.time()
         world_model_stats, indices, priorities = self.train_world_model(cortex_id)
         if indices is not None:
             self.update_priorities(indices, priorities)
+        world_model_time = time.time() - start_time_wm
 
+        # --- Part 2: Train the Policy ---
+        start_time_policy = time.time()
         policy_stats = {}
-
-        # Part 2: Train the Actor-Critic policy in imagined trajectories, but less frequently.
         policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
         if self.train_steps % policy_train_frequency == 0:
             policy_stats = self.train_policy_in_imagination()
+        policy_time = time.time() - start_time_policy
 
-        # Part 3: Prune the STAG graph periodically for the active skill.
+        # --- Part 3: Prune the STAG ---
         if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
             if self.active_skill_id:
                 self.skill_manager.prune_graph(self.active_skill_id, self.gng_min_utility_threshold)
 
-        # Combine stats for logging
+        # --- Combine stats for logging ---
         combined_stats = {**world_model_stats, **policy_stats}
+        combined_stats['world_model_time_ms'] = world_model_time * 1000
+        combined_stats['policy_time_ms'] = policy_time * 1000
+        combined_stats['total_train_time_ms'] = (world_model_time + policy_time) * 1000
+
         return combined_stats
 
     def update_priorities(self, indices, priorities):

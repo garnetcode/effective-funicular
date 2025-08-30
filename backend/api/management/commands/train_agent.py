@@ -107,7 +107,6 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--config", type=str, default="configs/base.yaml", help="Path to the main configuration file.")
         parser.add_argument("--env-id", type=str, default="LunarLander-v3", help="The Colosseum environment ID to train in.")
-        parser.add_argument("--episodes", type=int, default=500, help="Total number of episodes to train for.")
         parser.add_argument("--agent-tag", type=str, default=None, help="A unique tag for the agent.")
         parser.add_argument("--port", type=int, default=8002, help="The port of the Colosseum server.")
 
@@ -195,68 +194,65 @@ class Command(BaseCommand):
         logger.info("Setup complete. Actor and Learner are ready.")
         return learner_agent, actor_agent, connector, session_info, cortex_id, shared_weights
 
-    async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id, episodes):
+    async def _actor_task(self, actor_agent, shared_weights, connector, session_info, cortex_id):
         logger.info("Actor task started.")
         current_obs = np.array(session_info.get("observation"))
         best_episode_reward = -float('inf')
+        episode = 0
 
-        with tqdm(total=episodes, desc=f"Acting in {connector.environment_id}") as pbar:
-            for episode in range(1, episodes + 1):
-                latest_weights = shared_weights.get_weights()
-                if latest_weights:
-                    actor_agent.load_actor_state_dict(latest_weights)
+        while True: # Run indefinitely until interrupted by KeyboardInterrupt
+            episode += 1
+            logger.info(f"--- Starting Episode {episode} ---")
+            latest_weights = shared_weights.get_weights()
+            if latest_weights:
+                actor_agent.load_actor_state_dict(latest_weights)
 
-                done = False
-                episode_reward = 0
+            done = False
+            episode_reward = 0
 
-                while not done:
-                    h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
-                    action, log_prob, _, _, _, _, action_probs = actor_agent.select_action(actor_agent.max_action_dim, activation_path)
+            while not done:
+                h_t, z_t, h_normalized, activation_path, novelty = actor_agent.perceive_and_update_state(cortex_id, current_obs)
+                action, log_prob, _, _, _, _, action_probs = actor_agent.select_action(actor_agent.max_action_dim, activation_path)
 
-                    update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
-                    await connector.send_action(int(action))
-                    msg = await connector.receive_message()
+                update_ui_state_in_redis('chimera_action_update', {'probabilities': action_probs})
+                await connector.send_action(int(action))
+                msg = await connector.receive_message()
 
-                    if not msg:
-                        logger.warning("Actor did not receive state from server. Ending episode.")
-                        break
+                if not msg:
+                    logger.warning("Actor did not receive state from server. Ending episode.")
+                    break
 
-                    if msg.get("type") == "action.taken":
-                        next_obs = np.array(msg.get("observation"))
-                        reward = msg.get("reward", 0)
-                        done = msg.get("done", False)
-                        episode_reward += reward
-                        actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
-                        current_obs = next_obs
-                    elif msg.get("type") == "game.over":
-                        logger.info("Game over message received. Ending episode.")
-                        # The final reward might be in this message, let's use it if available.
-                        reward = msg.get("reward", 0)
-                        episode_reward += reward
-                        done = True
-                        # Record the final experience. The 'next_obs' is the same as current_obs as there is no next state.
-                        actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, current_obs, done)
-                    else:
-                        logger.warning(f"Actor received unexpected message type: {msg.get('type')}")
+                if msg.get("type") == "action.taken":
+                    next_obs = np.array(msg.get("observation"))
+                    reward = msg.get("reward", 0)
+                    done = msg.get("done", False)
+                    episode_reward += reward
+                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+                    current_obs = next_obs
+                elif msg.get("type") == "game.over":
+                    logger.info("Game over message received. Ending episode.")
+                    reward = msg.get("reward", 0)
+                    episode_reward += reward
+                    done = True
+                    actor_agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, current_obs, done)
+                else:
+                    logger.warning(f"Actor received unexpected message type: {msg.get('type')}")
 
-                pbar.set_postfix({"Last Reward": f"{episode_reward:.2f}", "Total Steps": actor_agent.steps_done})
-                pbar.update(1)
-                update_ui_state_in_redis('chimera_episode_metrics', {'episode': episode, 'reward': episode_reward, 'total_steps': actor_agent.steps_done})
+            logger.info(f"Episode {episode} finished. Reward: {episode_reward:.2f}, Total Steps: {actor_agent.steps_done}")
+            update_ui_state_in_redis('chimera_episode_metrics', {'episode': episode, 'reward': episode_reward, 'total_steps': actor_agent.steps_done})
 
-                # Save the model if it's the best one seen so far.
-                if episode_reward > best_episode_reward:
-                    best_episode_reward = episode_reward
-                    logger.info(f"New best reward: {best_episode_reward:.2f}. Saving model...")
-                    # The actor agent has the weights that produced this reward.
-                    actor_agent.save_state(version_info={"message": f"New best model with reward {best_episode_reward:.2f} at episode {episode}."})
+            # Save the model if it's the best one seen so far.
+            if episode_reward > best_episode_reward:
+                best_episode_reward = episode_reward
+                logger.info(f"New best reward: {best_episode_reward:.2f}. Saving model...")
+                actor_agent.save_state(version_info={"message": f"New best model with reward {best_episode_reward:.2f} at episode {episode}."})
 
-                if episode < episodes:
-                    reset_response = await connector.reset_environment()
-                    if reset_response:
-                        current_obs = np.array(reset_response.get("observation"))
-                    else:
-                        logger.error("Failed to reset environment. Stopping actor task.")
-                        break
+            reset_response = await connector.reset_environment()
+            if reset_response:
+                current_obs = np.array(reset_response.get("observation"))
+            else:
+                logger.error("Failed to reset environment. Stopping actor task.")
+                break
         logger.info("Actor task finished.")
 
     async def async_handle(self, *args, **options):
@@ -281,7 +277,7 @@ class Command(BaseCommand):
 
         try:
             learner_thread.start()
-            await self._actor_task(actor_agent, shared_weights, connector, session_info, cortex_id, options['episodes'])
+            await self._actor_task(actor_agent, shared_weights, connector, session_info, cortex_id)
         finally:
             logger.info("Main task finished. Stopping learner and cleaning up.")
             stop_event.set()
