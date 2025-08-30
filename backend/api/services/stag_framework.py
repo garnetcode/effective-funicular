@@ -7,7 +7,7 @@
 import numpy as np
 import logging
 from .gng_engine import GNG_Engine
-from .snn_predictor import SNNPredictor
+from .snn_predictor import NodePredictor
 import torch
 
 logger = logging.getLogger(__name__)
@@ -29,14 +29,13 @@ class STAG_Framework:
         # The hierarchy is a tree structure where each node holds a GNG instance.
         self.tree = self._create_tree_node()
 
-        # --- SNN-STAG Hybrid Component ---
-        snn_hidden_dim = kwargs.get('snn_hidden_dim', 256)
-        snn_num_steps = kwargs.get('snn_num_steps', 10)
-        self.snn_predictor = SNNPredictor(
-            input_dim=self.dimensions,
+        # --- Node Predictor Component ---
+        snn_hidden_dim = kwargs.get('snn_hidden_dim', 128)
+        max_nodes = kwargs.get('gng_max_nodes', 1000) # Default to 1000 if not specified
+        self.snn_predictor = NodePredictor(
+            embedding_dim=self.dimensions,
             hidden_dim=snn_hidden_dim,
-            output_dim=self.dimensions,
-            num_steps=snn_num_steps
+            max_nodes=max_nodes
         )
 
     def _create_tree_node(self, parent_gng_node_id=None):
@@ -232,7 +231,7 @@ class STAG_Framework:
 
         # Load the SNN predictor state if it exists
         if 'snn_predictor_state' in structure:
-            stag.snn_predictor = SNNPredictor.from_state(structure['snn_predictor_state'])
+            stag.snn_predictor = NodePredictor.from_state(structure['snn_predictor_state'])
 
         return stag
 

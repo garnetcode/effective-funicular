@@ -56,6 +56,7 @@ agent_config:
     gng_utility_floor: 0.1
     gng_utility_clip: 10.0
     gng_faiss_rebuild_interval: 100
+    gng_max_nodes: 1000
     # Adaptive GNG Learning Rate
     gng_learning_rate_decay: 0.9999
     gng_winner_learning_rate_initial: 0.8
