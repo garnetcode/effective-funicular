@@ -936,8 +936,8 @@ class ChimeraAgent:
             logger.debug(f"Imagination Step {t+1}/{horizon}: action={action.float().mean().item():.2f}")
 
             with torch.no_grad():
-                h_t, _, prior_std = transition_model(z_t, action, h_t)
-                z_t = Normal(h_t, prior_std).rsample()
+                h_t, prior_mean, prior_std = transition_model(z_t, action, h_t)
+                z_t = Normal(prior_mean, prior_std).rsample()
 
             imagined_h.append(h_t)
             imagined_z.append(z_t)
