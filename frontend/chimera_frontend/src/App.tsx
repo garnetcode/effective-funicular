@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import NetworkVisualizer, { GraphData } from './NetworkVisualizer';
 import PerformanceChart from './PerformanceChart';
-import ActionVisualizer from './ActionVisualizer';
+import ActorStateVisualizer from './ActorStateVisualizer';
 import './App.css';
 
 // --- Type Definitions ---
@@ -20,6 +20,13 @@ interface TrainingMetric {
   total_steps: number;
 }
 
+interface ActorState {
+  h_t: number[];
+  z_t: number[];
+  epsilon: number;
+  action_probs: number[];
+}
+
 const AGENT_ID = "Kymera-local-train";
 
 function App() {
@@ -27,7 +34,7 @@ function App() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([]);
   const [statusMessage, setStatusMessage] = useState('Connecting to backend...');
-  const [actionProbs, setActionProbs] = useState<number[]>([]);
+  const [actorState, setActorState] = useState<ActorState | null>(null);
 
   useEffect(() => {
     const ws_scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -69,7 +76,10 @@ function App() {
           });
           break;
         case 'action_update':
-            setActionProbs(payload.probabilities);
+            // This is now handled by actor_state_update
+            break;
+        case 'actor_state_update':
+            setActorState(payload);
             break;
         default:
           console.warn("Received unknown message type:", type);
@@ -111,8 +121,7 @@ function App() {
           </div>
         </div>
         <div className="bottom-row">
-          <h3>Action Probabilities</h3>
-          <ActionVisualizer probabilities={actionProbs} />
+          <ActorStateVisualizer actorState={actorState} />
         </div>
       </div>
     </div>
