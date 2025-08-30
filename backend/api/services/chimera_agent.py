@@ -944,14 +944,19 @@ class ChimeraAgent:
         batch_size = h_start.size(0)
         goal_sequence = torch.from_numpy(batch['goal'][:, 0]).float().to(self.device)
 
-        # --- Generate "teacher" plan from the latent planner ---
-        with torch.no_grad():
-            # Pass the top-level states to the planner
-            teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
+        teacher_plan = None
+        if self.use_planner:
+            # --- Generate "teacher" plan from the latent planner ---
+            with torch.no_grad():
+                # Pass the top-level states to the planner
+                teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
 
-        if teacher_plan is None:
-            logger.warning("Planner failed to return a plan. Skipping policy update for this batch.")
-            return {}
+            if teacher_plan is None:
+                logger.warning("Planner failed to return a plan. Skipping policy update for this batch.")
+                return {}
+        else:
+            # If planner is disabled, disable the behavioral cloning loss term
+            lambda_bc = 0.0
 
         # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
@@ -1027,7 +1032,9 @@ class ChimeraAgent:
         combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat, snn_pred_bc_flat], dim=-1)
         policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
         policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
-        bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
+        bc_loss = torch.tensor(0.0, device=self.device)
+        if teacher_plan is not None:
+            bc_loss = F.mse_loss(policy_logits, teacher_plan.detach())
 
         entropy_loss = -entropy_coef * policy_entropies.mean()
 
