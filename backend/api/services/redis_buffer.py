@@ -61,3 +61,13 @@ class RedisBuffer:
         except Exception as e:
             print(f"Error getting Redis buffer length: {e}")
             return 0
+
+    def clear(self):
+        """
+        Deletes the replay buffer list from Redis.
+        """
+        try:
+            self.redis_client.delete(self.list_key)
+            print(f"Cleared Redis buffer with key: {self.list_key}")
+        except Exception as e:
+            print(f"Error clearing Redis buffer: {e}")
