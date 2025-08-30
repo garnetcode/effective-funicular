@@ -942,6 +942,10 @@ class ChimeraAgent:
             # Pass the top-level states to the planner
             teacher_plan = self.planner.plan(h_start, z_start, current_goal=goal_sequence.cpu().numpy())
 
+        if teacher_plan is None:
+            logger.warning("Planner failed to return a plan. Skipping policy update for this batch.")
+            return {}
+
         # --- Imagine Trajectories using the policy's actions ---
         h_t, z_t = h_start, z_start
         imagined_h = [h_t]
