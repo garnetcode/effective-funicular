@@ -5,7 +5,7 @@ import torch
 import threading
 
 Experience = namedtuple('Experience',
-                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal'))
+                        ('h', 'z', 'activation_path', 'obs', 'action', 'log_prob', 'reward', 'next_obs', 'done', 'goal', 'winner_id'))
 
 class SegmentTree:
     """A Segment Tree data structure for efficient sum-based operations."""
