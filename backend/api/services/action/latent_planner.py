@@ -45,6 +45,7 @@ class LatentPlanner(nn.Module):
                         # Convert continuous actions to discrete and one-hot encode for the transition model
                         action_t_discrete = torch.argmax(action_t_samples, dim=-1)
                         action_t_one_hot = torch.nn.functional.one_hot(action_t_discrete, num_classes=self.action_dim).float()
+                        action_t_one_hot = action_t_one_hot.reshape(-1, self.action_dim)
 
                         transition_model = world_model.rssm.levels[0].transition_model
                         fc_prediction = world_model.rssm.levels[0].fc_prediction
