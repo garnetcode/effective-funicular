@@ -103,30 +103,23 @@ class Command(BaseCommand):
                 batch_size = hyperparams.get('batch_size', 50)
                 if len(redis_buffer) > hyperparams.get('burnin_steps', 1000):
 
-                    batch_list = redis_buffer.sample(batch_size)
-                    if not batch_list:
+                    # Pull experiences from Redis and push to the agent's internal buffer
+                    experiences = redis_buffer.sample(batch_size)
+                    if not experiences:
                         time.sleep(1)
                         continue
 
-                    # Convert list of serialized tuples to a batch dictionary
-                    experiences = [Experience(*exp) for exp in batch_list]
+                    for exp_tuple in experiences:
+                        # We need to convert the tuple from Redis back into an Experience object
+                        # before pushing it to the agent's buffer.
+                        exp = Experience(*exp_tuple)
+                        learner_agent.replay_buffer.push(
+                            exp.h_t, exp.z_t, exp.activation_path, exp.obs, exp.action,
+                            exp.log_prob, exp.reward, exp.next_obs, exp.done, exp.goal
+                        )
 
-                    batch = {}
-                    for field in Experience._fields:
-                        if field != 'activation_path':
-                            try:
-                                batch[field] = np.array([getattr(e, field) for e in experiences])
-                            except (ValueError, TypeError) as err:
-                                logger.warning(f"Could not create numpy array for field '{field}': {err}")
-                                # If conversion fails, we skip this field for this batch.
-                                # A more robust solution might involve padding or other preprocessing.
-                                batch[field] = None # Or some other placeholder
-
-                    # Filter out fields that failed conversion
-                    batch = {k: v for k, v in batch.items() if v is not None}
-
-
-                    train_stats = learner_agent.train_on_batch(batch, cortex_id=cortex_id)
+                    # Now, call the agent's own train method, which handles sequence sampling.
+                    train_stats = learner_agent.train(cortex_id=cortex_id)
                     train_steps += 1
 
                     if train_stats:
