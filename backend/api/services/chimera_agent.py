@@ -729,27 +729,21 @@ class ChimeraAgent:
         self.subgoal_reward += reward
         self.subgoal_duration += 1
 
-    def train(self, cortex_id="vector_input"):
+    def train_on_batch(self, batch, cortex_id="vector_input"):
         """
-        The main training loop that orchestrates the "sleep" phase of the agent,
-        which involves training the world model and then training the policy in imagination.
+        Trains the World Model and Policy on a pre-sampled batch of experiences.
         """
         self.train_steps += 1
+        start_time = time.time()
 
         # --- Part 1: Train the World Model ---
-        start_time_wm = time.time()
-        world_model_stats, indices, priorities = self.train_world_model(cortex_id)
-        if indices is not None:
-            self.update_priorities(indices, priorities)
-        world_model_time = time.time() - start_time_wm
+        world_model_stats, _, _ = self.train_world_model_on_batch(batch, cortex_id)
 
         # --- Part 2: Train the Policy ---
-        start_time_policy = time.time()
         policy_stats = {}
         policy_train_frequency = self.hyperparams.get('policy_train_frequency', 1)
         if self.train_steps % policy_train_frequency == 0:
-            policy_stats = self.train_policy_in_imagination()
-        policy_time = time.time() - start_time_policy
+            policy_stats = self.train_policy_in_imagination(batch)
 
         # --- Part 3: Prune the STAG ---
         if self.train_steps > 0 and self.train_steps % self.gng_pruning_frequency == 0:
@@ -758,87 +752,49 @@ class ChimeraAgent:
 
         # --- Combine stats for logging ---
         combined_stats = {**world_model_stats, **policy_stats}
-        combined_stats['world_model_time_ms'] = world_model_time * 1000
-        combined_stats['policy_time_ms'] = policy_time * 1000
-        combined_stats['total_train_time_ms'] = (world_model_time + policy_time) * 1000
-
+        combined_stats['total_train_time_ms'] = (time.time() - start_time) * 1000
         return combined_stats
 
-    def update_priorities(self, indices, priorities):
-        """Updates the priorities of experiences in the replay buffer."""
-        self.replay_buffer.update_priorities(indices, priorities)
-
-    def train_world_model(self, cortex_id="vector_input"):
+    def train(self, cortex_id="vector_input"):
         """
-        Trains the World Model ensemble on batches of sequences, including a contrastive loss.
+        The main training loop that samples from the agent's internal replay buffer.
         """
         batch_size = self.hyperparams.get('batch_size', 32)
-        if len(self.replay_buffer) < self.replay_buffer.sequence_length:
-            return {}, None, None
+        if len(self.replay_buffer) < batch_size:
+            return {}
 
-        contrastive_loss_fn = ContrastiveLoss()
+        batch, indices, weights = self.replay_buffer.sample(batch_size)
 
-        # For PER, we sample a single batch that will be used for calculating priorities
-        shared_batch, shared_indices, shared_weights_np = self.replay_buffer.sample(batch_size)
-        shared_weights = torch.from_numpy(shared_weights_np).float().to(self.device)
+        # PER-specific logic
+        if indices is not None:
+            self.update_priorities(indices, weights) # This is a placeholder for actual priority calculation
 
+        return self.train_on_batch(batch, cortex_id)
+
+    def train_world_model_on_batch(self, batch, cortex_id="vector_input"):
+        """
+        Trains the World Model ensemble on a given batch of sequences.
+        """
+        weights = torch.ones(len(batch['obs']), device=self.device) / len(batch['obs'])
         total_wm_loss = 0
-        # Priorities are calculated based on the average loss on the shared_batch across the ensemble
-        sequence_priorities = torch.zeros(batch_size, device=self.device)
 
         for i, (world_model, wm_optimizer) in enumerate(zip(self.world_models, self.world_model_optimizers)):
-
-            # --- Ensemble Diversity Logic ---
-            if i > 0 and random.random() < self.hyperparams.get('ensemble_diversity_prob', 0.5):
-                train_batch, _, _ = self.replay_buffer.sample(batch_size)
-                train_weights = torch.ones(batch_size, device=self.device) / batch_size
-            else:
-                train_batch, train_weights = shared_batch, shared_weights
-
-            # --- Main Training Pass on `train_batch` ---
-            # This is where the model parameters are updated
-            # (The detailed implementation of the forward pass and loss calculation is encapsulated in a helper)
-            world_model_loss, contrastive_loss, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
-                world_model, train_batch, cortex_id, train_weights
+            world_model_loss, _, last_hidden_states, last_reward_seq = self._calculate_world_model_loss(
+                world_model, batch, cortex_id, weights
             )
-
             wm_optimizer.zero_grad()
             world_model_loss.backward()
             torch.nn.utils.clip_grad_norm_(world_model.parameters(), self.max_grad_norm)
             wm_optimizer.step()
             total_wm_loss += world_model_loss.item()
 
-            # --- Priority Calculation Pass on `shared_batch` ---
-            # This pass is only for calculating the loss to be used as priority, so no gradients needed.
-            with torch.no_grad():
-                priority_loss, _, _, _ = self._calculate_world_model_loss(
-                    world_model, shared_batch, cortex_id, shared_weights
-                )
-                # The priority for an experience is the loss from the model that trained on it
-                sequence_priorities += priority_loss.detach()
-
-        # --- Update the contrastive queue ---
-        if self.contrastive_queue_size > 0:
-            keys_to_enqueue = last_hidden_states.view(-1, self.hidden_dim).detach()
-            self._dequeue_and_enqueue(keys_to_enqueue)
-
-        # Average the priorities over the ensemble
-        final_priorities = (sequence_priorities / self.num_ensemble_models).cpu().numpy()
-
-        # Learn reward weights using the last batch from the loop
-        with torch.no_grad():
-            last_h = last_hidden_states[:, -1]
-            state_features = torch.matmul(last_h, self.sf_projection_matrix)
-            predicted_r = torch.einsum('bd,d->b', [state_features, self.reward_weights])
-            actual_r = torch.from_numpy(last_reward_seq).float().to(self.device)[:, -1]
-            error = actual_r - predicted_r
-            self.reward_weights += self.sf_learning_rate * torch.mean(error.unsqueeze(-1) * state_features, dim=0)
-
-        # --- Collect and return detailed statistics ---
-        # Note: These stats are from the last model's training batch, which is a simplification.
         avg_wm_loss = total_wm_loss / self.num_ensemble_models
         stats = { "wm_loss_total": avg_wm_loss }
-        return stats, shared_indices, final_priorities
+        return stats, None, None
+
+    def update_priorities(self, indices, priorities):
+        """Updates the priorities of experiences in the replay buffer."""
+        self.replay_buffer.update_priorities(indices, priorities)
 
     def _calculate_world_model_loss(self, world_model, batch, cortex_id, weights):
         """Helper function to calculate the world model loss for a given batch using predictive coding."""
@@ -913,13 +869,12 @@ class ChimeraAgent:
         return reconstruction_loss + prediction_error_loss + kl_loss
 
 
-    def train_policy_in_imagination(self):
+    def train_policy_in_imagination(self, batch):
         """
         Trains the Actor (ActionHead) and Critic (ValueHead) in imagination.
         This version is corrected to work with a hierarchical state space.
         """
-        batch_size = self.hyperparams.get('batch_size', 32)
-        if len(self.replay_buffer) < self.replay_buffer.sequence_length:
+        if not batch:
             return {}
 
         horizon = self.planner.plan_horizon
@@ -929,9 +884,6 @@ class ChimeraAgent:
         entropy_coef = self.entropy_coef_start - progress * (self.entropy_coef_start - self.entropy_coef_end)
         progress = min(1.0, self.train_steps / self.lambda_bc_schedule_steps)
         lambda_bc = self.lambda_bc_start - progress * (self.lambda_bc_start - self.lambda_bc_end)
-
-        # --- Sample starting states from real data ---
-        batch, _, _ = self.replay_buffer.sample(batch_size)
 
         # The replay buffer stores stacked numpy arrays of shape (num_levels, 1, dim).
         # We select the first state in the sequence [:, 0], convert to tensor, and squeeze the singleton dimension.
