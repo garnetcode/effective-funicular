@@ -188,10 +188,17 @@ class PERSequenceBuffer:
                 # These are expected to be numpy arrays and can be stacked.
                 batch_dict[key] = np.stack(data)
             elif key in ['h', 'z']:
-                # These are tensors.
+                # These are tensors or numpy arrays.
                 processed_data = []
                 for d in data:
-                    t = d if isinstance(d, torch.Tensor) else torch.tensor(d)
+                    if isinstance(d, torch.Tensor):
+                        t = d
+                    elif isinstance(d, np.ndarray):
+                        t = torch.from_numpy(d)
+                    else:
+                        # Fallback for other potential types, though not expected
+                        t = torch.tensor(d)
+
                     if t.dim() == 0:
                         t = t.reshape(1)  # Reshape scalar tensors
                     processed_data.append(t)
