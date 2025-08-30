@@ -120,13 +120,13 @@ def main(args):
                 terminated, truncated = False, False
 
                 while not (terminated or truncated):
-                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, state)
+                    h_t, z_t, h_normalized, activation_path, novelty, winner_id = agent.perceive_and_update_state(cortex_id, state)
                     action, log_prob, _, _, _, _ = agent.select_action(actual_action_dim, activation_path)
                     next_state, env_reward, terminated, truncated, _ = env.step(action)
                     agent.update_stag(h_normalized, env_reward)
                     internal_reward = agent.get_internal_reward(damage_taken=0, novelty_signal=novelty)
                     total_reward = env_reward + internal_reward
-                    agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, total_reward, next_state, terminated)
+                    agent.record_experience(h_t, z_t, activation_path, state, action, log_prob, total_reward, next_state, terminated, winner_id)
                     state = next_state
                     episode_reward += env_reward
                     total_steps += 1

@@ -42,7 +42,8 @@ class RunColosseumAgentsTests(unittest.TestCase):
             torch.zeros(1, 128),
             np.zeros(512),
             [],
-            0.0
+            0.0,
+            None  # winner_id
         )
         mock_agent_instance.select_action.return_value = (
             0,
