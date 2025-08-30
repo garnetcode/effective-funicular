@@ -967,6 +967,7 @@ class ChimeraAgent:
         transition_model = self.world_models[0].rssm.levels[0].transition_model
         fc_prediction = self.world_models[0].rssm.levels[0].fc_prediction
 
+        logger.info(f"Imagination: Starting trajectory of length {horizon}")
         for t in range(horizon):
             norm_h = self.h_norm(h_t)
             stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
@@ -978,6 +979,8 @@ class ChimeraAgent:
             policy_actions.append(action)
             policy_log_probs.append(action_dist.log_prob(action))
             policy_entropies.append(action_dist.entropy())
+
+            logger.debug(f"Imagination Step {t+1}/{horizon}: action={action.mean().item():.2f}")
 
             with torch.no_grad():
                 a_one_hot = torch.nn.functional.one_hot(action.long(), num_classes=transition_model.input_size - z_t.shape[-1]).float()

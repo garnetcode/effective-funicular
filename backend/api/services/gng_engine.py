@@ -4,6 +4,10 @@
 # dynamic learning rates and FAISS-based search for performance.
 
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
     import faiss
 except ImportError:
@@ -275,6 +279,7 @@ class GNG_Engine:
         r_error_fast = q_node['error_fast'] * self.after_split_error_decay_rate
         r_error_slow = q_node['error_slow'] * self.after_split_error_decay_rate
         r_id = self._add_node(r_weight, error_fast=r_error_fast, error_slow=r_error_slow, utility=r_utility)
+        logger.info(f"GNG: Inserted new node {r_id} between {q_id} and {f_id}")
 
         edge_to_remove = tuple(sorted((q_id, f_id)))
         original_edge = next((e for e in self.edges if e[0] == edge_to_remove[0] and e[1] == edge_to_remove[1]), None)
