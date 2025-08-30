@@ -740,7 +740,7 @@ class ChimeraAgent:
         h_t_np = torch.stack(h_t).detach().cpu().numpy()
         z_t_np = torch.stack(z_t).detach().cpu().numpy()
 
-        experience = (h_t_np, z_t_np, activation_path, obs, action, log_prob, reward, next_obs, done, self.current_goal)
+        experience = (h_t_np, z_t_np, activation_path, obs, action, log_prob.item(), reward, next_obs, done, self.current_goal)
         self.replay_buffer.push(*experience)
 
         self.subgoal_reward += reward
