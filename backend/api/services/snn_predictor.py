@@ -3,114 +3,83 @@ import torch.nn as nn
 import snntorch as snn
 from snntorch import leaky
 
-class SNNPredictor(nn.Module):
+class NodePredictor(nn.Module):
     """
-    A Spiking Neural Network for predicting the next state in a sequence.
-    This network takes a sequence of historical states and outputs a prediction
-    for the subsequent state. It's designed to be integrated into the STAG framework
-    to provide a "reflexive" prediction of what might happen next.
+    A GRU-based network for predicting the next STAG node in a sequence.
+    This network takes a sequence of historical node embeddings and outputs a
+    probability distribution over the next possible nodes.
     """
-    def __init__(self, input_dim, hidden_dim, output_dim, num_steps):
+    def __init__(self, embedding_dim, hidden_dim, max_nodes, num_layers=1):
         super().__init__()
-        self.input_dim = input_dim
+        self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.num_steps = num_steps # Number of time steps to simulate the SNN for
+        self.max_nodes = max_nodes
+        self.num_layers = num_layers
 
-        # --- Network Architecture ---
-        # Layer 1: Input to Hidden
-        self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
-        self.lif1 = snn.Leaky(beta=0.9) # Leaky Integrate-and-Fire neuron
+        self.gru = nn.GRU(
+            input_size=self.embedding_dim,
+            hidden_size=self.hidden_dim,
+            num_layers=self.num_layers,
+            batch_first=True
+        )
+        self.fc = nn.Linear(self.hidden_dim, self.max_nodes)
 
-        # Layer 2: Hidden to Output
-        self.fc2 = nn.Linear(self.hidden_dim, self.output_dim)
-        self.lif2 = snn.Leaky(beta=0.9)
-
-        # Optimizer
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        self.loss_fn = nn.MSELoss()
+        self.loss_fn = nn.CrossEntropyLoss()
 
-    def forward(self, input_sequence):
+    def forward(self, input_sequence, h_0=None):
         """
-        Performs a forward pass through the SNN for a given number of time steps.
+        Performs a forward pass through the GRU.
 
         Args:
-            input_sequence (torch.Tensor): A tensor of shape (batch_size, sequence_length, input_dim)
-                                           representing the historical states.
+            input_sequence (torch.Tensor): A tensor of shape (batch_size, sequence_length, embedding_dim).
+            h_0 (torch.Tensor, optional): Initial hidden state. Defaults to None.
 
         Returns:
-            torch.Tensor: The predicted next state, shape (batch_size, output_dim).
+            torch.Tensor: Logits for the next node prediction, shape (batch_size, max_nodes).
         """
-        batch_size, sequence_length, _ = input_sequence.shape
+        gru_out, _ = self.gru(input_sequence, h_0)
+        # We only need the output of the last time step
+        last_hidden_state = gru_out[:, -1, :]
+        logits = self.fc(last_hidden_state)
+        return logits
 
-        # Initialize hidden states and outputs at t=0
-        mem1 = self.lif1.init_leaky()
-        mem2 = self.lif2.init_leaky()
-
-        # Record the final layer's membrane potential
-        mem2_recording = []
-
-        # SNN simulation loop
-        for step in range(self.num_steps):
-            # The input to the SNN at each time step is one vector from the sequence
-            # We loop through the input sequence
-            current_input = input_sequence[:, step % sequence_length, :]
-
-            cur1 = self.fc1(current_input)
-            spk1, mem1 = self.lif1(cur1, mem1)
-
-            cur2 = self.fc2(spk1)
-            spk2, mem2 = self.lif2(cur2, mem2)
-
-            mem2_recording.append(mem2)
-
-        # The prediction is the average membrane potential of the output layer over the simulation
-        prediction = torch.stack(mem2_recording, dim=0).mean(dim=0)
-        return prediction
-
-    def train_on_batch(self, input_sequence, target_sequence):
+    def train_on_batch(self, input_sequence, target_node_indices):
         """
-        Trains the SNN on a batch of sequences.
+        Trains the NodePredictor on a batch of sequences.
 
         Args:
-            input_sequence (torch.Tensor): The input sequences for the model.
-                                           Shape: (batch_size, sequence_length, input_dim)
-            target_sequence (torch.Tensor): The target next states.
-                                            Shape: (batch_size, output_dim)
+            input_sequence (torch.Tensor): Input sequences of node embeddings.
+                                           Shape: (batch_size, sequence_length, embedding_dim)
+            target_node_indices (torch.Tensor): Target next node indices.
+                                                 Shape: (batch_size,)
         """
         self.optimizer.zero_grad()
-
-        # Get the prediction from the model
-        prediction = self.forward(input_sequence)
-
-        # Calculate loss
-        loss = self.loss_fn(prediction, target_sequence)
-
-        # Backpropagate and update weights
+        logits = self.forward(input_sequence)
+        loss = self.loss_fn(logits, target_node_indices)
         loss.backward()
         self.optimizer.step()
-
         return loss.item()
 
     def get_state(self):
-        """Returns the state of the SNN for serialization."""
+        """Returns the state of the NodePredictor for serialization."""
         return {
             'state_dict': self.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'input_dim': self.input_dim,
+            'embedding_dim': self.embedding_dim,
             'hidden_dim': self.hidden_dim,
-            'output_dim': self.output_dim,
-            'num_steps': self.num_steps
+            'max_nodes': self.max_nodes,
+            'num_layers': self.num_layers
         }
 
     @classmethod
     def from_state(cls, state_dict, device='cpu'):
-        """Creates an SNNPredictor instance from a state dictionary."""
+        """Creates a NodePredictor instance from a state dictionary."""
         predictor = cls(
-            input_dim=state_dict['input_dim'],
+            embedding_dim=state_dict['embedding_dim'],
             hidden_dim=state_dict['hidden_dim'],
-            output_dim=state_dict['output_dim'],
-            num_steps=state_dict['num_steps']
+            max_nodes=state_dict['max_nodes'],
+            num_layers=state_dict.get('num_layers', 1)
         )
         predictor.load_state_dict(state_dict['state_dict'])
         predictor.optimizer.load_state_dict(state_dict['optimizer_state_dict'])

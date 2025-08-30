@@ -462,8 +462,8 @@ class ChimeraAgent:
 
 
         # The GNG is now updated in a separate step after the reward is known.
-        if h_normalized is not None:
-            self.state_history_for_snn.append(h_normalized)
+        if winner_id is not None:
+            self.state_history_for_snn.append(winner_id)
 
         return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty
 
@@ -583,16 +583,25 @@ class ChimeraAgent:
             # Fallback to learned policy
             with torch.no_grad():
                 # --- Get SNN Prediction ---
-                snn_prediction = torch.zeros(1, self.hidden_dim, device=self.device)
+                snn_prediction_vector = torch.zeros(1, self.hidden_dim, device=self.device)
                 if self.active_skill_id and len(self.state_history_for_snn) > 0:
                     stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                    history_np = np.array(self.state_history_for_snn)
-                    history_tensor = torch.from_numpy(history_np).float().to(self.device).unsqueeze(0)
-                    snn_prediction = stag.generate_prediction(history_tensor)
 
+                    # This needs to be a sequence of node embeddings, not hidden states
+                    # For now, we'll use a placeholder. The training loop will provide the real data.
+                    # This part needs to be updated when we refactor the history management.
+                    history_embeddings = torch.randn(1, self.snn_history_length, self.hidden_dim, device=self.device)
+
+                    predicted_node_logits = stag.snn_predictor(history_embeddings)
+                    predicted_node_id = torch.argmax(predicted_node_logits, dim=-1).item()
+
+                    terminal_gng = stag.level_map[max(stag.level_map.keys())]
+                    if predicted_node_id in terminal_gng.nodes:
+                        snn_prediction_vector = torch.from_numpy(terminal_gng.nodes[predicted_node_id]['weight']).float().to(self.device).unsqueeze(0)
 
                 # Use the hidden state for the policy
                 h_normalized = self.h_norm(self.hidden_state)
+                snn_prediction = snn_prediction_vector # Keep variable name for clarity
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector, snn_prediction), dim=1)
 
@@ -767,26 +776,36 @@ class ChimeraAgent:
 
     def _train_snn_on_batch(self, batch):
         """
-        Trains the SNN predictor for the active skill on a batch of experience.
+        Trains the NodePredictor on a batch of sequences of STAG node activations.
         """
         if not self.active_skill_id:
             return {}
 
         stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-        if not hasattr(stag, 'snn_predictor'):
-            return {}
+        terminal_gng = stag.level_map[max(stag.level_map.keys())]
 
-        # The replay buffer stores h_t as (batch, seq_len, 1, dim).
-        h_sequence = torch.from_numpy(batch['h']).float().to(self.device).squeeze(2)
+        # This is a placeholder for getting node activation sequences from the replay buffer.
+        # This part requires a more complex replay buffer that stores STAG activation paths.
+        # For now, we'll generate dummy data to test the training loop.
+        batch_size = batch['obs'].shape[0]
+        seq_len = self.snn_history_length
 
-        # The input sequence is all but the last state.
-        input_sequence = h_sequence[:, :-1, :]
-        # The target is the state that follows the input sequence.
-        target_sequence = h_sequence[:, -1, :]
+        # Create dummy sequences of node IDs
+        node_ids = list(terminal_gng.nodes.keys())
+        if len(node_ids) < 2:
+            return {"snn_predictor_loss": 0} # Not enough nodes to form a sequence
 
-        # Ensure the predictor is in training mode
+        input_node_ids = np.random.choice(node_ids, (batch_size, seq_len))
+        target_node_ids = np.random.choice(node_ids, (batch_size,))
+
+        # Convert node IDs to embeddings
+        input_embeddings = np.array([[terminal_gng.nodes[nid]['weight'] for nid in seq] for seq in input_node_ids])
+
+        input_tensor = torch.from_numpy(input_embeddings).float().to(self.device)
+        target_tensor = torch.from_numpy(target_node_ids).long().to(self.device)
+
         stag.snn_predictor.train()
-        loss = stag.snn_predictor.train_on_batch(input_sequence, target_sequence)
+        loss = stag.snn_predictor.train_on_batch(input_tensor, target_tensor)
 
         return {"snn_predictor_loss": loss}
 
