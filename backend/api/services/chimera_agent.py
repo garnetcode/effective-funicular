@@ -815,6 +815,9 @@ class ChimeraAgent:
 
         batch, indices, weights = self.replay_buffer.sample(batch_size)
 
+        if batch is None:
+            return {} # Not enough data to sample a sequence
+
         # PER-specific logic
         if indices is not None:
             self.update_priorities(indices, weights) # This is a placeholder for actual priority calculation
