@@ -134,7 +134,7 @@ class Command(BaseCommand):
                             serialized_state = redis_client.get('chimera_agent_state:latest')
                             if serialized_state:
                                 state_dict = pickle.loads(serialized_state)
-                                actor_agent.load_state_dict(state_dict)
+                                actor_agent.load_actor_state_dict(state_dict)
                                 last_known_version = current_version
                     except Exception as e:
                         logger.error(f"Error loading agent state from Redis: {e}")
