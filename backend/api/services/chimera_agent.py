@@ -596,11 +596,8 @@ class ChimeraAgent:
 
                     if len(history_embeddings) == self.snn_history_length:
                         history_tensor = torch.from_numpy(history_embeddings).float().to(self.device).unsqueeze(0)
-                        predicted_node_logits = stag.snn_predictor(history_tensor)
-                        predicted_node_id = torch.argmax(predicted_node_logits, dim=-1).item()
-
-                        if predicted_node_id in terminal_gng.nodes:
-                            snn_prediction_vector = torch.from_numpy(terminal_gng.nodes[predicted_node_id]['weight']).float().to(self.device).unsqueeze(0)
+                        # The new predictor returns an embedding directly.
+                        snn_prediction_vector = stag.snn_predictor(history_tensor)
 
                 # Use the hidden state for the policy
                 h_normalized = self.h_norm(self.hidden_state)
@@ -726,12 +723,13 @@ class ChimeraAgent:
         stats['std'] = max(stats['std'], 1e-6)
 
 
-    def record_experience(self, h_t, z_t, activation_path, obs, action, log_prob, reward, next_obs, done):
+    def record_experience(self, h_t, z_t, activation_path, obs, action, log_prob, reward, next_obs, done, winner_id=None):
         """Pushes an experience to the replay buffer and updates subgoal counters."""
         h_t_np = h_t.detach().cpu().numpy()
         z_t_np = z_t.detach().cpu().numpy()
 
-        experience = (h_t_np, z_t_np, activation_path, obs, action, log_prob.item(), reward, next_obs, done, self.current_goal)
+        log_prob_val = log_prob.item() if hasattr(log_prob, 'item') else log_prob
+        experience = (h_t_np, z_t_np, activation_path, obs, action, log_prob_val, reward, next_obs, done, self.current_goal, winner_id)
         self.replay_buffer.push(*experience)
 
         self.subgoal_reward += reward
@@ -780,31 +778,53 @@ class ChimeraAgent:
     def _train_snn_on_batch(self, batch):
         """
         Trains the NodePredictor on a batch of sequences of STAG node activations.
+        This version is robust to pruned nodes from the GNG and uses embedding prediction.
         """
         if not self.active_skill_id:
             return {}
 
         stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+        if not stag.level_map:
+            return {}
         terminal_gng = stag.level_map[max(stag.level_map.keys())]
+        if not terminal_gng.nodes:
+            return {}
 
-        # The replay buffer now returns sequences of winner_ids
-        # Shape: (batch_size, sequence_length)
+        if 'winner_id' not in batch or batch['winner_id'] is None or batch['winner_id'].size == 0:
+            return {}
         winner_id_sequence = batch['winner_id']
 
-        # The input is all but the last winner_id in each sequence
         input_node_ids = winner_id_sequence[:, :-1]
-        # The target is the last winner_id in each sequence
         target_node_ids = winner_id_sequence[:, -1]
 
-        # Convert node IDs to embeddings
-        # This can be slow if we iterate in python. A batch embedding lookup would be better.
-        # For now, this is a functional implementation.
-        input_embeddings = np.array(
-            [[terminal_gng.nodes[nid]['weight'] for nid in seq] for seq in input_node_ids]
-        )
+        sample_weight = next(iter(terminal_gng.nodes.values()))['weight']
+        zero_weight = np.zeros_like(sample_weight)
+
+        input_embeddings_list = []
+        target_embeddings_list = []
+
+        for i, seq in enumerate(input_node_ids):
+            target_nid = target_node_ids[i]
+            if target_nid in terminal_gng.nodes:
+                # Get the embedding for the target node
+                target_embedding = terminal_gng.nodes[target_nid]['weight']
+                target_embeddings_list.append(target_embedding)
+
+                # Get embeddings for the input sequence, handling pruned nodes
+                input_embedding_seq = [
+                    terminal_gng.nodes.get(nid, {'weight': zero_weight})['weight']
+                    for nid in seq
+                ]
+                input_embeddings_list.append(input_embedding_seq)
+
+        if not input_embeddings_list:
+            return {"snn_predictor_loss": 0.0}
+
+        input_embeddings = np.array(input_embeddings_list)
+        target_embeddings = np.array(target_embeddings_list)
 
         input_tensor = torch.from_numpy(input_embeddings).float().to(self.device)
-        target_tensor = torch.from_numpy(target_node_ids).long().to(self.device)
+        target_tensor = torch.from_numpy(target_embeddings).float().to(self.device)
 
         stag.snn_predictor.train()
         loss = stag.snn_predictor.train_on_batch(input_tensor, target_tensor)

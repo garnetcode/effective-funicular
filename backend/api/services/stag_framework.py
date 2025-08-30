@@ -31,11 +31,9 @@ class STAG_Framework:
 
         # --- Node Predictor Component ---
         snn_hidden_dim = kwargs.get('snn_hidden_dim', 128)
-        max_nodes = kwargs.get('gng_max_nodes', 1000) # Default to 1000 if not specified
         self.snn_predictor = NodePredictor(
             embedding_dim=self.dimensions,
-            hidden_dim=snn_hidden_dim,
-            max_nodes=max_nodes
+            hidden_dim=snn_hidden_dim
         )
 
     def _create_tree_node(self, parent_gng_node_id=None):
