@@ -17,3 +17,4 @@ tqdm
 channels
 daphne
 channels_redis
+snntorch
