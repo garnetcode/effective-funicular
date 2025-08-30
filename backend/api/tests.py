@@ -213,7 +213,8 @@ class ChimeraAgentTests(TestCase):
                 0.5,                                  # log_prob
                 1.0,                                  # reward
                 np.random.rand(self.obs_dim),         # next_obs
-                False                                 # done
+                False,                                # done
+                winner_id=None
             )
 
         self.assertEqual(len(self.agent.replay_buffer), sequence_length + 5)
@@ -236,7 +237,8 @@ class ChimeraAgentTests(TestCase):
                 0.5,                                  # log_prob
                 1.0,                                  # reward
                 np.random.rand(self.obs_dim),         # next_obs
-                False                                 # done
+                False,                                # done
+                winner_id=None
             )
             # Train on a new batch
             train_stats = self.agent.train(cortex_id="test_cortex")

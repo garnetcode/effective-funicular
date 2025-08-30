@@ -594,6 +594,7 @@ class ChimeraAgent:
                         [terminal_gng.nodes[nid]['weight'] for nid in history_node_ids if nid in terminal_gng.nodes]
                     )
 
+                    logger.info(f"[SNN-Debug] History length: {len(history_embeddings)}, Required: {self.snn_history_length}")
                     if len(history_embeddings) == self.snn_history_length:
                         history_tensor = torch.from_numpy(history_embeddings).float().to(self.device).unsqueeze(0)
                         # The new predictor returns an embedding directly.
@@ -650,11 +651,11 @@ class ChimeraAgent:
 
         path_tensors = []
         for step in activation_path:
-            level = step.get('level')
-            node_id = step.get('node_id')
-            if level is not None and node_id is not None and \
-               level in stag.level_map and node_id in stag.level_map[level]['gng'].nodes:
-                weight = stag.level_map[level]['gng'].nodes[node_id]['weight']
+            level_id = step.get('level_id')
+            winner_id = step.get('winner_id')
+            if level_id is not None and winner_id is not None and \
+               level_id in stag.level_map and winner_id in stag.level_map[level_id].nodes:
+                weight = stag.level_map[level_id].nodes[winner_id]['weight']
                 path_tensors.append(torch.from_numpy(weight).float().to(self.device))
 
         if not path_tensors:

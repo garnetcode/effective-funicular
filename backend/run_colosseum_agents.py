@@ -140,7 +140,7 @@ async def run_training_curriculum():
 
                 while not done:
                     # Perceive, act, and learn
-                    h_t, z_t, h_normalized, activation_path, novelty = agent.perceive_and_update_state(cortex_id, current_obs)
+                    h_t, z_t, h_normalized, activation_path, novelty, winner_id = agent.perceive_and_update_state(cortex_id, current_obs)
                     action, log_prob, _, _, _ = agent.select_action(actual_action_dim, activation_path)
 
                     await connector.send_action(action)
@@ -156,7 +156,7 @@ async def run_training_curriculum():
                         reward = msg.get("reward")
                         done = msg.get("done")
 
-                        agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done)
+                        agent.record_experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done, winner_id)
                         current_obs = next_obs
                         episode_reward += reward
 
