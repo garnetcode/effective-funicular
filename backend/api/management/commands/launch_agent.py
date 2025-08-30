@@ -181,6 +181,9 @@ class Command(BaseCommand):
                         experience = Experience(h_t, z_t, activation_path, current_obs, action, log_prob, reward, next_obs, done, actor_agent.current_goal)
                         redis_buffer.push(experience)
 
+                        if h_normalized is not None:
+                            actor_agent.update_stag(h_normalized, reward)
+
                         episode_reward += reward
                         current_obs = next_obs
                     elif msg.get("type") == "game.over":
