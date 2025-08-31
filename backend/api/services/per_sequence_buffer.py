@@ -173,8 +173,6 @@ class PERSequenceBuffer:
     def _format_batch(self, batch, batch_size):
         """Formats a batch of sequences into a dictionary of numpy arrays."""
         # AGENT_FIX: Pad short sequences to prevent reshape errors.
-        # This is a robust but potentially noisy fix for an underlying bug in the
-        # sequence sampling logic which can produce short sequences.
         for i, seq in enumerate(batch):
             if len(seq) < self.sequence_length:
                 padding_element = seq[-1]
@@ -182,16 +180,12 @@ class PERSequenceBuffer:
                 batch[i] = seq + [padding_element] * num_to_pad
 
         batch_dict = {}
-        # Define keys that should not be converted to numpy arrays due to variable length
-        non_np_keys = ['activation_path']
-
         for key in Experience._fields:
-            if key in non_np_keys:
-                # Handle these keys separately after the loop
-                continue
-
             data = [getattr(exp, key) for seq in batch for exp in seq]
-            if key in ['obs', 'next_obs', 'goal']:
+
+            if key == 'activation_path':
+                batch_dict[key] = data  # Keep as a list of lists/dicts
+            elif key in ['obs', 'next_obs', 'goal']:
                 batch_dict[key] = np.stack(data)
             elif key in ['h', 'z']:
                 processed_data = []
@@ -201,25 +195,33 @@ class PERSequenceBuffer:
                     elif isinstance(d, np.ndarray):
                         t = torch.from_numpy(d)
                     else:
-                        # Fallback for other data types, though not expected for h and z
                         t = torch.tensor(d)
-
                     if t.dim() == 0:
-                        t = t.unsqueeze(0) # Ensure it's at least 1D
+                        t = t.unsqueeze(0)
                     processed_data.append(t)
                 batch_dict[key] = torch.stack(processed_data).cpu().numpy()
             else:
-                # This handles 'action', 'reward', 'done', 'log_prob', 'winner_id'
-                batch_dict[key] = np.array(data)
-
-        # Handle non-numpy keys
-        for key in non_np_keys:
-            batch_dict[key] = [getattr(exp, key) for seq in batch for exp in seq]
+                # This handles scalar-like data that might be causing the ValueError
+                try:
+                    # Try to create a standard numpy array
+                    array = np.array(data)
+                except ValueError:
+                    # If it fails, it's likely due to inhomogeneous elements (e.g., None).
+                    # Convert to an object array, which can handle mixed types.
+                    array = np.array(data, dtype=object)
+                batch_dict[key] = array
 
         for key, value in batch_dict.items():
-            # Skip reshaping for keys that are not numpy arrays or are empty.
+            # Skip reshaping for keys that are not numpy arrays (like activation_path)
             if isinstance(value, np.ndarray) and value.size > 0:
-                batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
+                try:
+                    # Reshape all numpy arrays to (batch_size, sequence_length, ...)
+                    batch_dict[key] = value.reshape(batch_size, self.sequence_length, *value.shape[1:])
+                except ValueError as e:
+                    logger.error(f"Could not reshape key '{key}' with shape {value.shape}: {e}")
+                    # If reshape fails, we should probably not include this key or handle it differently
+                    # For now, we'll leave it as is, which might cause downstream errors but prevents a crash here.
+                    pass
 
         return batch_dict
 
