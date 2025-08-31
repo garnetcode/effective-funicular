@@ -161,8 +161,6 @@ class ChimeraAgent:
         self.current_goal = np.zeros(self.goal_dim)
         self.action_plan = None
         self.cortex_configs = cortex_configs or {}
-        self.snn_history_length = self.hyperparams.get('snn_history_length', 10)
-        self.state_history_for_snn = deque(maxlen=self.snn_history_length)
 
         # --- Initialize Architecture Components ---
         self.cortexes = _initialize_cortexes(self.cortex_configs, self.embedding_dim, self.device)
@@ -200,17 +198,17 @@ class ChimeraAgent:
 
         # Actor-Critic Planner
         # Actor (Policy Head)
-        # Input includes current state, STAG context, and SNN prediction
+        # Input includes current state and STAG context
         self.action_head = ActionHead(
-            input_dim=self.hidden_dim + self.stag_context_dim + self.hidden_dim,
+            input_dim=self.hidden_dim + self.stag_context_dim,
             n_actions=self.max_action_dim,
             goal_dim=self.goal_dim,
             learning_rate=self.learning_rate
         ).to(self.device)
         # Critic (Value Head)
-        # Input includes current state, latent state, goal, and SNN prediction
+        # Input includes current state, latent state, and goal
         self.value_head = nn.Sequential(
-            nn.Linear(self.hidden_dim + self.latent_dim + self.goal_dim + self.hidden_dim, 400),
+            nn.Linear(self.hidden_dim + self.latent_dim + self.goal_dim, 400),
             nn.ReLU(),
             nn.Linear(400, 1)
         ).to(self.device)
@@ -463,9 +461,6 @@ class ChimeraAgent:
 
 
         # The GNG is now updated in a separate step after the reward is known.
-        if winner_id is not None:
-            self.state_history_for_snn.append(winner_id)
-
         return self.hidden_state, self.latent_state, h_normalized, activation_path, novelty, winner_id
 
     def update_stag(self, h_normalized, r_env):
@@ -507,34 +502,7 @@ class ChimeraAgent:
 
         # --- Predictive and Hierarchical Planning Logic ---
 
-        # 1. SNN-driven Subgoal Setting
-        snn_prediction_vector = torch.zeros(1, self.hidden_dim, device=self.device)
-        if self.active_skill_id and len(self.state_history_for_snn) == self.snn_history_length:
-            stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-            if stag:
-                terminal_gng = stag.level_map.get(max(stag.level_map.keys()))
-                if terminal_gng:
-                    history_node_ids = list(self.state_history_for_snn)
-                    history_embeddings = np.array(
-                        [terminal_gng.nodes[nid]['weight'] for nid in history_node_ids if nid in terminal_gng.nodes]
-                    )
-                    if len(history_embeddings) == self.snn_history_length:
-                        history_tensor = torch.from_numpy(history_embeddings).float().to(self.device).unsqueeze(0)
-                        snn_prediction_vector = stag.snn_predictor(history_tensor)
-
-                        # Use the SNN prediction to find and set a new subgoal
-                        predicted_embedding_np = snn_prediction_vector.detach().cpu().numpy().flatten()
-                        neighbor_ids, _ = self.skill_manager.find_k_nearest_neighbors(
-                            self.active_skill_id, predicted_embedding_np, k=1
-                        )
-                        if neighbor_ids:
-                            predicted_goal_node_id = neighbor_ids[0]
-                            if self.current_subgoal != predicted_goal_node_id:
-                                self.current_subgoal = predicted_goal_node_id
-                                logger.info(f"Actor: New subgoal set from SNN prediction to STAG node {self.current_subgoal}")
-                                self.action_plan = None # Invalidate low-level plan to trigger replanning
-
-        # 2. High-Level Planner (GraphPlanner) - Engages if no subgoal is set
+        # 1. High-Level Planner (GraphPlanner) - Engages if no subgoal is set
         if self.use_planner and (self.current_subgoal is None or self.h_step_counter >= self.h_step_interval):
             self.h_step_counter = 0
             stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
@@ -602,9 +570,8 @@ class ChimeraAgent:
             # Fallback to learned policy
             with torch.no_grad():
                 h_normalized = self.h_norm(self.hidden_state)
-                snn_prediction = snn_prediction_vector # Use the SNN prediction from step 1
                 stag_context_vector = self._prepare_stag_context(activation_path)
-                combined_input = torch.cat((h_normalized, stag_context_vector, snn_prediction), dim=1)
+                combined_input = torch.cat((h_normalized, stag_context_vector), dim=1)
 
                 goal_tensor = torch.from_numpy(self.current_goal).float().to(self.device)
                 goal_tensor_expanded = goal_tensor.unsqueeze(0).expand(combined_input.size(0), -1)
@@ -635,7 +602,7 @@ class ChimeraAgent:
         action_time = time.time() - start_time
         epsilon = self._get_epsilon() if not evaluation_mode else 0.0 # Recalculate for logging
 
-        return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time, action_probs.cpu().numpy(), h_normalized, snn_prediction
+        return action, log_prob, stag_context_vector, decision_maker, epsilon, action_time, action_probs.cpu().numpy(), h_normalized
 
     def _prepare_stag_context(self, activation_path):
         """
@@ -762,76 +729,10 @@ class ChimeraAgent:
             if self.active_skill_id:
                 self.skill_manager.prune_graph(self.active_skill_id, self.gng_min_utility_threshold)
 
-        # --- Part 4: Train the SNN Predictor ---
-        snn_stats = {}
-        snn_train_frequency = self.hyperparams.get('snn_train_frequency', 5)
-        if self.train_steps > self.world_model_pretrain_steps and \
-           self.train_steps % snn_train_frequency == 0:
-            snn_start_time = time.time()
-            snn_stats = self._train_snn_on_batch(batch)
-            timing_stats['snn_train_time_ms'] = (time.time() - snn_start_time) * 1000
-
         # --- Combine stats for logging ---
-        combined_stats = {**world_model_stats, **policy_stats, **snn_stats, **timing_stats}
+        combined_stats = {**world_model_stats, **policy_stats, **timing_stats}
         combined_stats['total_train_time_ms'] = (time.time() - total_start_time) * 1000
         return combined_stats
-
-    def _train_snn_on_batch(self, batch):
-        """
-        Trains the NodePredictor on a batch of sequences of STAG node activations.
-        This version is robust to pruned nodes from the GNG and uses embedding prediction.
-        """
-        if not self.active_skill_id:
-            return {}
-
-        stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-        if not stag.level_map:
-            return {}
-        terminal_gng = stag.level_map[max(stag.level_map.keys())]
-        if not terminal_gng.nodes:
-            return {}
-
-        if 'winner_id' not in batch or batch['winner_id'] is None or batch['winner_id'].size == 0:
-            return {}
-        winner_id_sequence = batch['winner_id']
-
-        input_node_ids = winner_id_sequence[:, :-1]
-        target_node_ids = winner_id_sequence[:, -1]
-
-        sample_weight = next(iter(terminal_gng.nodes.values()))['weight']
-        zero_weight = np.zeros_like(sample_weight)
-
-        input_embeddings_list = []
-        target_embeddings_list = []
-
-        for i, seq in enumerate(input_node_ids):
-            target_nid = target_node_ids[i]
-            if target_nid in terminal_gng.nodes:
-                # Get the embedding for the target node
-                target_embedding = terminal_gng.nodes[target_nid]['weight']
-                target_embeddings_list.append(target_embedding)
-
-                # Get embeddings for the input sequence, handling pruned nodes
-                input_embedding_seq = [
-                    terminal_gng.nodes.get(nid, {'weight': zero_weight})['weight']
-                    for nid in seq
-                ]
-                input_embeddings_list.append(input_embedding_seq)
-
-        if not input_embeddings_list:
-            return {"snn_predictor_loss": 0.0}
-
-        input_embeddings = np.array(input_embeddings_list)
-        target_embeddings = np.array(target_embeddings_list)
-
-        input_tensor = torch.from_numpy(input_embeddings).float().to(self.device)
-        target_tensor = torch.from_numpy(target_embeddings).float().to(self.device)
-
-        stag.snn_predictor.train()
-        loss = stag.snn_predictor.train_on_batch(input_tensor, target_tensor)
-        logger.info(f"[SNN-Training] SNN predictor loss: {loss:.4f}")
-
-        return {"snn_predictor_loss": loss}
 
     def train(self, cortex_id="vector_input"):
         """
@@ -967,8 +868,7 @@ class ChimeraAgent:
         for t in range(horizon):
             norm_h = self.h_norm(h_t)
             stag_context_batch = torch.zeros(batch_size, self.stag_context_dim, device=self.device)
-            snn_pred_batch = torch.zeros(batch_size, self.hidden_dim, device=self.device)
-            action_input = torch.cat([norm_h, stag_context_batch, snn_pred_batch], dim=-1)
+            action_input = torch.cat([norm_h, stag_context_batch], dim=-1)
             action_dist = self.action_head(action_input, goal_sequence)
 
             action = action_dist.sample()
@@ -996,9 +896,8 @@ class ChimeraAgent:
         norm_imagined_z = self.z_norm(imagined_z)
         goal_expanded = goal_sequence.unsqueeze(0).expand(horizon + 1, -1, -1)
 
-        snn_prediction_imagined = torch.zeros(horizon + 1, batch_size, self.hidden_dim, device=self.device)
         imagined_rewards = self.world_models[0].reward_model(torch.cat([norm_imagined_z, norm_imagined_h, goal_expanded], dim=-1)).squeeze(-1)
-        imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded, snn_prediction_imagined], dim=-1)).squeeze(-1)
+        imagined_values = self.value_head(torch.cat([norm_imagined_h, norm_imagined_z, goal_expanded], dim=-1)).squeeze(-1)
 
         lambda_ = self.hyperparams.get('lambda', 0.95)
         returns = torch.zeros_like(imagined_values[-1])
@@ -1018,9 +917,8 @@ class ChimeraAgent:
         goal_bc = goal_sequence.unsqueeze(0).expand(horizon, -1, -1)
         imagined_states_flat = imagined_states.reshape(-1, self.hidden_dim)
         stag_context_bc_flat = stag_context_bc.reshape(-1, self.stag_context_dim)
-        snn_pred_bc_flat = torch.zeros(horizon * batch_size, self.hidden_dim, device=self.device)
         goal_bc_flat = goal_bc.reshape(-1, self.goal_dim)
-        combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat, snn_pred_bc_flat], dim=-1)
+        combined_input_flat = torch.cat([imagined_states_flat, stag_context_bc_flat], dim=-1)
         policy_logits_flat = self.action_head(combined_input_flat, goal_bc_flat).logits
         policy_logits = policy_logits_flat.reshape(horizon, batch_size, -1)
         bc_loss = torch.tensor(0.0, device=self.device)
