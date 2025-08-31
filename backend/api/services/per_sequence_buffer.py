@@ -182,47 +182,39 @@ class PERSequenceBuffer:
                 batch[i] = seq + [padding_element] * num_to_pad
 
         batch_dict = {}
+        # Define keys that should not be converted to numpy arrays due to variable length
+        non_np_keys = ['activation_path']
+
         for key in Experience._fields:
+            if key in non_np_keys:
+                # Handle these keys separately after the loop
+                continue
+
             data = [getattr(exp, key) for seq in batch for exp in seq]
             if key in ['obs', 'next_obs', 'goal']:
-                # These are expected to be numpy arrays and can be stacked.
                 batch_dict[key] = np.stack(data)
             elif key in ['h', 'z']:
-                # These are tensors or numpy arrays.
                 processed_data = []
                 for d in data:
                     if isinstance(d, torch.Tensor):
-                        t = d
+                        t = d.clone().detach()
                     elif isinstance(d, np.ndarray):
-                        # This is the expected path
                         t = torch.from_numpy(d)
-                    elif isinstance(d, (list, tuple)):
-                        # Defensive fallback for nested structures or irregular data.
-                        # This might happen with old data or edge cases.
-                        try:
-                            # Try to convert to a tensor, assuming it's a list of numbers/lists
-                            t = torch.tensor(d)
-                        except (ValueError, TypeError):
-                            # If it fails, stack the elements if they are tensors
-                            items_to_stack = [
-                                item.clone().detach() if isinstance(item, torch.Tensor) else torch.tensor(item)
-                                for item in d
-                            ]
-                            t = torch.stack(items_to_stack)
                     else:
-                        # Final fallback
+                        # Fallback for other data types, though not expected for h and z
                         t = torch.tensor(d)
 
                     if t.dim() == 0:
-                        t = t.reshape(1)
+                        t = t.unsqueeze(0) # Ensure it's at least 1D
                     processed_data.append(t)
-                batch_dict[key] = torch.stack(processed_data).detach().cpu().numpy()
-            elif key == 'activation_path':
-                # This is a list of lists/dicts and is not used in a numeric context.
-                batch_dict[key] = data
+                batch_dict[key] = torch.stack(processed_data).cpu().numpy()
             else:
-                # This handles 'action', 'reward', 'done'.
+                # This handles 'action', 'reward', 'done', 'log_prob', 'winner_id'
                 batch_dict[key] = np.array(data)
+
+        # Handle non-numpy keys
+        for key in non_np_keys:
+            batch_dict[key] = [getattr(exp, key) for seq in batch for exp in seq]
 
         for key, value in batch_dict.items():
             # Skip reshaping for keys that are not numpy arrays or are empty.
