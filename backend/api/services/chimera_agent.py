@@ -505,73 +505,91 @@ class ChimeraAgent:
         h_normalized = torch.zeros(1, self.hidden_dim, device=self.device)
         snn_prediction = torch.zeros(1, self.hidden_dim, device=self.device)
 
-        # --- Hierarchical Planning Logic ---
-        # 1. High-Level Planner (GraphPlanner)
+        # --- Predictive and Hierarchical Planning Logic ---
+
+        # 1. SNN-driven Subgoal Setting
+        snn_prediction_vector = torch.zeros(1, self.hidden_dim, device=self.device)
+        if self.active_skill_id and len(self.state_history_for_snn) == self.snn_history_length:
+            stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
+            if stag:
+                terminal_gng = stag.level_map.get(max(stag.level_map.keys()))
+                if terminal_gng:
+                    history_node_ids = list(self.state_history_for_snn)
+                    history_embeddings = np.array(
+                        [terminal_gng.nodes[nid]['weight'] for nid in history_node_ids if nid in terminal_gng.nodes]
+                    )
+                    if len(history_embeddings) == self.snn_history_length:
+                        history_tensor = torch.from_numpy(history_embeddings).float().to(self.device).unsqueeze(0)
+                        snn_prediction_vector = stag.snn_predictor(history_tensor)
+
+                        # Use the SNN prediction to find and set a new subgoal
+                        predicted_embedding_np = snn_prediction_vector.detach().cpu().numpy().flatten()
+                        neighbor_ids, _ = self.skill_manager.find_k_nearest_neighbors(
+                            self.active_skill_id, predicted_embedding_np, k=1
+                        )
+                        if neighbor_ids:
+                            predicted_goal_node_id = neighbor_ids[0]
+                            if self.current_subgoal != predicted_goal_node_id:
+                                self.current_subgoal = predicted_goal_node_id
+                                logger.info(f"Actor: New subgoal set from SNN prediction to STAG node {self.current_subgoal}")
+                                self.action_plan = None # Invalidate low-level plan to trigger replanning
+
+        # 2. High-Level Planner (GraphPlanner) - Engages if no subgoal is set
         if self.use_planner and (self.current_subgoal is None or self.h_step_counter >= self.h_step_interval):
             self.h_step_counter = 0
             stag_graph = self.skill_manager.get_flattened_structure(self.active_skill_id)
             if self.last_stag_node_id and len(stag_graph['nodes']) > 1:
-                # --- Goal Curriculum Logic ---
                 curriculum_params = self.h_control_params.get('goal_curriculum', {})
                 if curriculum_params.get('enabled', False) and not evaluation_mode:
-                    # Calculate current max distance
                     schedule_steps = curriculum_params.get('schedule_steps', 1)
                     progress = min(1.0, self.train_steps / schedule_steps)
                     start_dist = curriculum_params.get('initial_max_graph_dist', 2)
                     end_dist = curriculum_params.get('max_graph_dist_end', 10)
                     max_dist = int(start_dist + progress * (end_dist - start_dist))
-
-                    # Find reachable goals within the curriculum distance
                     distances = self.graph_planner.bfs_distances(self.last_stag_node_id, stag_graph)
                     possible_goals = [nid for nid, dist in distances.items() if 1 <= dist <= max_dist]
                 else:
-                    # Fallback to original logic if curriculum is disabled or in eval mode
                     possible_goals = [nid for nid in stag_graph['nodes'] if nid != self.last_stag_node_id]
 
                 if possible_goals:
                     goal_node_id = random.choice(possible_goals)
                     self.high_level_plan = self.graph_planner.plan(stag_graph, self.skill_manager.option_models.get(self.active_skill_id, {}), self.last_stag_node_id, goal_node_id)
                     if self.high_level_plan and len(self.high_level_plan) > 1:
-                        self.current_subgoal = self.high_level_plan[1] # Target the next node in the path
+                        self.current_subgoal = self.high_level_plan[1]
                         logger.info(f"H-Planner: New subgoal set to STAG node {self.current_subgoal}")
-                        self.action_plan = None # Invalidate low-level plan
+                        self.action_plan = None
                     else:
-                        self.current_subgoal = None # Plan failed or is trivial
+                        self.current_subgoal = None
 
-        # 2. Mid-Level Planner (LatentPlanner)
+        # 3. Mid-Level Planner (LatentPlanner) - Engages if there's a subgoal but no plan
         if self.use_planner and self.current_subgoal is not None and self.action_plan is None:
             stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-            # This assumes subgoals are in the terminal GNG
-            terminal_gng = stag.level_map[max(stag.level_map.keys())]
-            if self.current_subgoal in terminal_gng.nodes:
-                subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
-                with torch.no_grad():
-                    logger.info(f"M-Planner: Planning trajectory to subgoal {self.current_subgoal}")
-                    plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight=subgoal_weight)
+            if stag:
+                terminal_gng = stag.level_map.get(max(stag.level_map.keys()))
+                if terminal_gng and self.current_subgoal in terminal_gng.nodes:
+                    subgoal_weight = torch.from_numpy(terminal_gng.nodes[self.current_subgoal]['weight']).float().to(self.device)
+                    with torch.no_grad():
+                        logger.info(f"M-Planner: Planning trajectory to subgoal {self.current_subgoal}")
+                        plan = self.planner.plan(self.hidden_state, self.latent_state, subgoal_weight=subgoal_weight)
 
-                if plan is not None and len(plan) > 0:
-                    self.action_plan = plan
-                else:
-                    # Fallback: Planner failed, find a nearby alternative subgoal
-                    logger.warning(f"M-Planner failed for subgoal {self.current_subgoal}. Finding alternative.")
-                    original_subgoal_weight = subgoal_weight.cpu().numpy()
-                    neighbor_ids, _ = self.skill_manager.find_k_nearest_neighbors(self.active_skill_id, original_subgoal_weight, k=5)
-
-                    # Try the next closest neighbor that isn't the one we just failed on
-                    new_subgoal = next((nid for nid in neighbor_ids if nid != self.current_subgoal), None)
-
-                    if new_subgoal:
-                        logger.info(f"Fallback: Setting new subgoal to {new_subgoal}")
-                        self.current_subgoal = new_subgoal
+                    if plan is not None and len(plan) > 0:
+                        self.action_plan = plan
                     else:
-                        logger.warning("Fallback failed, no alternative subgoals found. Clearing subgoal.")
-                        self.current_subgoal = None
-            else:
-                # Fallback: Subgoal not found in GNG
-                logger.warning(f"Subgoal {self.current_subgoal} not found in terminal GNG. Clearing subgoal.")
-                self.current_subgoal = None
+                        logger.warning(f"M-Planner failed for subgoal {self.current_subgoal}. Finding alternative.")
+                        original_subgoal_weight = subgoal_weight.cpu().numpy()
+                        neighbor_ids, _ = self.skill_manager.find_k_nearest_neighbors(self.active_skill_id, original_subgoal_weight, k=5)
+                        new_subgoal = next((nid for nid in neighbor_ids if nid != self.current_subgoal), None)
+                        if new_subgoal:
+                            self.current_subgoal = new_subgoal
+                            logger.info(f"Fallback: Setting new subgoal to {new_subgoal}")
+                        else:
+                            self.current_subgoal = None
+                            logger.warning("Fallback failed, no alternative subgoals found. Clearing subgoal.")
+                else:
+                    logger.warning(f"Subgoal {self.current_subgoal} not found in terminal GNG. Clearing subgoal.")
+                    self.current_subgoal = None
 
-        # 3. Low-Level Execution (Plan Following or Policy)
+        # 4. Low-Level Execution (Plan Following or Policy)
         if self.action_plan is not None and len(self.action_plan) > 0:
             action_continuous = self.action_plan[0]
             action_tensor = torch.argmax(action_continuous, dim=-1)
@@ -583,26 +601,8 @@ class ChimeraAgent:
         else:
             # Fallback to learned policy
             with torch.no_grad():
-                # --- Get SNN Prediction ---
-                snn_prediction_vector = torch.zeros(1, self.hidden_dim, device=self.device)
-                if self.active_skill_id and len(self.state_history_for_snn) == self.snn_history_length:
-                    stag = self.skill_manager._get_or_create_stag(self.active_skill_id)
-                    terminal_gng = stag.level_map[max(stag.level_map.keys())]
-
-                    history_node_ids = list(self.state_history_for_snn)
-                    history_embeddings = np.array(
-                        [terminal_gng.nodes[nid]['weight'] for nid in history_node_ids if nid in terminal_gng.nodes]
-                    )
-
-                    logger.info(f"[SNN-Debug] History length: {len(history_embeddings)}, Required: {self.snn_history_length}")
-                    if len(history_embeddings) == self.snn_history_length:
-                        history_tensor = torch.from_numpy(history_embeddings).float().to(self.device).unsqueeze(0)
-                        # The new predictor returns an embedding directly.
-                        snn_prediction_vector = stag.snn_predictor(history_tensor)
-
-                # Use the hidden state for the policy
                 h_normalized = self.h_norm(self.hidden_state)
-                snn_prediction = snn_prediction_vector
+                snn_prediction = snn_prediction_vector # Use the SNN prediction from step 1
                 stag_context_vector = self._prepare_stag_context(activation_path)
                 combined_input = torch.cat((h_normalized, stag_context_vector, snn_prediction), dim=1)
 
