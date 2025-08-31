@@ -47,18 +47,14 @@ class LatentPlanner(nn.Module):
                         action_t_one_hot = torch.nn.functional.one_hot(action_t_discrete, num_classes=self.action_dim).float()
                         action_t_one_hot = action_t_one_hot.reshape(-1, self.action_dim)
 
-                        transition_model_gru = world_model.rssm.transition_model.gru
-                        fc_latent_prior = world_model.rssm.transition_model.fc_latent_prior
+                        transition_model = world_model.rssm.levels[0].transition_model
+                        fc_prediction = world_model.rssm.levels[0].fc_prediction
 
                         # The GRUCell returns only the next hidden state
-                        h_sim_flat = transition_model_gru(
-                            torch.cat([z_sim_flat, action_t_one_hot], dim=-1), h_sim_flat
-                        )
+                        h_sim_flat = transition_model(torch.cat([z_sim_flat, action_t_one_hot], dim=-1), h_sim_flat)
 
-                        # We use the fc_latent_prior layer to get the next latent state's distribution
-                        latent_prior_params = fc_latent_prior(h_sim_flat)
-                        prior_mean, _ = torch.chunk(latent_prior_params, 2, dim=-1)
-                        z_sim_flat = prior_mean
+                        # We use the fc_prediction layer to get the next latent state
+                        z_sim_flat = fc_prediction(h_sim_flat)
 
 
                         if subgoal_weight is not None:
