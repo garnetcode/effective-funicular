@@ -7,7 +7,6 @@
 import numpy as np
 import logging
 from .gng_engine import GNG_Engine
-from .snn_predictor import NodePredictor
 import torch
 
 logger = logging.getLogger(__name__)
@@ -28,13 +27,6 @@ class STAG_Framework:
 
         # The hierarchy is a tree structure where each node holds a GNG instance.
         self.tree = self._create_tree_node()
-
-        # --- Node Predictor Component ---
-        snn_hidden_dim = kwargs.get('snn_hidden_dim', 128)
-        self.snn_predictor = NodePredictor(
-            embedding_dim=self.dimensions,
-            hidden_dim=snn_hidden_dim
-        )
 
     def _create_tree_node(self, parent_gng_node_id=None):
         """Helper to create a new node in the hierarchy tree."""
@@ -119,8 +111,7 @@ class STAG_Framework:
         """
         structure = {
             '_next_level_id': self._next_level_id,
-            'tree': self._serialize_level(self.tree),
-            'snn_predictor_state': self.snn_predictor.get_state()
+            'tree': self._serialize_level(self.tree)
         }
         return structure
 
@@ -227,10 +218,6 @@ class STAG_Framework:
         # the same TypeError in the GNG_Engine constructor.
         stag.tree = stag._deserialize_level(structure['tree'], init_kwargs)
 
-        # Load the SNN predictor state if it exists
-        if 'snn_predictor_state' in structure:
-            stag.snn_predictor = NodePredictor.from_state(structure['snn_predictor_state'])
-
         return stag
 
     def _deserialize_level(self, level_dict, kwargs):
@@ -260,24 +247,3 @@ class STAG_Framework:
 
         terminal_gng = self.level_map[max(self.level_map.keys())]
         return terminal_gng.find_k_nearest_neighbors(vector, k)
-
-    def generate_prediction(self, history_sequence):
-        """
-        Generates a prediction of the next state using the SNN.
-
-        Args:
-            history_sequence (torch.Tensor): A tensor representing the recent history of states.
-                                             Shape: (batch_size, sequence_length, input_dim)
-
-        Returns:
-            torch.Tensor: The predicted next state vector.
-        """
-        if history_sequence is None or history_sequence.shape[1] == 0:
-            # Fallback or default behavior if no history is available
-            return torch.zeros(1, self.dimensions)
-
-        # Ensure the predictor is in evaluation mode
-        self.snn_predictor.eval()
-        with torch.no_grad():
-            predicted_state = self.snn_predictor(history_sequence)
-        return predicted_state
