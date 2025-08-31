@@ -829,6 +829,7 @@ class ChimeraAgent:
 
         stag.snn_predictor.train()
         loss = stag.snn_predictor.train_on_batch(input_tensor, target_tensor)
+        logger.info(f"[SNN-Training] SNN predictor loss: {loss:.4f}")
 
         return {"snn_predictor_loss": loss}
 
